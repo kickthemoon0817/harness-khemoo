@@ -1,4 +1,4 @@
-# Runbook — worv.env.manure continuum engine harness (mission 2)
+# Runbook — worv.env.manure continuum engine harness (mission 4)
 
 Read by every tick before it does anything. Repo: `MaumAI-Company/isaac_sim`, checkout at
 `/home/khemoo/tmp_workspace/isaac_sim` (TARGET_REPO — never edit it; it is the user's
@@ -7,15 +7,17 @@ engine, contracts, gates). Never modify `master`, `ai/manure`, `feature/*`, `fix
 tick did not create. Harness home:
 `/home/khemoo/tmp_workspace/claude-issue-harness` (state under `state/`).
 
-## Mission (mission 3, 2026-09-06: review fixes — see the Mission 3 block at the end of design.md, which binds over anything below that conflicts)
+## Mission (mission 4, 2026-09-19: roadmap revision 5 — the "Plan of record" block at the top of design.md binds over anything below that conflicts)
 
 Replace the kinematic material model of `worv.env.manure` with a real one: a WoRV-owned MLS-MPM
 continuum solver (Warp kernels, AOT cubins, launched from C++) coupled TWO WAYS to the PhysX loader
 through `omni::physx::IPhysx`, with the landed `HeapField` as the far representation. The binding
 design is `/home/khemoo/tmp_workspace/claude-issue-harness/prompts/design.md` — read it in full
-before claiming; the long form with rationale is
-`~/tmp_workspace/artifacts/manure-mpm-design/manure-mpm-design.html`. Do not re-litigate its
-decisions; record a blocking contradiction on the issue and stop.
+before claiming. The plan of record is roadmap revision 5 (issue #1104); its programme, owner
+decisions and verified reports are under `~/tmp_workspace/artifacts/manure-literature/`. Do not
+re-litigate its decisions, and never build on the five it reverses; record a blocking
+contradiction on the issue and stop. Until owner decision 1 is ruled, only programme items 1–6 are
+worked; an issue that implements item 7 or later is not claimable, whatever its label.
 
 Mission 1 (issues #648–#657, PR #668) is the base: keep its capability claim, wire contracts,
 `HeapField` + mesh, wheel compaction, gate/perf scripts and docs layout; retire the bucket sweep,
@@ -33,13 +35,13 @@ read-only.
   20 Hz, headless simrobot, lights companion): `tools/test/manure_gate.sh` PASS on the reference spec
   (pile 0.7 m³ at 25 % dry matter 2.5 m ahead: after a 2 s drive with the lip at ≤0.16 m, pile volume
   down ≥ 10 %, bucket `carried_m3` ≥ 0.05, coupling force on the bucket link non-zero while cutting)
-  PLUS the new checks the issues add: slab failure of a 0.5 m face, sticking on the back wall until
-  the dump pitch, spill under tilt, ruts after a drive-through, and a slurry push (0.5 m³ at 8 % DM
+  PLUS the new checks the issues add: slab failure of a 0.5 m face, the load staying in the bucket
+  until the dump pitch (under the published wall law, not an adhesion term), spill under tilt, ruts after a drive-through, and a slurry push (0.5 m³ at 8 % DM
   spreads to its yield thickness and flows around the bucket sides). Frames + state documents archived.
-- **M3 — perf gate**: `tools/test/manure_perf_ab.sh` with substep spans: added tick wall p50 ≤ 5 ms,
-  p99 ≤ 8 ms scooping with four reference piles; ≤ 0.3 ms with no active zone; pre-step span
-  ≤ 4 ms at 240 Hz (or the async ratio the spike selected, recorded on the tracking issue);
-  conversion hitch ≤ 20 ms; GPU memory ≤ 512 MB. Numbers in the PR body, JSONL archived.
+- **M3 — perf gate, ONE BAR**: `tools/test/manure_perf_ab.sh` added tick wall p50 ≤ 18 ms, p99 ≤ 28 ms
+  scooping (what `report.py` enforces since PR #1066; 16/26 and 5/8 are retired), p50 ≤ 15 ms idle;
+  pre-step span reported (a 2 ms ceiling is proposed, owner decision 6, pending); conversion hitch
+  ≤ 20 ms; GPU memory ≤ 512 MB. Read once per image (the PERF rails below), JSONL archived.
 - **M4 — no regression**: read-only extensions untouched; existing tool tests pass; kit settings
   parity; the compute contract unchanged (`WORV_GPU_PHYSICS` semantics, `overrideGPUSettings`
   policy, single-scene stepping).
@@ -91,9 +93,10 @@ read-only.
    PR #290's head is fetched locally as `pr/290` (`git show pr/290:extensions/env/worv.env.manure/...`):
    reuse its Dockerfile PhysX header fetch (rework to the pinned-fetch pattern its review asked for),
    its `IPhysx` physics-step subscription, spawn hygiene and Fabric GPU array path. Newton's implicit
-   MPM (github.com/newton-physics/newton, Apache-2.0) is the solver reference; fetch it read-only into
-   the worktree's scratch dir, never vendor it wholesale — port the kernels you need with attribution
-   in the commit message, not in comments.
+   MPM (github.com/newton-physics/newton, Apache-2.0) is a read-only reference for local-solve
+   patterns (its rheology solver's scalar Newton), not a port target: the grid stays explicit. Fetch
+   it into the worktree's scratch dir, never vendor it; attribution goes in the commit message, not in
+   comments.
    Reference implementations to copy patterns from (read, do not import):
    `extensions/env/worv.env.manure_chunks` (capability claim, subscriber, cold-path pxr
    authoring TU, version/changelog layout, doctest ConsoleApp premake project),
@@ -112,7 +115,7 @@ read-only.
    change still needs the step -- but a tick no longer has to remember it. A cubin that EXISTS but was compiled from older kernel sources is the worse trap: the fence passes, the device runs, and any counter whose slot moved reads garbage (two #961 verdicts were this). Before every AOT run `rm -f extensions/env/worv.env.manure/data/*.cubin extensions/env/worv.env.manure/data/*.ptx`, and re-run AOT after ANY merge or edit that touches `kernels/*.py` or `MpmGpuSolver.h`. In a tick compile ONLY the host card's arch: put `WORV_AOT_ARCHS=120` in front of the `aot_compile.py` call inside the printed command's `-lc '...'` string (one cubin in ~1 min instead of three plus PTX in ~3.5 min); the image build compiles the full set itself. The reverse trap is as real: a plugin built before a checkout against cubins built after it dies with `cuMemcpyDtoHAsync: an illegal memory access` and the solver fence refuses the run — rebuild the plugin after EVERY checkout, then AOT. Doctests: run them SHARDED, or a fail-on-head plus fix pair costs two nine-minute runs of `test_manure_spec`: `docker run --rm -v <worktree>:/w:ro --entrypoint bash worv-builder:isaac6 -lc "bash /w/tools/test/run_doctest_sharded.sh /w/extensions/env/worv.env.manure/bin/tests/<binary>"` (defaults to min(nproc, 8) shards, merges the counts into doctest's own summary, and fails if the shards did not between them run every listed case). `tools/dev/iter.sh build --test <ext>` does the build and that run in one command, for EVERY binary the extension declares (both of manure's, one summary line each and one `ext-test gate:` total) with the card fenced off the container, so its device cases skip and are counted as `DEVICE-SKIPS`; `--test --device` gives it the card and is refused unless this tick holds the lease. Add `--fast` (`iter.sh build --test --fast <ext>`, or `--fast` before the binary on the wrapper) to drop doctest's `[slow]` test suite -- the two dry-matter slope-agreement cases that are 72 % of the suite's wall -- for a fail-on-head compile check. SUITE BUDGET per tick: iteration runs `--fast` on the ONE binary the change touches; a fail-on-head check runs only the new case (`-tc=<case name>` on that binary, no shards); the FULL set runs at most ONCE per tick, on the commit you propose to merge, and never before a fix is in hand. Each run names its set in its own summary line. The unsharded single-process form is `docker run --rm -v <worktree>/extensions/env/worv.env.manure:/e:ro --entrypoint bash worv-builder:isaac6 -lc "/e/bin/tests/<binary>"`.
    Python gates: `python3 tools/test/test_extension_version_gate.py`,
    `python3 tools/test/test_kit_settings_parity.py`, `python3 tools/test/test_build_native_checks.py`.
-4. **Verify** — run the target slice the issue names. For a mission-3 review fix the FIRST verification is the new test failing on the unfixed head (check it out, run it, quote the failure), then passing on the fix. Kit-level runs need the resource lease
+4. **Verify** — run the target slice the issue names. For every fix the FIRST verification is the new test failing on the unfixed head (check it out, run it, quote the failure), then passing on the fix. Kit-level runs need the resource lease
    (below) and these steps from the worktree root: `cp /home/khemoo/tmp_workspace/isaac_sim/env/nucleus.env env/`;
    `tools/dev/iter.sh up worv.env.manure worv.robots.catalog <other touched native exts>`;
    `WORV_SIM_ROBOT=s76 WORV_ENVIRONMENT=TestPlane_bigtrimesh_ai414 WORV_KIT_ARGS="--exec /tmp/mg/lights.py" tools/dev/iter.sh kit`
@@ -190,6 +193,10 @@ resource. Any `iter.sh up/kit/topics`, kit session, or perf measurement requires
 ## Rails
 
 - One issue per tick, bounded scope. Never force-push. No AI attribution in commits.
+- REST IS DISPLACEMENT: rest or motion is judged by displacement over a window (≤ 0.1 dx), never by a
+  per-substep speed. `pose_speed_m_s`, max particle speed and moving-particle counts are not evidence
+  of rest or of motion in an issue, a PR or a verdict (measured 2026-09-18: a load read 0.18 m/s while
+  it moved 0.17 mm in 8 s).
 - Only `ai`-labeled issues are ever worked. Never touch unlabeled issues.
 - Never request or assign a PR reviewer.
 - `worv.env.manure_chunks` and `worv.env.ground_cover`/`worv.env.terrain` sources are
