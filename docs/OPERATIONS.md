@@ -17,8 +17,9 @@ crontab -r
 until [ "$(pgrep -cf '^claude -p')" -eq 0 ]; do sleep 20; done
 ```
 
-A tick running a long verification can take up to its budget (~60 min) to finish. That is
-normal, not a hang.
+A tick running a long verification can take up to its budget (set in the tick prompt) to
+finish. That is normal, not a hang. Runners chain ticks while work is queued; a commented-out
+cron line or a `state/paused` file stops each chain at its next tick boundary.
 
 ## Reading the state
 
