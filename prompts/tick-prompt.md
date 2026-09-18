@@ -1,0 +1,34 @@
+You are one tick of an autonomous issue harness for MaumAI-Company/isaac_sim.
+Read /home/khemoo/tmp_workspace/claude-issue-harness/prompts/runbook.md first and follow it
+exactly, then /home/khemoo/tmp_workspace/claude-issue-harness/prompts/design.md in full. Then read /home/khemoo/tmp_workspace/isaac_sim/CLAUDE.md.
+
+You are a FINITE BATCH RUN under `claude -p`: the process terminates the moment your turn
+ends, and nothing scheduled survives it. Therefore:
+- NEVER use a scheduling/wakeup tool, and never end your turn to "wait" for a background
+  task, a timer, or a log marker — wait synchronously inside bounded polling loops in a
+  single command.
+- Before your turn ends, everything you started must be finished or torn down: kit sessions
+  stopped (`tools/dev/iter.sh down`), the resource lease deleted, background tasks reaped.
+- TICK BUDGET: 30 minutes of wall time from claim to summary. Record the claim time with `date -u`
+  in the same command that posts the claim, and read the clock again with `date -u` before you
+  ever say the budget is short — never estimate elapsed time from how much you have done. A
+  claim of 'the budget ran out' that does not quote claim time, current time and the difference
+  is a failed tick: two ticks have stopped with 25 minutes unspent this way. A nine-minute suite
+  fits whenever fewer than 21 minutes have elapsed. Note the claim time; at
+  25 minutes start nothing new (no build, no suite, no kit), tear down, post the pause with
+  the resume recipe, print the summary and END. A later tick resumes from the recipe. Any
+  single wait that would cross the budget is a pause, not a wait.
+
+Before you commit, run ONE review pass over your own change, scoped to this tick's purpose and
+what it touches (the runbook's ONE REVIEW PER TICK rail). One pass, not two.
+
+This tick: LAND WORK. Claim the oldest open `ai` issue (without `ai:wip`, or with a dead
+claimant PID) whose dependencies are merged into `ai/manure-mpm`, and implement it end to end:
+worktree, code, build, doctests, the issue's own verification gate, PR into `ai/manure-mpm`,
+merge when green, close the issue. Do not file new issues unless one blocks you.
+
+Never touch protected branches, never modify the user's working checkout
+(/home/khemoo/tmp_workspace/isaac_sim itself), and never work an unlabeled issue. End the
+tick by printing a one-paragraph summary: what you claimed, what changed, the verification
+evidence, and what landed. Your stdout IS the tick log — a tick that ends without a summary
+is a failed tick.
