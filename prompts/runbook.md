@@ -194,6 +194,18 @@ resource. Any `iter.sh up/kit/topics`, kit session, or perf measurement requires
 ## Rails
 
 - One issue per tick, bounded scope. Never force-push. No AI attribution in commits.
+- DECIDE INSIDE THE PLAN: when a tick meets a choice between technical options that all sit
+  inside the plan of record and the owner's rulings (#1104), it picks one and proceeds. It takes the
+  option that keeps the published law, never loosens a bar, and puts a concept's change in the issue
+  that owns it (depend on that issue rather than duplicate it). It posts the choice and the reason on
+  the issue and keeps going in the same tick. It stops for a ruling only when every option would
+  loosen a bar, or when the choice is an owner decision still open in #1104 comment A2 (decision 11,
+  ρ_max on the convex cap). "Options for the owner" on a technical call is a failed tick.
+- SHARED HOST: up to four ticks share this 16-core host. Every sharded suite run passes 4 workers:
+  `docker run --rm -v <wt>:/w:ro --entrypoint bash worv-builder:isaac6 -lc "bash /w/tools/test/run_doctest_sharded.sh [--fast] /w/extensions/env/worv.env.manure/bin/tests/<binary> 4"`,
+  once per declared binary. Use this form instead of `iter.sh build --test`, which runs 8 workers per
+  binary. Iterate with `-tc=` on the touched cases, and run the full set once, on the merge candidate.
+  A live arm still waits for load1 ≤ 16 under the lease: never start kit on a loaded host.
 - REST IS DISPLACEMENT: rest or motion is judged by displacement over a window (≤ 0.1 dx), never by a
   per-substep speed. `pose_speed_m_s`, max particle speed and moving-particle counts are not evidence
   of rest or of motion in an issue, a PR or a verdict (measured 2026-09-18: a load read 0.18 m/s while
