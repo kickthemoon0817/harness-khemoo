@@ -87,6 +87,7 @@ in-flight ticks finish on their own.
 | `state/locks/` | slot locks, GPU slot leases (`resource.lease`, `resource.lease.2`, …), heartbeat stamp |
 | `state/tick-model` | model priority list, best first |
 | `state/model-cooldown/` | one stamp per model that hit its usage limit |
+| `bin/slow_set.sh` | cron every 3 h: the whole doctest set, `[slow]` included, once per branch head; a red head files one issue naming the merge range |
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
 
 ## Documentation
