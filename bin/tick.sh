@@ -159,12 +159,14 @@ if [ "${1:-}" = "runner" ]; then
             fi
             flags="$(printf '%s' "$CLAUDE_FLAGS" | sed -E 's/--model[= ][^ ]+//') --model $model"
             run_s=$(date +%s)
+            # Only this attempt's output may decide its fate: the log also holds earlier attempts.
+            log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
             "$CLAUDE_BIN" -p "$(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
             rc=$?
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s model=$model" >>"$log"
             if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] \
-                && tail -n 40 "$log" | grep -qE "You've (reached|hit) your [^.]{0,40}limit"; then
+                && tail -c +"$log_from" "$log" | tail -n 40 | grep -qE "You've (reached|hit) your [^.]{0,40}limit"; then
                 mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$model"
                 echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $model hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
                 tried="$tried $model"
