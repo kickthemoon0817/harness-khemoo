@@ -54,10 +54,26 @@ fi
 # Red: one open issue carries every red run; a new head appends a comment.
 green=$(cat "$S/last_green" 2>/dev/null)
 range=${green:+$(git -C "$TARGET_REPO" log --merges --format='- %h %s' "$green..$sha" | head -40)}
-failing=$(cat "$out"/*.txt 2>/dev/null | grep -E 'FAILED|TIMEOUT|ERROR' | sort -u | head -40)
+# Each failing case runs once more alone: one that passes alone is load-sensitive,
+# one that fails alone is a regression, and the issue says which.
+failing=""
+for f in "$out"/*.txt; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f" .txt)
+    cases=$(awk '/^TEST CASE:/{sub(/^TEST CASE: +/,""); c=$0} /ERROR:|FATAL ERROR|TIMEOUT/{if(c!="") print c}' "$f" | sort -u)
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        docker run --rm --runtime=runc -e CUDA_VISIBLE_DEVICES= -e NVIDIA_VISIBLE_DEVICES=void \
+            -v "$SLOW_SET_WORKTREE":/w:ro --entrypoint bash "$BUILDER_IMAGE" \
+            -lc "/w/extensions/env/worv.env.manure/bin/tests/$name -tc=\"$c\"" >"$out/alone.txt" 2>&1 \
+            && verdict="passes alone: load-sensitive" || verdict="fails alone: regression"
+        failing="$failing$name :: $c  [$verdict]\n$(grep -E 'ERROR|values:' "$f" | grep -A1 -F "" | head -4)\n"
+    done <<< "$cases"
+done
+[ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E 'FAILED|TIMEOUT|ERROR' | sort -u | head -40)
 [ "$build_rc" -ne 0 ] && failing="build failed:\n$(tail -30 "$log")"
-body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe whole doctest set, `[slow]` cases included, is red on `%s` at `%s` (`bin/slow_set.sh`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head `%s`:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
-    "$WORK_BRANCH" "$short" "$failing" "${green:0:8}" "${range:-"(no earlier green head recorded)"}" "$out")
+body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe whole doctest set, `[slow]` cases included, is red on `%s` at `%s` (`bin/slow_set.sh`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
+    "$WORK_BRANCH" "$short" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
 open=$(gh issue list --repo "$GH_REPO" --state open --search 'in:title "the [slow] set is red"' --json number -q '.[0].number' 2>/dev/null)
 if [ -n "$open" ]; then
     gh issue comment "$open" --repo "$GH_REPO" --body "$body" >>"$log" 2>&1
