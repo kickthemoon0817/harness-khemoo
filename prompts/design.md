@@ -11,9 +11,12 @@ revision 5 wins and the tick records the contradiction on its issue.
 ## Plan of record: revision 5 (do not re-litigate)
 - Architecture: the height field carries and drives the machine and holds resting material;
   particles exist only where material flows. Full MPM cannot hold one barn heap (2.3–18× the 200k
-  ceiling). This is how Chrono SCM and Servin 2021 / AGX work. OWNER DECISION 1 IS PENDING: until it
-  is ruled, no tick implements programme items 7 onward. Items 1–6 (instruments, rest as
-  displacement, reproducibility floor, fail-on-head fixtures, pricing) are claimable now.
+  ceiling). This is how Chrono SCM and Servin 2021 / AGX work. ADOPTED by the owner on 2026-09-19, together
+  with decision 15 (the published wall law) and decisions 24–25 (StVK-Hencky and the overstress
+  return); the rulings are on #1104. Items 1–12 and 14–16 are claimable. Item 13, the three-arm
+  tool-zone experiment, waits on owner decision 11 (does the driving policy need in-bucket
+  dynamics?): no tick starts it or builds an arm until that is ruled. Sub-decisions inside the
+  adopted items follow #1104 comment A2's recommendations unless the owner overrides them.
 - Five earlier decisions are REVERSED. Never build further on them:
   1. The Newton implicit-MPM port. The grid stays explicit; the constitutive fix is a consistent
      local solve (StVK-Hencky stress and return, a viscoplastic overstress return in place of the

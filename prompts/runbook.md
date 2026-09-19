@@ -16,8 +16,9 @@ design is `/home/khemoo/tmp_workspace/claude-issue-harness/prompts/design.md` �
 before claiming. The plan of record is roadmap revision 5 (issue #1104); its programme, owner
 decisions and verified reports are under `~/tmp_workspace/artifacts/manure-literature/`. Do not
 re-litigate its decisions, and never build on the five it reverses; record a blocking
-contradiction on the issue and stop. Until owner decision 1 is ruled, only programme items 1–6 are
-worked; an issue that implements item 7 or later is not claimable, whatever its label.
+contradiction on the issue and stop. Owner decisions 1, 15 and 24–25 are ruled (2026-09-19, on #1104):
+items 1–12 and 14–16 may be worked. Item 13 (the three-arm tool-zone experiment) waits on
+decision 11; an issue that implements it is not claimable, whatever its label.
 
 Mission 1 (issues #648–#657, PR #668) is the base: keep its capability claim, wire contracts,
 `HeapField` + mesh, wheel compaction, gate/perf scripts and docs layout; retire the bucket sweep,
