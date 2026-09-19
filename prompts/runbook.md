@@ -49,6 +49,8 @@ read-only.
 
 ## Priority — fix, don't accumulate findings
 
+- An open `ai` issue whose body begins `Operator: **take this before any other claimable issue.**`
+  is claimed before everything else below, oldest such first.
 - Claim the OLDEST open `ai` issue without `ai:wip` whose `Depends on:` issues are all
   closed (their PRs merged into `ai/manure-mpm`). If the oldest is blocked by dependencies, take
   the next one that is not. Prefer resuming a released claim (issue with `ai:wip` whose
