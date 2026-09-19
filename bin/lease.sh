@@ -7,10 +7,14 @@
 # container or a ROS graph:
 #   slot 1: state/locks/resource.lease    container worv-iter    domain 77
 #   slot K: state/locks/resource.lease.K  container worv-iter-K  domain 76+K
+# Kits booting together against one shader and cooking cache stall on it, so
+# slot K>1 binds its own cache root /tmp/isaac-sim/cache-slotK, seeded once
+# from slot 1's warm cache on the first acquire that finds it missing.
 #
 #   lease.sh acquire <issue> [domain]
 #       -> ACQUIRED slot=K file=<lease> container=<name> domain=<id>
 #          export MANURE_GATE_LEASE_FILE=<lease> WORV_ITER_CONTAINER=<name> ROS_DOMAIN_ID=<id>
+#                 [WORV_ITER_CACHE_ROOT=<root>]   (slots 2+ only)
 #          or BUSY <holders>; exit 0/1. A stated domain applies to slot 1 only.
 #       Run every iter.sh, gate and kit command of the tick under that export line.
 #   lease.sh release <issue>   -> drops the slot this tick's pid holds
@@ -22,6 +26,20 @@ LOCKS="$H/state/locks"; K="$LOCKS/resource.lock"; G=/tmp/isaac-cppmig-gpu-runtim
 pid=$("$H/bin/tick-pid.sh" 2>/dev/null || echo "$PPID")
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
+CACHE_BASE=/tmp/isaac-sim
+SEED_IMAGE="${WORV_BUILDER_IMAGE:-worv-builder:isaac6}"
+slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
+# The caches are root-owned (docker creates the bind sources), so the copy runs
+# in a container. A partial copy is staged under .seeding and renamed, so a
+# killed seed is retried rather than taken for a warm root.
+seed_cache() {
+  local root="$1" name
+  [ -d "$root" ] && return 0
+  name=$(basename "$root")
+  docker run --rm --runtime=runc -v "$CACHE_BASE":/c --entrypoint bash "$SEED_IMAGE" -lc \
+    "rm -rf /c/$name.seeding && mkdir -p /c/cache/kit /c/cache/ov /c/cache/glcache /c/cache/computecache \
+     && cp -a /c/cache /c/$name.seeding && mv /c/$name.seeding /c/$name" >&2
+}
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
@@ -45,9 +63,13 @@ case "${1:-}" in
     fi
     f=$(slot_file $held); c=$(slot_container $held)
     if [ "$held" -eq 1 ] && [ -n "$stated" ]; then d=$stated; else d=$(( 76 + held )); fi
+    cr=$(slot_cache $held)
+    if [ -n "$cr" ] && ! seed_cache "$cr"; then
+      echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
+    fi
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d" > "$f"
-    echo "ACQUIRED slot=$held file=$f container=$c domain=$d"
-    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d"
+    echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
+    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
     ;;
   release)
     exec 8>"$K"; flock 8
