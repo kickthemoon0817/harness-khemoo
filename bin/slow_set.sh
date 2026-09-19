@@ -60,12 +60,16 @@ failing=""
 for f in "$out"/*.txt; do
     [ -e "$f" ] || continue
     name=$(basename "$f" .txt)
+    [[ "$name" =~ ^test_[A-Za-z0-9_]+$ ]] || continue
     cases=$(awk '/^TEST CASE:/{sub(/^TEST CASE: +/,""); c=$0} /ERROR:|FATAL ERROR|TIMEOUT/{if(c!="") print c}' "$f" | sort -u)
     while IFS= read -r c; do
         [ -n "$c" ] || continue
+        [[ "$c" =~ [[:cntrl:]] ]] && continue
+        # The case name is an argument, never shell text: a name is test output.
         docker run --rm --runtime=runc -e CUDA_VISIBLE_DEVICES= -e NVIDIA_VISIBLE_DEVICES=void \
-            -v "$SLOW_SET_WORKTREE":/w:ro --entrypoint bash "$BUILDER_IMAGE" \
-            -lc "/w/extensions/env/worv.env.manure/bin/tests/$name -tc=\"$c\"" >"$out/alone.txt" 2>&1 \
+            -v "$SLOW_SET_WORKTREE":/w:ro \
+            --entrypoint "/w/extensions/env/worv.env.manure/bin/tests/$name" "$BUILDER_IMAGE" \
+            "-tc=$c" >"$out/alone.txt" 2>&1 \
             && verdict="passes alone: load-sensitive" || verdict="fails alone: regression"
         failing="$failing$name :: $c  [$verdict]\n$(grep -E 'ERROR|values:' "$f" | grep -A1 -F "" | head -4)\n"
     done <<< "$cases"
