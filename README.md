@@ -27,8 +27,8 @@ queue. Most firings cost nothing and log nothing.
 **Slots.** Concurrency is bounded by `flock`ed slot files. A runner that cannot take a slot
 exits quietly, so spawning is racy-safe by construction.
 
-**Allocator.** The worse of your 5-hour and weekly utilization maps to a cap:
-`<55%: MAX_SLOTS`, `<70%: 6`, `<80%: 4`, `<85%: 3`, `<90%: 2`, `<95%: 1`, else `0`. With no
+**Allocator.** The worse of your 5-hour and weekly utilization maps to a cap: `MAX_SLOTS` below
+`USAGE_FULL_BELOW` (90 %), half of it below 95 %, one below 98 %, else `0`. With no
 usage data it runs capped at 3 rather than blind at full width. Decisions are appended to
 `state/logs/allocator.log`.
 
@@ -84,7 +84,7 @@ in-flight ticks finish on their own.
 | `prompts/runbook.md` | the rules ticks follow — mission, procedure, rails |
 | `prompts/tick-prompt.md` | what a single tick is told to do |
 | `state/logs/` | one log per tick, plus `allocator.log` |
-| `state/locks/` | slot locks, resource lease, heartbeat stamp |
+| `state/locks/` | slot locks, GPU slot leases (`resource.lease`, `resource.lease.2`, …), heartbeat stamp |
 | `state/tick-model` | model priority list, best first |
 | `state/model-cooldown/` | one stamp per model that hit its usage limit |
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |

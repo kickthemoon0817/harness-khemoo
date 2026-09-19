@@ -130,9 +130,9 @@ read-only.
    Boot to `scene bootstrap complete` takes ~40 s on TestPlane; poll the log in bounded loops.
    Domain: `iter.sh up|kit|topics` pin `ROS_DOMAIN_ID` (derived from the container name when
    unset, never 0), and `manure_gate.sh`, `manure_perf_ab.sh` and `manure_teardown_gate.sh` REFUSE
-   a run whose `ROS_DOMAIN_ID` is unset or 0 — export one (e.g. `export ROS_DOMAIN_ID=77`) for the
-   whole session, name it on `lease.sh acquire <issue> <domain>`, and use the same one for every
-   `iter.sh` and gate command of that run.
+   a run whose `ROS_DOMAIN_ID` is unset or 0. The domain comes from the GPU slot: `lease.sh acquire
+   <issue>` prints an `export MANURE_GATE_LEASE_FILE=… WORV_ITER_CONTAINER=… ROS_DOMAIN_ID=…` line,
+   and every `iter.sh`, gate and kit command of that run is prefixed with it.
    Known traps: the baked image ships `worv.comm.base` 0.10.0 against the repo's 0.11.0 — a worktree
    that mounts only `worv.env.manure` gets a NULL comm, never logs `manure: subscribed`, and the gate dies
    at the subscriber wait with nothing in the log (four ticks lost a run to this). ALWAYS
@@ -171,22 +171,30 @@ read-only.
 7. **Done condition** — when every issue is closed and the integration PR is open with M1–M4
    evidence, refresh the tracking issue checklist and end the tick with no changes.
 
-## Resource lease — one GPU, one warm container
+## GPU slots — up to three kit sessions share the card
 
-The warm `worv-iter` container, the `worv-iter-ros2cli` sidecar and the GPU are ONE serialized
-resource. Any `iter.sh up/kit/topics`, kit session, or perf measurement requires the lease:
+The card takes up to three kit sessions at once. Each GPU slot is its own lease file, warm container,
+`-ros2cli` sidecar and DDS domain (slot 1: `resource.lease`, `worv-iter`, 77; slot 2:
+`resource.lease.2`, `worv-iter-2`, 78; slot 3: `resource.lease.3`, `worv-iter-3`, 79). Any
+`iter.sh up/kit/topics`, kit session, device doctest run or perf measurement requires a slot:
 
-- Take, check and drop the lease ONLY through
-  `/home/khemoo/tmp_workspace/claude-issue-harness/bin/lease.sh acquire <issue#>` (prints ACQUIRED, or
-  BUSY with the live holder and exits 1), `lease.sh release`, `lease.sh status`. It takes both flocks,
-  refuses a live holder, computes the tick PID itself, and only lets the holder release. A bare write to
-  `resource.lease` is a bug: it has twice clobbered a sibling's live session and once killed its kit.
-- Before treating the resource as busy, read the lease and `kill -0` its PID. A dead owner
-  is orphaned: `docker exec worv-iter pkill -f "^/isaac-sim/kit/kit"` (ignore errors),
-  overwrite the lease, proceed. Never wait on a dead owner; never wait more than 20 min on a
-  live one — prefer a claimable issue that needs no GPU.
-- Preflight before evidence runs: `nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader`
-  must show no other kit process; if it does, the GPU is contended — do not measure.
+- Take, check and drop a slot ONLY through
+  `/home/khemoo/tmp_workspace/claude-issue-harness/bin/lease.sh acquire <issue#>`. It prints
+  `ACQUIRED slot=K …` and an `export …` line, or BUSY with every holder and exits 1.
+  `lease.sh release <issue#>` and `lease.sh status` complete the set. It takes the flocks, refuses a
+  live holder, computes the tick PID itself, and only lets the holder release. A bare write to a lease
+  file is a bug: it has twice clobbered a sibling's live session and once killed its kit.
+- Run EVERY `iter.sh`, `manure_gate.sh`, `manure_teardown_gate.sh` and device doctest command of the
+  tick with the printed export line in front, so the tick uses its own container, domain and lease
+  file. `worv-iter` is slot 1's container, not everyone's. Never `iter.sh down` or `pkill` inside
+  another slot's container.
+- A dead slot holder is orphaned: stop its kit with
+  `docker exec <its container> pkill -f "^/isaac-sim/kit/kit"` (ignore errors), then acquire, which
+  takes the orphaned slot. When every slot is live, prefer a claimable issue that needs no GPU; never
+  wait more than 20 min.
+- Physics verdicts share the card. The perf A/B reading does NOT: it takes the card alone. Its own
+  GPU fence refuses an arm that another kit touched, so run it only when `lease.sh status` shows every
+  other slot free, and hold all three slots for its duration.
 - `tools/dev/iter.sh down` and delete the lease when your session ends. Cap any kit session at
   15 minutes (a bowl burst is 8; a gate draw is 10). Write your tick summary to stdout BEFORE starting a kit session and append
   after it.
@@ -201,11 +209,10 @@ resource. Any `iter.sh up/kit/topics`, kit session, or perf measurement requires
   the issue and keeps going in the same tick. It stops for a ruling only when every option would
   loosen a bar, or when the choice is an owner decision still open in #1104 comment A2 (decision 11,
   ρ_max on the convex cap). "Options for the owner" on a technical call is a failed tick.
-- SHARED HOST: up to four ticks share this 16-core host. Every sharded suite run passes 4 workers:
-  `docker run --rm -v <wt>:/w:ro --entrypoint bash worv-builder:isaac6 -lc "bash /w/tools/test/run_doctest_sharded.sh [--fast] /w/extensions/env/worv.env.manure/bin/tests/<binary> 4"`,
-  once per declared binary. Use this form instead of `iter.sh build --test`, which runs 8 workers per
-  binary. Iterate with `-tc=` on the touched cases, and run the full set once, on the merge candidate.
-  A live arm still waits for load1 ≤ 16 under the lease: never start kit on a loaded host.
+- USE THE HOST: the operator wants the CPU and the card used to the full. Suites, builds and AOT
+  run at full width, and a physics draw never waits on host load. Only the perf A/B reading has a load
+  bound, and it runs alone (GPU slots below). Iterate with `-tc=` on the touched cases, and run the
+  full set once, on the merge candidate.
 - REST IS DISPLACEMENT: rest or motion is judged by displacement over a window (≤ 0.1 dx), never by a
   per-substep speed. `pose_speed_m_s`, max particle speed and moving-particle counts are not evidence
   of rest or of motion in an issue, a PR or a verdict (measured 2026-09-18: a load read 0.18 m/s while

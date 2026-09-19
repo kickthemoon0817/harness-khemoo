@@ -57,12 +57,10 @@ compute_allowed() {
     fi
     if [ -n "$five" ] && [ -n "$week" ]; then
         pct=$(( five > week ? five : week ))
-        if   [ "$pct" -lt 55 ]; then allowed=$MAX_SLOTS
-        elif [ "$pct" -lt 70 ]; then allowed=6
-        elif [ "$pct" -lt 80 ]; then allowed=4
-        elif [ "$pct" -lt 85 ]; then allowed=3
-        elif [ "$pct" -lt 90 ]; then allowed=2
-        elif [ "$pct" -lt 95 ]; then allowed=1
+        # Full width until USAGE_FULL_BELOW (90 %), then half, then one; none past 98 %.
+        if   [ "$pct" -lt "${USAGE_FULL_BELOW:-90}" ]; then allowed=$MAX_SLOTS
+        elif [ "$pct" -lt 95 ]; then allowed=$(( (MAX_SLOTS + 1) / 2 ))
+        elif [ "$pct" -lt 98 ]; then allowed=1
         else allowed=0
         fi
         [ "$allowed" -gt "$MAX_SLOTS" ] && allowed=$MAX_SLOTS
