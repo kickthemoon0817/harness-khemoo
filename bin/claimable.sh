@@ -5,9 +5,10 @@ set -u
 : "${GH_REPO:?}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"
 json=$(gh issue list --repo "$GH_REPO" --label "$ISSUE_LABEL" --state open --limit 100 \
     --json number,body,labels 2>/dev/null) || { echo 1; exit 0; }
-python3 - "$json" "$WIP_LABEL" "$GH_REPO" <<'PY'
+# The issue list is piped, never passed as argv: forty issue bodies exceed ARG_MAX.
+printf '%s' "$json" | python3 - "$WIP_LABEL" "$GH_REPO" <<'PY'
 import json, os, re, subprocess, sys
-issues = json.loads(sys.argv[1]); wip = sys.argv[2]; repo = sys.argv[3]
+issues = json.load(sys.stdin); wip = sys.argv[1]; repo = sys.argv[2]
 open_nums = {i["number"] for i in issues}
 def closed(n):
     if n in open_nums: return False
