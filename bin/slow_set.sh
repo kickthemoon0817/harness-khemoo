@@ -85,6 +85,6 @@ open=$(gh issue list --repo "$GH_REPO" --state open --search "in:title \"the $se
 if [ -n "$open" ]; then
     gh issue comment "$open" --repo "$GH_REPO" --body "$body" >>"$log" 2>&1
 else
-    gh issue create --repo "$GH_REPO" --label ai --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" >>"$log" 2>&1
+    gh issue create --repo "$GH_REPO" --label ai --label ai:plan --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" >>"$log" 2>&1
 fi
 echo "RED $sha" >>"$log"

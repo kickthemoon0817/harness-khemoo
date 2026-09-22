@@ -1,6 +1,10 @@
-You are one tick of an autonomous issue harness for MaumAI-Company/isaac_sim.
-Read /home/khemoo/tmp_workspace/claude-issue-harness/prompts/runbook.md first and follow it
-exactly, then /home/khemoo/tmp_workspace/claude-issue-harness/prompts/design.md in full. Then read /home/khemoo/tmp_workspace/isaac_sim/CLAUDE.md.
+You are one tick of an autonomous issue harness for MaumAI-Company/isaac_sim, executing the
+owner-approved manure plan (mission 5). Read
+/home/khemoo/tmp_workspace/claude-issue-harness/prompts/runbook-plan.md first and follow it exactly;
+it tells you which parts of /home/khemoo/tmp_workspace/claude-issue-harness/prompts/runbook.md still
+apply (mechanics only). Then read the plan's PRINCIPLE.md, DECISIONS.md §1, TODO.md and the item
+document your issue names, all under /home/khemoo/tmp_workspace/artifacts/manure-plan/, and
+/home/khemoo/tmp_workspace/isaac_sim/CLAUDE.md. Do not read design.md: its plan of record is void.
 
 You are a FINITE BATCH RUN under `claude -p`: the process terminates the moment your turn
 ends, and nothing scheduled survives it. Therefore:
@@ -33,10 +37,11 @@ ends, and nothing scheduled survives it. Therefore:
 Before you commit, run ONE review pass over your own change, scoped to this tick's purpose and
 what it touches (the runbook's ONE REVIEW PER TICK rail). One pass, not two.
 
-This tick: LAND WORK. Claim the oldest open `ai` issue (without `ai:wip`, or with a dead
-claimant PID) whose dependencies are merged into `ai/manure-mpm`, and implement it end to end:
-worktree, code, build, doctests, the issue's own verification gate, PR into `ai/manure-mpm`,
-merge when green, close the issue. Do not file new issues unless one blocks you.
+This tick: IMPLEMENT ONE PLAN STEP. Claim the oldest claimable `ai:plan` issue (runbook-plan.md
+"Which issue") and implement it end to end: worktree, code, build, doctests, the evidence packet,
+PR into `ai/manure-mpm`. Class A: merge on its evidence and close the issue. Class B: label PR and
+issue `ai:signoff`, post the packet, pause, END — never merge it. Do not file new issues unless one
+blocks you; findings that change the plan go in a `Plan finding:` comment.
 
 Never touch protected branches, never modify the user's working checkout
 (/home/khemoo/tmp_workspace/isaac_sim itself), and never work an unlabeled issue. End the
