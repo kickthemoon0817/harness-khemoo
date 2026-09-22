@@ -95,7 +95,7 @@ compute_want() {
 
 # Model priority, best first: state/tick-model (whitespace-separated) overrides
 # TICK_MODELS. A model that hit its usage limit is skipped until its cooldown passes.
-: "${TICK_MODELS:=claude-fable-5-1 claude-opus-5}"
+: "${TICK_MODELS:=claude-opus-5}"
 : "${MODEL_COOLDOWN_S:=1800}"
 MODEL_COOL="$HARNESS_STATE/model-cooldown"
 model_list() {
