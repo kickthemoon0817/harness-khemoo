@@ -5,6 +5,8 @@
 # run files (or updates) one issue naming the failing cases and the merges since
 # the last green head. Scheduled from cron; one run at a time.
 set -u
+# `slow_set.sh fast` reads the fast set (the [slow] suite left out) with its own state.
+mode="${1:-full}"
 HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=/dev/null
 [ -r "$HARNESS_HOME/config/harness.env" ] && . "$HARNESS_HOME/config/harness.env"
@@ -14,8 +16,9 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${SLOW_SET_WORKTREE:=$(dirname "$TARGET_REPO")/ai-worktrees/slowset}"
 : "${BUILDER_IMAGE:=worv-builder:isaac6}"
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
-S="$HARNESS_STATE/slow-set"; mkdir -p "$S/logs" "$HARNESS_STATE/locks"
-exec 7>"$HARNESS_STATE/locks/slowset.lock"; flock -n 7 || exit 0
+if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set_name="fast set"; lock="fastset"; else S="$HARNESS_STATE/slow-set"; fast_flag=""; set_name="whole doctest set, \`[slow]\` cases included"; lock="slowset"; fi
+mkdir -p "$S/logs" "$HARNESS_STATE/locks"
+exec 7>"$HARNESS_STATE/locks/$lock.lock"; flock -n 7 || exit 0
 [ -e "$HARNESS_STATE/paused" ] && exit 0
 
 git -C "$TARGET_REPO" fetch -q origin "$WORK_BRANCH" || exit 1
@@ -41,7 +44,7 @@ if [ "$build_rc" -eq 0 ]; then
         docker run --rm --runtime=runc -e CUDA_VISIBLE_DEVICES= -e NVIDIA_VISIBLE_DEVICES=void \
             -e DOCTEST_SHARD_DIR=/out/$name -v "$SLOW_SET_WORKTREE":/w:ro -v "$out":/out \
             --entrypoint bash "$BUILDER_IMAGE" \
-            -lc "mkdir -p /out/$name && bash /w/tools/test/run_doctest_sharded.sh /w/extensions/env/worv.env.manure/bin/tests/$name" \
+            -lc "mkdir -p /out/$name && bash /w/tools/test/run_doctest_sharded.sh $fast_flag /w/extensions/env/worv.env.manure/bin/tests/$name" \
             >"$out/$name.txt" 2>&1
         r=$?; echo "$name exit=$r" >>"$log"; [ "$r" -ne 0 ] && rc=$r
     done
@@ -76,12 +79,12 @@ for f in "$out"/*.txt; do
 done
 [ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E 'FAILED|TIMEOUT|ERROR' | sort -u | head -40)
 [ "$build_rc" -ne 0 ] && failing="build failed:\n$(tail -30 "$log")"
-body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe whole doctest set, `[slow]` cases included, is red on `%s` at `%s` (`bin/slow_set.sh`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
-    "$WORK_BRANCH" "$short" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
-open=$(gh issue list --repo "$GH_REPO" --state open --search 'in:title "the [slow] set is red"' --json number -q '.[0].number' 2>/dev/null)
+body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe %s is red on `%s` at `%s` (`bin/slow_set.sh %s`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
+    "$set_name" "$WORK_BRANCH" "$short" "$mode" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
+open=$(gh issue list --repo "$GH_REPO" --state open --search "in:title \"the $set_name is red\"" --json number -q '.[0].number' 2>/dev/null)
 if [ -n "$open" ]; then
     gh issue comment "$open" --repo "$GH_REPO" --body "$body" >>"$log" 2>&1
 else
-    gh issue create --repo "$GH_REPO" --label ai --title "test: the [slow] set is red on $WORK_BRANCH" --body "$body" >>"$log" 2>&1
+    gh issue create --repo "$GH_REPO" --label ai --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" >>"$log" 2>&1
 fi
 echo "RED $sha" >>"$log"
