@@ -79,7 +79,9 @@ overridden below.
 9. **Names.** Review scenarios are RS1–RS7; tasks are S1–S3 (owner decision D9).
 10. **PhysX only** (owner decision D10): no Newton backend work. Newton appears only in Probe B,
     standalone, outside Kit.
-11. **Never touch** the Nucleus server 10.50.2.21, the owner's own Isaac Sim or GUI sessions, the
+11. **Never write to, reconfigure or restart** the Nucleus server 10.50.2.21, and never change an
+    asset on it. Reading is what every run does, so a read-only stage open for evidence is fine.
+    **Never touch** the owner's own Isaac Sim or GUI sessions, the
     operator's working checkout, `master`, or a PR you did not open (runbook.md's resume exception
     stands). No AI attribution in commits or PR bodies; conventional commits without parentheses;
     never force-push.
