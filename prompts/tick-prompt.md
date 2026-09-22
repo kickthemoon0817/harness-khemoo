@@ -9,9 +9,9 @@ ends, and nothing scheduled survives it. Therefore:
   single command.
 - Before your turn ends, everything you started must be finished or torn down: kit sessions
   stopped (`tools/dev/iter.sh down`), the resource lease deleted, background tasks reaped.
-- TICK BUDGET: 45 minutes of wall time from claim to summary, or 120 minutes when the claimed
+- TICK BUDGET: 120 minutes of wall time from claim to summary, or 120 minutes when the claimed
   issue carries the `ai:long` label. Read the issue's labels in the same command that posts the
-  claim, and state the budget in the claim comment ("budget 45 min" / "budget 120 min, ai:long").
+  claim, and state the budget in the claim comment ("budget 120 min" / "budget 120 min, ai:long").
   `ai:long` is the operator's to set: a tick never adds or removes it on any issue. Record the
   claim time with `date -u` in that same command, and read the clock again with `date -u` before
   you ever say the budget is short — never estimate elapsed time from how much you have done. A
