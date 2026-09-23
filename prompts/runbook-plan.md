@@ -12,8 +12,8 @@ including `runbook.md` and `design.md` where they conflict.
 4. The repository's `CLAUDE.md` hard rules.
 5. `runbook.md` — for the **mechanics only**, as listed below.
 
-The plan's working copy is `/home/khemoo/tmp_workspace/artifacts/manure-plan/`
-(the same text is on PR #1318 under `docs/manure-plan/`). Read it there.
+The plan's working copy is `/home/khemoo/tmp_workspace/artifacts/manure-plan/`. The same text is in the
+repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read it there.
 
 ## Which issue
 
@@ -99,6 +99,16 @@ overridden below.
     operator's working checkout, `master`, or a PR you did not open (runbook.md's resume exception
     stands). No AI attribution in commits or PR bodies; conventional commits without parentheses;
     never force-push.
+
+13. **A run counts only once its boot is proven.** Before quoting any number from a kit run, check its
+    `kit.log`:
+    - it must contain `scene bootstrap complete`;
+    - it must contain neither `bootstrap FAILED` nor `lockstep invalidated`;
+    - it must show the robot actually moving.
+    **A kit that mounts the branch's `worv.robots.catalog` must also mount the branch's
+    `worv.robots.locomotion` and `worv.robots.attachments` builds.** The baked image's locomotion rejects
+    `[drive].wheel_odom_hz`, and the robot never boots. That is how #1367's first traces were all invalid.
+    A run that fails this check is named as failed in the packet, never used.
 
 ## Done
 
