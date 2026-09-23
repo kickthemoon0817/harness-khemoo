@@ -92,6 +92,9 @@ overridden below.
     standalone, outside Kit.
 12. **Never write to, reconfigure or restart** the Nucleus server 10.50.2.21, and never change an
     asset on it. Reading is what every run does, so a read-only stage open for evidence is fine.
+    **Robot asset tests run on copies** in `omniverse://10.50.1.117/Users/sungminkim/` (owner,
+    2026-09-24): copy the USD from 10.50.2.21, edit and load only the copy, and never commit a catalog
+    URL that points into that directory. Promoting a tested asset is the owner's job.
     **Never touch** the owner's own Isaac Sim or GUI sessions, the
     operator's working checkout, `master`, or a PR you did not open (runbook.md's resume exception
     stands). No AI attribution in commits or PR bodies; conventional commits without parentheses;
