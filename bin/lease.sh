@@ -17,13 +17,33 @@
 #                 [WORV_ITER_CACHE_ROOT=<root>]   (slots 2+ only)
 #          or BUSY <holders>; exit 0/1. A stated domain applies to slot 1 only.
 #       Run every iter.sh, gate and kit command of the tick under that export line.
-#   lease.sh release <issue>   -> drops the slot this tick's pid holds
+#   lease.sh acquire <issue> --all
+#       -> the whole card, for a capture that cannot share it (a baseline). Each call reserves every
+#          free slot for this tick, so siblings cannot take a slot it is waiting on, and prints
+#          RESERVING held=<n>/<N> <holders> (exit 1) until the last sibling releases; then ACQUIRED
+#          and the export line of the slot it runs in (the one it already held, else slot 1).
+#   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
 LOCKS="$H/state/locks"; K="$LOCKS/resource.lock"; G=/tmp/isaac-cppmig-gpu-runtime.lock
-pid=$("$H/bin/tick-pid.sh" 2>/dev/null || echo "$PPID")
+# Explicit task wrappers must be live ancestors, never arbitrary lease claimants.
+if [[ -n "${CODEX_TASK_WRAPPER_PID:-}" ]]; then
+  pid="$CODEX_TASK_WRAPPER_PID"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || {
+    echo "ERROR: task wrapper PID is not live" >&2; exit 2;
+  }
+  ancestor=$PPID
+  while [[ "$ancestor" =~ ^[0-9]+$ ]] && (( ancestor > 1 )) && [[ "$ancestor" != "$pid" ]]; do
+    ancestor=$(sed -n 's/.*) [A-Za-z] \([0-9][0-9]*\) .*/\1/p' "/proc/$ancestor/stat" 2>/dev/null)
+  done
+  [[ "$ancestor" == "$pid" ]] || {
+    echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
+  }
+else
+  pid=$("$H/bin/tick-pid.sh" 2>/dev/null || echo "$PPID")
+fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE=/tmp/isaac-sim
@@ -44,6 +64,34 @@ case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
     stated="${3:-}"
+    if [ "$stated" = "--all" ]; then
+      exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      mine=0; primary=""; others=""
+      for s in $(seq 1 "$GPU_SLOTS"); do
+        f=$(slot_file $s); hp=""
+        [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+        if [ -n "$hp" ] && [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null; then
+          others="$others[$(cat "$f")] "; continue
+        fi
+        # Free, dead or already ours: reserve it for this tick.
+        [ "$hp" = "$pid" ] && [ -z "$primary" ] && primary=$s
+        [ "$hp" = "$pid" ] || echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) reserved-for-all" > "$f"
+        mine=$(( mine + 1 ))
+      done
+      if [ -n "$others" ]; then
+        echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
+      fi
+      [ -z "$primary" ] && primary=1
+      f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
+      cr=$(slot_cache $primary)
+      if [ -n "$cr" ] && ! seed_cache "$cr"; then
+        echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
+      fi
+      echo "$issue $pid $(date -u +%FT%TZ) domain=$d exclusive" > "$f"
+      echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}"
+      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+      exit 0
+    fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
     held=""
     s=1
@@ -87,5 +135,5 @@ case "${1:-}" in
       else echo "slot $s free"; fi
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain] | release <issue> | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all] | release <issue> | status" >&2; exit 2;;
 esac

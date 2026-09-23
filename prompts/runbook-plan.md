@@ -51,8 +51,16 @@ overridden below.
    after, use the render tool, the trace tool, the scenario runner and the packet template.
 3. **Capture runs and the card.** Three render products at 1280×720 do not fit beside two sibling
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
-   arms one camera at a time, or acquires every GPU slot so it holds the card alone; the packet says
-   which. A render product is never read on the update it was armed on.
+   arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
+   display can run the card out of memory (#1325).
+   - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
+     `lease.sh acquire <issue> --all`. Each call reserves every free slot for the tick and prints
+     `RESERVING held=n/N` until the last sibling releases, then prints `ACQUIRED ... exclusive=all`
+     with the export line.
+   - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
+     keeps what it has reserved.
+   - **It releases as soon as the capture ends.** The packet says which mode the run used.
+   - A render product is never read on the update it was armed on.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
