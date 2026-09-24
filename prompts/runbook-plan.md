@@ -53,6 +53,9 @@ overridden below.
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
    arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
    display can run the card out of memory (#1325).
+   - **Only a run that renders needs the whole card.** Lockstep identity runs without moments
+     (`--no-moments`) and measurement runs render nothing, so they take one slot and leave the card to
+     siblings.
    - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
      `lease.sh acquire <issue> --all`. Each call reserves every free slot for the tick and prints
      `RESERVING held=n/N` until the last sibling releases, then prints `ACQUIRED ... exclusive=all`
