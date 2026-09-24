@@ -22,6 +22,8 @@
 #          free slot for this tick, so siblings cannot take a slot it is waiting on, and prints
 #          RESERVING held=<n>/<N> <holders> (exit 1) until the last sibling releases; then ACQUIRED
 #          and the export line of the slot it runs in (the one it already held, else slot 1).
+#          A reservation lapses ALL_RESERVE_TTL_S (600 s) after it is made: a single-slot acquire
+#          may then take the slot. Once ACQUIRED, the other slots are held and never lapse.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -45,8 +47,20 @@ else
   pid=$("$H/bin/tick-pid.sh" 2>/dev/null || echo "$PPID")
 fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
+# A whole-card reservation keeps a slot from single-slot ticks for at most
+# ALL_RESERVE_TTL_S, counted from when the slot was first reserved. After that
+# a single-slot acquire may take it, so a long run on another slot never
+# leaves the reserved slots idle behind it.
+: "${ALL_RESERVE_TTL_S:=600}"
+lapsed() {
+  local line since
+  line=$(cat "$1" 2>/dev/null) || return 1
+  [[ "$line" == *" reserved-for-all" ]] || return 1
+  since=$(date -u -d "$(awk '{print $3}' <<<"$line")" +%s 2>/dev/null) || return 1
+  [ $(( $(date -u +%s) - since )) -ge "$ALL_RESERVE_TTL_S" ]
+}
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
-CACHE_BASE=/tmp/isaac-sim
+CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
 SEED_IMAGE="${WORV_BUILDER_IMAGE:-worv-builder:isaac6}"
 slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
 # The caches are root-owned (docker creates the bind sources), so the copy runs
@@ -88,24 +102,31 @@ case "${1:-}" in
         echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
       fi
       echo "$issue $pid $(date -u +%FT%TZ) domain=$d exclusive" > "$f"
+      # The reservations become holds, which never lapse while the capture runs.
+      for s in $(seq 1 "$GPU_SLOTS"); do
+        [ "$s" -eq "$primary" ] && continue
+        rf=$(slot_file $s)
+        [ -s "$rf" ] && [ "$(awk '{print $2}' "$rf")" = "$pid" ] \
+          && echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) held-for-all" > "$rf"
+      done
       echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}"
       echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
-    held=""
-    s=1
-    while [ "$s" -le "$GPU_SLOTS" ]; do
-      f=$(slot_file $s)
-      if [ -s "$f" ]; then
-        hp=$(awk '{print $2}' "$f")
-        if kill -0 "$hp" 2>/dev/null; then
-          if [ "$hp" = "$pid" ]; then held=$s; break; fi
-          s=$(( s + 1 )); continue
-        fi
+    # This tick's own slot first, then a free or dead one, then a lapsed reservation.
+    held=""; free=""; stale=""
+    for s in $(seq 1 "$GPU_SLOTS"); do
+      f=$(slot_file $s); hp=""
+      [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+      if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+        if [ "$hp" = "$pid" ]; then held=$s; break; fi
+        [ -z "$stale" ] && lapsed "$f" && stale=$s
+      else
+        [ -z "$free" ] && free=$s
       fi
-      held=$s; break
     done
+    [ -z "$held" ] && held=${free:-$stale}
     if [ -z "$held" ]; then
       echo "BUSY $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi

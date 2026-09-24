@@ -60,6 +60,9 @@ overridden below.
      `lease.sh acquire <issue> --all`. Each call reserves every free slot for the tick and prints
      `RESERVING held=n/N` until the last sibling releases, then prints `ACQUIRED ... exclusive=all`
      with the export line.
+   - **A reservation lapses after 10 minutes** (`ALL_RESERVE_TTL_S`). A single-slot tick may then take
+     the slot, so a long run on another slot never leaves reserved slots idle. Once `ACQUIRED`, the
+     other slots are held and never lapse.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
