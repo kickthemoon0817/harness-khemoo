@@ -47,23 +47,27 @@ out=$("$LEASE" acquire 2); check "a tick re-acquiring gets its own slot back" '[
 old() { echo "$(( $(date -u +%s) - $1 ))"; }
 
 reset; rm -f "$L"/all-wait.*
-echo "$(old 2000) $B" > "$L/all-wait.2"
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
 out=$("$LEASE" acquire 3); check "an issue that has waited 30 min for the card blocks a single-slot acquire" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
-echo "$(old 60) $B" > "$L/all-wait.2"
+echo "$(old 60) $B $(old 10)" > "$L/all-wait.2"
 out=$("$LEASE" acquire 3); check "a younger whole-card wait does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
-echo "$(old 2000) 999999" > "$L/all-wait.2"
+echo "$(old 2000) 999999 $(old 10)" > "$L/all-wait.2"
 out=$("$LEASE" acquire 3); check "a wait whose tick is dead gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
-echo "$(old 2000) $B" > "$L/all-wait.2"
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
 echo "2 $B $(ago 700) domain=78 reserved-for-all" > "$L/resource.lease.2"
 echo "4 $$ $(ago 30) domain=79 reserved-for-all" > "$L/resource.lease.3"
 out=$("$LEASE" acquire 4 --all); check "another whole-card waiter yields to the priority issue and drops its reservations" '[[ "$out" == "YIELDING to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease.3" ] && [ -s "$L/all-wait.4" ] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
 out=$("$LEASE" acquire 3); check "the priority issue's reservation never lapses" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 400)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a wait whose tick stopped asking gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
 sleep 600 & C=$!

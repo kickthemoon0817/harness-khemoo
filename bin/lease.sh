@@ -68,15 +68,19 @@ lapsed() {
 # across the ticks that resume it, takes priority, and the oldest such wait
 # wins. Its reservations never lapse, single-slot acquires wait for it, and
 # other whole-card waiters yield to it, so the card drains to it within the
-# longest run in progress. all-wait.<issue> holds "<first wait epoch> <pid>".
+# longest run in progress. all-wait.<issue> holds "<first wait epoch> <pid>
+# <last call epoch>"; a wait counts only while its tick has asked within
+# ALL_WAIT_FRESH_S, so a tick that stops asking for the card holds nothing.
 : "${ALL_PRIORITY_AFTER_S:=1800}"
+: "${ALL_WAIT_FRESH_S:=300}"
 priority_issue() {
-  local m first wpid best="" best_t="" now
+  local m first wpid last best="" best_t="" now
   now=$(date -u +%s)
   for m in "$LOCKS"/all-wait.*; do
     [ -s "$m" ] || continue
-    read -r first wpid < "$m"
-    [[ "$first" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
+    read -r first wpid last < "$m"
+    [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
+    [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
     [ $(( now - first )) -ge "$ALL_PRIORITY_AFTER_S" ] || continue
     if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/all-wait.}; best_t=$first; fi
   done
@@ -86,7 +90,7 @@ note_wait() {
   local m="$LOCKS/all-wait.$1" first=""
   [ -s "$m" ] && read -r first _ < "$m"
   [[ "$first" =~ ^[0-9]+$ ]] || first=$(date -u +%s)
-  echo "$first $pid" > "$m"
+  echo "$first $pid $(date -u +%s)" > "$m"
 }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
