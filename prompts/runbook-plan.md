@@ -71,6 +71,10 @@ overridden below.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
+   - **A tick with rendering and non-rendering runs splits them.** It runs the non-rendering arms on
+     one slot, and holds the whole card only for the arms that render: release, then
+     `acquire <issue> --all` again for those. A series of lockstep arms run under `--all` while only
+     some of them render keeps every sibling off the card for the whole series.
    - A render product is never read on the update it was armed on.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
