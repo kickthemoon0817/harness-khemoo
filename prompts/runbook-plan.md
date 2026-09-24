@@ -71,6 +71,11 @@ overridden below.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
+   - **Poll the lease from the tick's own shell,** in a bounded foreground loop. `lease.sh` records the
+     tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
+     refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
+     loop ended, and a sibling would take the card mid-capture. A script that holds the lease for its
+     whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
    - **A tick with rendering and non-rendering runs splits them.** It runs the non-rendering arms on
      one slot, and holds the whole card only for the arms that render: release, then
      `acquire <issue> --all` again for those. A series of lockstep arms run under `--all` while only

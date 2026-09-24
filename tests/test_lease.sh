@@ -78,5 +78,16 @@ kill $C; wait $C 2>/dev/null
 out=$("$LEASE" acquire 5 --all); check "the priority issue acquires once the card drains, and its wait record is cleared" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/all-wait.5" ]' "$out"
 "$LEASE" release 5 >/dev/null
 
+reset; rm -f "$L"/all-wait.*
+printf '#!/usr/bin/env bash\necho "ERROR: no claude -p ancestor" >&2; exit 1\n' > "$H/bin/tick-pid.sh"; chmod +x "$H/bin/tick-pid.sh"
+out=$("$LEASE" acquire 3 2>&1); rc=$?
+check "an acquire with no tick above it is refused, not recorded under a transient pid" '[ "$rc" -eq 2 ] && [[ "$out" == *"no claude -p tick"* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
+out=$("$LEASE" status 2>&1); rc=$?
+check "status needs no tick" '[ "$rc" -eq 0 ] && [[ "$out" == *"slot 1 free"* ]]' "rc=$rc $out"
+out=$(LEASE_HOLDER_PID=$$ "$LEASE" acquire 3 2>&1)
+check "a script can hold the lease as a named live ancestor" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q "^3 $$ " "$L/resource.lease"' "$out"
+LEASE_HOLDER_PID=$$ "$LEASE" release 3 >/dev/null
+rm -f "$H/bin/tick-pid.sh"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

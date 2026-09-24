@@ -33,9 +33,11 @@ set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
 LOCKS="$H/state/locks"; K="$LOCKS/resource.lock"; G=/tmp/isaac-cppmig-gpu-runtime.lock
-# Explicit task wrappers must be live ancestors, never arbitrary lease claimants.
-if [[ -n "${CODEX_TASK_WRAPPER_PID:-}" ]]; then
-  pid="$CODEX_TASK_WRAPPER_PID"
+# An explicit holder (a task wrapper, or a script that holds the lease for its
+# whole run) must be a live ancestor, never an arbitrary lease claimant.
+holder="${CODEX_TASK_WRAPPER_PID:-${LEASE_HOLDER_PID:-}}"
+if [[ -n "$holder" ]]; then
+  pid="$holder"
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || {
     echo "ERROR: task wrapper PID is not live" >&2; exit 2;
   }
@@ -46,8 +48,16 @@ if [[ -n "${CODEX_TASK_WRAPPER_PID:-}" ]]; then
   [[ "$ancestor" == "$pid" ]] || {
     echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
   }
+elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ]; then
+  # A lease belongs to the tick. From a loop detached from the tick's tree the
+  # walk finds no tick, and recording the loop's own PID would leave a lease
+  # that reads as dead the moment the loop ends, handing the slot to a sibling.
+  pid=$("$H/bin/tick-pid.sh" 2>/dev/null) || {
+    echo "ERROR: no claude -p tick above this shell; call lease.sh from the tick's own shell, not a detached loop, or set LEASE_HOLDER_PID to the live script that holds the lease" >&2
+    exit 2
+  }
 else
-  pid=$("$H/bin/tick-pid.sh" 2>/dev/null || echo "$PPID")
+  pid=$PPID
 fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
 # A whole-card reservation keeps a slot from single-slot ticks for at most
