@@ -74,6 +74,10 @@ overridden below.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
+   - **Between kit runs, re-run `lease.sh acquire <issue>` on the slot you hold.** It is idempotent. If it
+     prints `YIELD-REQUESTED`, a whole-card issue has waited 30 minutes and is still asking: finish the
+     run in progress, `release`, and acquire again for the next run. A queue that holds a slot for
+     hours otherwise starves every capture.
    - **Poll the lease from the tick's own shell,** in a bounded foreground loop. `lease.sh` records the
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the

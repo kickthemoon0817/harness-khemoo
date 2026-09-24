@@ -29,6 +29,8 @@
 #          acquires print BUSY priority ..., and other whole-card waiters print YIELDING (exit 1).
 #          At most GPU_KITS_MAX (2) single-slot kits run at once; a third acquire prints
 #          BUSY kit limit (exit 1) while a free slot file remains.
+#          A tick re-acquiring the slot it holds while a whole-card issue has priority also
+#          gets YIELD-REQUESTED (still exit 0): release after the run in progress.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -216,6 +218,10 @@ case "${1:-}" in
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d" > "$f"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+    # A holder re-acquiring its own slot between runs learns that a whole-card
+    # issue has priority: it finishes the run in progress, then releases.
+    [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" = "$own" ] \
+      && echo "YIELD-REQUESTED whole-card issue $first_issue waits with priority: release after the run in progress"
     ;;
   release)
     exec 8>"$K"; flock 8

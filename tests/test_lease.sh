@@ -102,5 +102,12 @@ echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
 echo "2 $B $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
 out=$("$LEASE" acquire 3); check "a whole-card reservation is not a kit" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
 
+reset; rm -f "$L"/all-wait.*
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a holder re-acquiring while a whole-card issue has priority is asked to yield" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" == *"YIELD-REQUESTED whole-card issue 2"* ]]' "$out"
+rm -f "$L"/all-wait.*
+out=$("$LEASE" acquire 3); check "without a priority issue no yield is asked" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
