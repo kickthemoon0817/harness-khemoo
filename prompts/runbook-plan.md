@@ -53,6 +53,9 @@ overridden below.
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
    arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
    display can run the card out of memory (#1325).
+   - **At most two kits share the card** (`GPU_KITS_MAX`, 2). A kit that renders the robot's cameras needs
+     5–7 GB of the 16 GB card, and a third kit dies of GPU out-of-memory at boot. A third single-slot
+     acquire prints `BUSY kit limit` while a slot file is free: treat it as busy.
    - **Only a run that renders needs the whole card.** Lockstep identity runs without moments
      (`--no-moments`) and measurement runs render nothing, so they take one slot and leave the card to
      siblings.

@@ -89,5 +89,18 @@ check "a script can hold the lease as a named live ancestor" '[[ "$out" == "ACQU
 LEASE_HOLDER_PID=$$ "$LEASE" release 3 >/dev/null
 rm -f "$H/bin/tick-pid.sh"
 
+sleep 600 & D=$!
+trap 'kill $A $B $D 2>/dev/null; rm -rf "$H"' EXIT
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a third kit waits while two run, though a slot file is free" '[[ "$out" == "BUSY kit limit 2/2"* ]] && [ ! -e "$L/resource.lease.3" ]' "$out"
+out=$(GPU_KITS_MAX=3 "$LEASE" acquire 3); check "the kit limit is a setting" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a whole-card reservation is not a kit" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

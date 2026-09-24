@@ -27,11 +27,17 @@
 #          An issue that has waited ALL_PRIORITY_AFTER_S (1800 s) for the whole card, across the
 #          ticks that resume it, takes priority: its reservations stop lapsing, single-slot
 #          acquires print BUSY priority ..., and other whole-card waiters print YIELDING (exit 1).
+#          At most GPU_KITS_MAX (2) single-slot kits run at once; a third acquire prints
+#          BUSY kit limit (exit 1) while a free slot file remains.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
+# At most GPU_KITS_MAX single-slot kits share the card at once: a kit rendering
+# the robot's cameras needs 5-7 GB of the 16 GB card. GPU_SLOTS still names
+# every slot file, so a whole-card acquire sees every holder.
+: "${GPU_KITS_MAX:=2}"
 LOCKS="$H/state/locks"; K="$LOCKS/resource.lock"; G=/tmp/isaac-cppmig-gpu-runtime.lock
 # An explicit holder (a task wrapper, or a script that holds the lease for its
 # whole run) must be a live ancestor, never an arbitrary lease claimant.
@@ -182,6 +188,17 @@ case "${1:-}" in
       fi
     done
     [ -z "$held" ] && held=${free:-$stale}
+    if [ -n "$held" ] && [ "$held" != "$own" ]; then
+      kits=0
+      for s in $(seq 1 "$GPU_SLOTS"); do
+        f=$(slot_file $s); [ -s "$f" ] || continue
+        [[ "$(cat "$f")" == *" reserved-for-all" ]] && continue
+        hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && kits=$(( kits + 1 ))
+      done
+      if [ "$kits" -ge "$GPU_KITS_MAX" ]; then
+        echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
+      fi
+    fi
     # A whole-card issue with priority gets every slot that frees; only a slot this tick already holds is kept.
     first_issue=$(priority_issue)
     if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" != "$own" ]; then
