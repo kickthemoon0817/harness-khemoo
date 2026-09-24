@@ -24,6 +24,9 @@
 #          and the export line of the slot it runs in (the one it already held, else slot 1).
 #          A reservation lapses ALL_RESERVE_TTL_S (600 s) after it is made: a single-slot acquire
 #          may then take the slot. Once ACQUIRED, the other slots are held and never lapse.
+#          An issue that has waited ALL_PRIORITY_AFTER_S (1800 s) for the whole card, across the
+#          ticks that resume it, takes priority: its reservations stop lapsing, single-slot
+#          acquires print BUSY priority ..., and other whole-card waiters print YIELDING (exit 1).
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -57,7 +60,33 @@ lapsed() {
   line=$(cat "$1" 2>/dev/null) || return 1
   [[ "$line" == *" reserved-for-all" ]] || return 1
   since=$(date -u -d "$(awk '{print $3}' <<<"$line")" +%s 2>/dev/null) || return 1
-  [ $(( $(date -u +%s) - since )) -ge "$ALL_RESERVE_TTL_S" ]
+  [ $(( $(date -u +%s) - since )) -ge "$ALL_RESERVE_TTL_S" ] || return 1
+  [ "$(awk '{print $1}' <<<"$line")" != "$(priority_issue)" ]
+}
+# Lapsing alone lets a steady stream of single-slot runs starve a whole-card
+# tick. So an issue that has waited ALL_PRIORITY_AFTER_S for the whole card,
+# across the ticks that resume it, takes priority, and the oldest such wait
+# wins. Its reservations never lapse, single-slot acquires wait for it, and
+# other whole-card waiters yield to it, so the card drains to it within the
+# longest run in progress. all-wait.<issue> holds "<first wait epoch> <pid>".
+: "${ALL_PRIORITY_AFTER_S:=1800}"
+priority_issue() {
+  local m first wpid best="" best_t="" now
+  now=$(date -u +%s)
+  for m in "$LOCKS"/all-wait.*; do
+    [ -s "$m" ] || continue
+    read -r first wpid < "$m"
+    [[ "$first" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
+    [ $(( now - first )) -ge "$ALL_PRIORITY_AFTER_S" ] || continue
+    if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/all-wait.}; best_t=$first; fi
+  done
+  echo "$best"
+}
+note_wait() {
+  local m="$LOCKS/all-wait.$1" first=""
+  [ -s "$m" ] && read -r first _ < "$m"
+  [[ "$first" =~ ^[0-9]+$ ]] || first=$(date -u +%s)
+  echo "$first $pid" > "$m"
 }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
@@ -80,6 +109,16 @@ case "${1:-}" in
     stated="${3:-}"
     if [ "$stated" = "--all" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      first_issue=$(priority_issue)
+      if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
+        # Yield to the issue with priority: drop this tick's reservations, keep the wait on record.
+        for s in $(seq 1 "$GPU_SLOTS"); do
+          f=$(slot_file $s)
+          [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
+        done
+        note_wait "$issue"
+        echo "YIELDING to whole-card issue $first_issue, which has waited longest"; exit 1
+      fi
       mine=0; primary=""; others=""
       for s in $(seq 1 "$GPU_SLOTS"); do
         f=$(slot_file $s); hp=""
@@ -93,8 +132,10 @@ case "${1:-}" in
         mine=$(( mine + 1 ))
       done
       if [ -n "$others" ]; then
+        note_wait "$issue"
         echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
       fi
+      rm -f "$LOCKS/all-wait.$issue"
       [ -z "$primary" ] && primary=1
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
       cr=$(slot_cache $primary)
@@ -115,18 +156,23 @@ case "${1:-}" in
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
     # This tick's own slot first, then a free or dead one, then a lapsed reservation.
-    held=""; free=""; stale=""
+    held=""; free=""; stale=""; own=""
     for s in $(seq 1 "$GPU_SLOTS"); do
       f=$(slot_file $s); hp=""
       [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
       if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
-        if [ "$hp" = "$pid" ]; then held=$s; break; fi
+        if [ "$hp" = "$pid" ]; then held=$s; own=$s; break; fi
         [ -z "$stale" ] && lapsed "$f" && stale=$s
       else
         [ -z "$free" ] && free=$s
       fi
     done
     [ -z "$held" ] && held=${free:-$stale}
+    # A whole-card issue with priority gets every slot that frees; only a slot this tick already holds is kept.
+    first_issue=$(priority_issue)
+    if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" != "$own" ]; then
+      echo "BUSY priority to whole-card issue $first_issue"; exit 1
+    fi
     if [ -z "$held" ]; then
       echo "BUSY $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi

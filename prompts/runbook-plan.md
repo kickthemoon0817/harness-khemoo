@@ -63,6 +63,11 @@ overridden below.
    - **A reservation lapses after 10 minutes** (`ALL_RESERVE_TTL_S`). A single-slot tick may then take
      the slot, so a long run on another slot never leaves reserved slots idle. Once `ACQUIRED`, the
      other slots are held and never lapse.
+   - **After 30 minutes of waiting, the issue gets priority** (`ALL_PRIORITY_AFTER_S`). The wait counts
+     across the ticks that resume the issue. The oldest such wait wins: its reservations stop lapsing,
+     single-slot acquires print `BUSY priority to whole-card issue N`, and other whole-card waiters
+     print `YIELDING` and drop their reservations. Treat both as busy: keep doing the work that needs no
+     card, and retry.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.

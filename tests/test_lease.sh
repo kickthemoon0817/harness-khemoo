@@ -44,5 +44,35 @@ out=$("$LEASE" release 2); check "release drops every slot" '[ ! -e "$L/resource
 reset; echo "2 $$ $(ago 700) domain=77 reserved-for-all" > "$L/resource.lease"
 out=$("$LEASE" acquire 2); check "a tick re-acquiring gets its own slot back" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 
+old() { echo "$(( $(date -u +%s) - $1 ))"; }
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "an issue that has waited 30 min for the card blocks a single-slot acquire" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 60) $B" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a younger whole-card wait does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) 999999" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a wait whose tick is dead gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B" > "$L/all-wait.2"
+echo "2 $B $(ago 700) domain=78 reserved-for-all" > "$L/resource.lease.2"
+echo "4 $$ $(ago 30) domain=79 reserved-for-all" > "$L/resource.lease.3"
+out=$("$LEASE" acquire 4 --all); check "another whole-card waiter yields to the priority issue and drops its reservations" '[[ "$out" == "YIELDING to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease.3" ] && [ -s "$L/all-wait.4" ] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 3); check "the priority issue's reservation never lapses" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+sleep 600 & C=$!
+echo "1 $C $(ago 30) domain=77" > "$L/resource.lease"
+echo "$(old 2000) 1" > "$L/all-wait.5"
+out=$("$LEASE" acquire 5 --all); check "the priority issue reserves and keeps its first wait time" '[[ "$out" == "RESERVING held=2/3"* ]] && [ "$(awk "{print \$1}" "$L/all-wait.5")" -le "$(old 1999)" ] && [ "$(awk "{print \$2}" "$L/all-wait.5")" = "$$" ]' "$out"
+kill $C; wait $C 2>/dev/null
+out=$("$LEASE" acquire 5 --all); check "the priority issue acquires once the card drains, and its wait record is cleared" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/all-wait.5" ]' "$out"
+"$LEASE" release 5 >/dev/null
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
