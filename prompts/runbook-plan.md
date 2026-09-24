@@ -58,9 +58,10 @@ overridden below.
      acquire prints `BUSY kit limit` while a slot file is free: treat it as busy.
    - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
      slot.
-   - **`--no-moments` identity runs still render today.** They drop the moments, but every RS scenario still
-     records its C1 video, and two kits then run the card out of memory (#1339, #1336). Until #1419 drops
-     the video from identity runs, take `--all --render` for them.
+   - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1
+     video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
+     `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
+     you merge the head. Only held arms and frame captures take `--all --render`.
    - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
      `lease.sh acquire <issue> --all --render`. Without `--render` the call is refused: a run that renders
      nothing takes one slot. Each call reserves every free slot for the tick and prints
