@@ -88,6 +88,22 @@ overridden below.
      `acquire <issue> --all` again for those. A series of lockstep arms run under `--all` while only
      some of them render keeps every sibling off the card for the whole series.
    - A render product is never read on the update it was armed on.
+3a. **Parent arms are shared per base commit.** Every refactor proving §F.3 against the same base runs the
+   same parent arms (lockstep, `--no-moments`, same seed), so run them once and share them:
+   - **Where they live.** `evidence/parent-<base9>/<scenario>-p/`, with the parent's build tree
+     `ai-worktrees/parent-<base9>` and a `status` file in the same format as the arm queues. `<base9>` is
+     the base's first nine hex digits: the head you merged before the proof.
+   - **Reuse a finished one.** Before running a parent arm, look there. If `<scenario>-p rc=0 end`
+     is in its `status` and the run passed override 13's boot check, compare your change arm against
+     it and cite it in your packet.
+   - **Otherwise claim and run it there.** `mkdir evidence/parent-<base9>/<scenario>-p` claims the arm:
+     only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
+     folder exists without a finished status, another tick is running it: run your change arms
+     meanwhile.
+   - **One cubin.** Your change tree runs the parent tree's cubin (§F.3) while the kernel sources are
+     unchanged.
+   - **A pair that parts** is re-run with the parent arm in your own session, beside your change arm,
+     before it counts as a finding (R32: timing, load).
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
