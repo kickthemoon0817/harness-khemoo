@@ -27,14 +27,26 @@ queue. Most firings cost nothing and log nothing.
 **Slots.** Concurrency is bounded by `flock`ed slot files. A runner that cannot take a slot
 exits quietly, so spawning is racy-safe by construction.
 
-**Allocator.** The worse of your 5-hour and weekly utilization maps to a cap:
-`<55%: MAX_SLOTS`, `<70%: 6`, `<80%: 4`, `<85%: 3`, `<90%: 2`, `<95%: 1`, else `0`. With no
+**Allocator.** The worse of your 5-hour and weekly utilization maps to a cap: `MAX_SLOTS` below
+`USAGE_FULL_BELOW` (90 %), half of it below 95 %, one below 98 %, else `0`. With no
 usage data it runs capped at 3 rather than blind at full width. Decisions are appended to
 `state/logs/allocator.log`.
 
-**Ticks.** Each runner is one `claude -p` invocation that reads `prompts/tick-prompt.md`, which
+**Ticks.** Each tick is one `claude -p` invocation that reads `prompts/tick-prompt.md`, which
 points at `prompts/runbook.md`. The runbook is where your project's rules live — the harness
-itself knows nothing about your build, your tests, or your targets.
+itself knows nothing about your build, your tests, or your targets. A tick handles one issue and
+ends as soon as it lands or pauses it; its budget is a ceiling set in the tick prompt.
+
+**Chaining.** A runner keeps its slot after a tick ends and starts the next tick at once, on a
+fresh context, while work is queued. It stops, leaving the retry to cron, when the queue is
+empty, usage no longer allows its slot, a tick ended in under `CHAIN_MIN_TICK_S` (180 s, i.e.
+nothing claimable or an error), after `MAX_CHAIN` (24) ticks, or when the harness is paused:
+the `bin/tick.sh` line commented out of the crontab, or a `state/paused` file present.
+
+**Models.** `state/tick-model` (whitespace-separated, best first) or `TICK_MODELS` names the
+model priority. Each tick runs on the first model that is not cooling down. A tick that dies on
+a model's usage limit marks it in `state/model-cooldown/` for `MODEL_COOLDOWN_S` (1800 s) and
+re-runs at once on the next model; the launcher spawns nothing while every model is cooling.
 
 ## Quickstart
 
@@ -72,7 +84,11 @@ in-flight ticks finish on their own.
 | `prompts/runbook.md` | the rules ticks follow — mission, procedure, rails |
 | `prompts/tick-prompt.md` | what a single tick is told to do |
 | `state/logs/` | one log per tick, plus `allocator.log` |
-| `state/locks/` | slot locks, resource lease, heartbeat stamp |
+| `state/locks/` | slot locks, GPU slot leases (`resource.lease`, `resource.lease.2`, …), heartbeat stamp |
+| `state/tick-model` | model priority list, best first |
+| `state/model-cooldown/` | one stamp per model that hit its usage limit |
+| `bin/slow_set.sh` | cron every 3 h: the whole doctest set, `[slow]` included, once per branch head; a red head files one issue naming the merge range |
+| `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
 
 ## Documentation
 
