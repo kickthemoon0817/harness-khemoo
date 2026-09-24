@@ -56,9 +56,11 @@ overridden below.
    - **At most two kits share the card** (`GPU_KITS_MAX`, 2). A kit that renders the robot's cameras needs
      5–7 GB of the 16 GB card, and a third kit dies of GPU out-of-memory at boot. A third single-slot
      acquire prints `BUSY kit limit` while a slot file is free: treat it as busy.
-   - **Only a run that renders needs the whole card.** Lockstep identity runs without moments
-     (`--no-moments`) and measurement runs render nothing, so they take one slot and leave the card to
-     siblings.
+   - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
+     slot.
+   - **`--no-moments` identity runs still render today.** They drop the moments, but every RS scenario still
+     records its C1 video, and two kits then run the card out of memory (#1339, #1336). Until #1419 drops
+     the video from identity runs, take `--all --render` for them.
    - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
      `lease.sh acquire <issue> --all --render`. Without `--render` the call is refused: a run that renders
      nothing takes one slot. Each call reserves every free slot for the tick and prints
