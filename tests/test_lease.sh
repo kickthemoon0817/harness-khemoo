@@ -35,9 +35,9 @@ echo "2 $B $(ago 700) domain=79 held-for-all" > "$L/resource.lease.3"
 out=$("$LEASE" acquire 3); check "a whole-card hold never lapses" '[[ "$out" == BUSY* ]]' "$out"
 
 reset; echo "1 $A $(ago 30) domain=77" > "$L/resource.lease"
-out=$("$LEASE" acquire 2 --all); check "--all reserves the free slots while a sibling runs" '[[ "$out" == "RESERVING held=2/3"* ]] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 2 --all --render); check "--all reserves the free slots while a sibling runs" '[[ "$out" == "RESERVING held=2/3"* ]] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
 kill $A; wait $A 2>/dev/null
-out=$("$LEASE" acquire 2 --all); check "--all acquires in the slot it already held once the sibling is gone" '[[ "$out" == "ACQUIRED slot=2 "*"exclusive=all"* ]] && grep -q " exclusive$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 2 --all --render); check "--all acquires in the slot it already held once the sibling is gone" '[[ "$out" == "ACQUIRED slot=2 "*"exclusive=all"* ]] && grep -q " exclusive$" "$L/resource.lease.2"' "$out"
 check "--all turns its other reservations into holds" 'grep -q " held-for-all$" "$L/resource.lease" && grep -q " held-for-all$" "$L/resource.lease.3"' "$(cat "$L"/resource.lease*)"
 out=$("$LEASE" release 2); check "release drops every slot" '[ ! -e "$L/resource.lease" ] && [ ! -e "$L/resource.lease.2" ] && [ ! -e "$L/resource.lease.3" ]' "$out"
 
@@ -62,7 +62,7 @@ reset; rm -f "$L"/all-wait.*
 echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
 echo "2 $B $(ago 700) domain=78 reserved-for-all" > "$L/resource.lease.2"
 echo "4 $$ $(ago 30) domain=79 reserved-for-all" > "$L/resource.lease.3"
-out=$("$LEASE" acquire 4 --all); check "another whole-card waiter yields to the priority issue and drops its reservations" '[[ "$out" == "YIELDING to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease.3" ] && [ -s "$L/all-wait.4" ] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 4 --all --render); check "another whole-card waiter yields to the priority issue and drops its reservations" '[[ "$out" == "YIELDING to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease.3" ] && [ -s "$L/all-wait.4" ] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
 out=$("$LEASE" acquire 3); check "the priority issue's reservation never lapses" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
@@ -73,9 +73,9 @@ reset; rm -f "$L"/all-wait.*
 sleep 600 & C=$!
 echo "1 $C $(ago 30) domain=77" > "$L/resource.lease"
 echo "$(old 2000) 1" > "$L/all-wait.5"
-out=$("$LEASE" acquire 5 --all); check "the priority issue reserves and keeps its first wait time" '[[ "$out" == "RESERVING held=2/3"* ]] && [ "$(awk "{print \$1}" "$L/all-wait.5")" -le "$(old 1999)" ] && [ "$(awk "{print \$2}" "$L/all-wait.5")" = "$$" ]' "$out"
+out=$("$LEASE" acquire 5 --all --render); check "the priority issue reserves and keeps its first wait time" '[[ "$out" == "RESERVING held=2/3"* ]] && [ "$(awk "{print \$1}" "$L/all-wait.5")" -le "$(old 1999)" ] && [ "$(awk "{print \$2}" "$L/all-wait.5")" = "$$" ]' "$out"
 kill $C; wait $C 2>/dev/null
-out=$("$LEASE" acquire 5 --all); check "the priority issue acquires once the card drains, and its wait record is cleared" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/all-wait.5" ]' "$out"
+out=$("$LEASE" acquire 5 --all --render); check "the priority issue acquires once the card drains, and its wait record is cleared" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/all-wait.5" ]' "$out"
 "$LEASE" release 5 >/dev/null
 
 reset; rm -f "$L"/all-wait.*
@@ -108,6 +108,10 @@ echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
 out=$("$LEASE" acquire 3); check "a holder re-acquiring while a whole-card issue has priority is asked to yield" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" == *"YIELD-REQUESTED whole-card issue 2"* ]]' "$out"
 rm -f "$L"/all-wait.*
 out=$("$LEASE" acquire 3); check "without a priority issue no yield is asked" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+out=$("$LEASE" acquire 3 --all 2>&1); rc=$?
+check "a whole-card acquire that does not say it renders is refused" '[ "$rc" -eq 2 ] && [[ "$out" == REFUSED* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

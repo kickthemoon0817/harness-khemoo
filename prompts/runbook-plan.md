@@ -60,7 +60,8 @@ overridden below.
      (`--no-moments`) and measurement runs render nothing, so they take one slot and leave the card to
      siblings.
    - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
-     `lease.sh acquire <issue> --all`. Each call reserves every free slot for the tick and prints
+     `lease.sh acquire <issue> --all --render`. Without `--render` the call is refused: a run that renders
+     nothing takes one slot. Each call reserves every free slot for the tick and prints
      `RESERVING held=n/N` until the last sibling releases, then prints `ACQUIRED ... exclusive=all`
      with the export line.
    - **A reservation lapses after 10 minutes** (`ALL_RESERVE_TTL_S`). A single-slot tick may then take
@@ -85,7 +86,7 @@ overridden below.
      whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
    - **A tick with rendering and non-rendering runs splits them.** It runs the non-rendering arms on
      one slot, and holds the whole card only for the arms that render: release, then
-     `acquire <issue> --all` again for those. A series of lockstep arms run under `--all` while only
+     `acquire <issue> --all --render` again for those. A series of lockstep arms run under `--all` while only
      some of them render keeps every sibling off the card for the whole series.
    - A render product is never read on the update it was armed on.
 3a. **Parent arms are shared per base commit.** Every refactor proving §F.3 against the same base runs the

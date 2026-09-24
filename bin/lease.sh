@@ -17,8 +17,9 @@
 #                 [WORV_ITER_CACHE_ROOT=<root>]   (slots 2+ only)
 #          or BUSY <holders>; exit 0/1. A stated domain applies to slot 1 only.
 #       Run every iter.sh, gate and kit command of the tick under that export line.
-#   lease.sh acquire <issue> --all
-#       -> the whole card, for a capture that cannot share it (a baseline). Each call reserves every
+#   lease.sh acquire <issue> --all --render
+#       -> the whole card, for a capture that cannot share it (a baseline). Without --render the call
+#          is refused (exit 2): a run that renders nothing takes one slot. Each call reserves every
 #          free slot for this tick, so siblings cannot take a slot it is waiting on, and prints
 #          RESERVING held=<n>/<N> <holders> (exit 1) until the last sibling releases; then ACQUIRED
 #          and the export line of the slot it runs in (the one it already held, else slot 1).
@@ -130,6 +131,12 @@ case "${1:-}" in
     issue="${2:?issue number}"
     stated="${3:-}"
     if [ "$stated" = "--all" ]; then
+      # The whole card is for runs that render: an identity or measurement run
+      # renders nothing and takes one slot, so a whole-card acquire says it renders.
+      if [ "${4:-}" != "--render" ]; then
+        echo "REFUSED: the whole card is only for a run that renders; pass --render for one, else take one slot with a plain acquire" >&2
+        exit 2
+      fi
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
       first_issue=$(priority_issue)
       if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
@@ -239,5 +246,5 @@ case "${1:-}" in
       else echo "slot $s free"; fi
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all] | release <issue> | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render] | release <issue> | status" >&2; exit 2;;
 esac
