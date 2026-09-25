@@ -115,9 +115,12 @@ overridden below.
 3b. **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
    code that runs in an identity arm and can change §F.3's identity set: state documents, wrench trace or
    particle hashes. A move confined to any of these needs no re-run:
-   - tools, docs or tests;
+   - docs, tests, and tools that never run inside an identity arm (analysis and comparison scripts);
    - the replay trace's own hashing, which is outside the identity set;
    - extensions the identity kits do not mount.
+   The scenario runner, the render companion and the scenario files run inside every arm and decide when
+   things happen: the build hold (#1431), the props (#1437), the spec timing (#1449). A move there changes
+   the arms, so re-run the proof on parents recorded with it.
    List the moved files in the packet and say why each cannot change the set. When in doubt, re-run.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
