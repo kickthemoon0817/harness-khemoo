@@ -22,6 +22,10 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   goes first; then resume a released claim (dead claimant); then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
 - An issue labelled `ai:signoff` is waiting for the owner. Never claim it; never merge its PR.
+- An issue labelled `ai:operator` is waiting for the operator. Never claim it. A pause that cannot go on
+  until the operator answers (a `Plan finding:` the step depends on) adds `ai:operator` in the same command
+  as the pause comment. A pause a later tick can resume by itself (no slot, the budget, owed runs) never
+  adds it. The operator removes it after answering.
 
 ## Read before you touch code
 
@@ -60,6 +64,9 @@ overridden below.
      waited 20 minutes (across the ticks that resume it), the next slot that frees goes to it, and other
      ticks read `BUSY queued behind single-slot issue <n>`: treat that as busy. Keep polling in the
      foreground: a tick that stops asking for 5 minutes leaves the line.
+   - **`runbook.md`'s "never wait more than 20 min" for a slot does not apply.** Do the step's host work
+     first, then poll for as long as the owed runs still fit before the stop line, then pause with the
+     resume recipe. The wait keeps its place in the line across the ticks that resume the issue.
    - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
      slot.
    - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1
