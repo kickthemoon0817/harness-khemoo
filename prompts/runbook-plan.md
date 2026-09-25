@@ -108,6 +108,13 @@ overridden below.
      unchanged.
    - **A pair that parts** is re-run with the parent arm in your own session, beside your change arm,
      before it counts as a finding (R32: timing, load).
+3b. **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
+   code that runs in an identity arm and can change §F.3's identity set: state documents, wrench trace or
+   particle hashes. A move confined to any of these needs no re-run:
+   - tools, docs or tests;
+   - the replay trace's own hashing, which is outside the identity set;
+   - extensions the identity kits do not mount.
+   List the moved files in the packet and say why each cannot change the set. When in doubt, re-run.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
