@@ -124,8 +124,8 @@ overridden below.
      uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
      replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
      single parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
-   - **Every scenario of the set.** A §F.3 proof covers RS1, RS2, RS3, RS5 and RS6. RS4 joins it once #1417
-     lands (D16a). A missing parent arm is a reason to claim and run it, never a reason to leave its scenario
+   - **Every scenario of the set.** A §F.3 proof covers RS1–RS6. RS4 joined on bases from 8ec107ad3 (#1417,
+     D16a), and runs under `lockstep_sync --no-moments` like the rest. A missing parent arm is a reason to claim and run it, never a reason to leave its scenario
      out. A class A merge with a scenario left out is not proven: pause instead, and say which arms are owed.
    - **One cubin.** Your change tree runs the parent tree's cubin (§F.3) while the kernel sources are
      unchanged.
