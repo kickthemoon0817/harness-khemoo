@@ -96,6 +96,7 @@ lapsed() {
 # ALL_WAIT_FRESH_S, so a tick that stops asking for the card holds nothing.
 : "${ALL_PRIORITY_AFTER_S:=1800}"
 : "${ALL_WAIT_FRESH_S:=300}"
+: "${SLOT_PRIORITY_AFTER_S:=1200}"
 oldest_wait() {
   local kind="$1" after="$2" m first wpid last best="" best_t="" now
   now=$(date -u +%s)
@@ -107,15 +108,24 @@ oldest_wait() {
     [ $(( now - first )) -ge "$after" ] || continue
     if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/"$kind".}; best_t=$first; fi
   done
-  echo "$best"
+  echo "$best ${best_t:-}"
 }
-priority_issue() { oldest_wait all-wait "$ALL_PRIORITY_AFTER_S"; }
+# The two lines are served oldest first: a whole-card wait takes priority only
+# while no single-slot issue in line has waited longer, so a three-hour
+# single-slot wait is not passed by a thirty-minute whole-card one.
+priority_issue() {
+  local card card_t line line_t
+  read -r card card_t <<<"$(oldest_wait all-wait "$ALL_PRIORITY_AFTER_S")"
+  [ -n "$card" ] || { echo ""; return; }
+  read -r line line_t <<<"$(oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S")"
+  if [ -n "$line" ] && [ "$line_t" -lt "$card_t" ]; then echo ""; return; fi
+  echo "$card"
+}
 # Single-slot waits form a line of their own, so a freed slot goes to the tick
 # that has asked longest rather than to whichever tick polls first. A wait
 # counts from the issue's first refused acquire, across the ticks that resume
 # it, while its tick keeps asking within ALL_WAIT_FRESH_S.
-: "${SLOT_PRIORITY_AFTER_S:=1200}"
-slot_first_issue() { oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S"; }
+slot_first_issue() { local issue _t; read -r issue _t <<<"$(oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S")"; echo "$issue"; }
 note_wait() {
   local m="$LOCKS/${2:-all-wait}.$1" first=""
   [ -s "$m" ] && read -r first _ < "$m"

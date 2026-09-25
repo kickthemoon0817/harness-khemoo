@@ -160,5 +160,15 @@ echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
 out=$("$LEASE" acquire 5 --all --render); check "a whole-card waiter still reserves while a single-slot issue waits" '[[ "$out" == "RESERVING held=2/3"* ]]' "$out"
 "$LEASE" release 5 >/dev/null; rm -f "$L"/all-wait.* "$L"/slot-wait.*
 
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot issue that has waited longer defers whole-card priority" '[[ "$out" == "BUSY queued behind single-slot issue 5"* ]]' "$out"
+out=$("$LEASE" acquire 5); check "the older single-slot issue takes the slot the whole-card issue would have" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 5 >/dev/null
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 5); check "a whole-card issue that has waited longer than the line keeps its priority" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
