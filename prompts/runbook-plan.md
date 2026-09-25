@@ -104,6 +104,10 @@ overridden below.
      only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
      folder exists without a finished status, another tick is running it: run your change arms
      meanwhile.
+   - **Check the base first.** Each parent arm runs twice (`<scenario>-p` and `<scenario>-p2`), and a proof
+     uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
+     replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
+     single parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
    - **One cubin.** Your change tree runs the parent tree's cubin (§F.3) while the kernel sources are
      unchanged.
    - **A pair that parts** is re-run with the parent arm in your own session, beside your change arm,
