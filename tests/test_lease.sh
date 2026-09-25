@@ -105,7 +105,9 @@ out=$("$LEASE" acquire 3); check "a whole-card reservation is not a kit" '[[ "$o
 reset; rm -f "$L"/all-wait.*
 echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
 echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
-out=$("$LEASE" acquire 3); check "a holder re-acquiring while a whole-card issue has priority is asked to yield" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" == *"YIELD-REQUESTED whole-card issue 2"* ]]' "$out"
+out=$("$LEASE" acquire 3); rc=$?
+check "a holder re-acquiring while a whole-card issue has priority hands its slot over" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ]' "rc=$rc $out"
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
 rm -f "$L"/all-wait.*
 out=$("$LEASE" acquire 3); check "without a priority issue no yield is asked" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
 

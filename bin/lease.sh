@@ -30,8 +30,9 @@
 #          acquires print BUSY priority ..., and other whole-card waiters print YIELDING (exit 1).
 #          At most GPU_KITS_MAX (2) single-slot kits run at once; a third acquire prints
 #          BUSY kit limit (exit 1) while a free slot file remains.
-#          A tick re-acquiring the slot it holds while a whole-card issue has priority also
-#          gets YIELD-REQUESTED (still exit 0): release after the run in progress.
+#          A tick re-acquiring the slot it holds while a whole-card issue has priority gets
+#          YIELDED (exit 1): its slot is released and it joins the single-slot line. Ticks re-acquire
+#          between runs, so the yield lands after the run in progress.
 #       A single-slot acquire that finds no slot records its wait. The issue that has waited
 #       longest, at least SLOT_PRIORITY_AFTER_S (1200 s) across the ticks that resume it, is first
 #       in line: a slot that frees goes to it, and other ticks print BUSY queued behind ... (exit 1).
@@ -219,9 +220,16 @@ case "${1:-}" in
         echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
       fi
     fi
-    # A whole-card issue with priority gets every slot that frees; only a slot this tick already holds is kept.
+    # A whole-card issue with priority gets every slot that frees, and a holder
+    # re-acquiring between runs hands its slot over: an advisory yield let a
+    # queue keep the card while the reserved slots sat idle.
     first_issue=$(priority_issue)
-    if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" != "$own" ]; then
+    if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
+      if [ -n "$own" ] && [ "$held" = "$own" ]; then
+        rm -f "$(slot_file "$own")"
+        note_wait "$issue" slot-wait
+        echo "YIELDED slot=$own to whole-card issue $first_issue, which has waited longest: the lease is released; acquire again once the card is back"; exit 1
+      fi
       note_wait "$issue" slot-wait
       echo "BUSY priority to whole-card issue $first_issue"; exit 1
     fi
@@ -245,10 +253,6 @@ case "${1:-}" in
     rm -f "$LOCKS/slot-wait.$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
-    # A holder re-acquiring its own slot between runs learns that a whole-card
-    # issue has priority: it finishes the run in progress, then releases.
-    [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" = "$own" ] \
-      && echo "YIELD-REQUESTED whole-card issue $first_issue waits with priority: release after the run in progress"
     ;;
   release)
     exec 8>"$K"; flock 8

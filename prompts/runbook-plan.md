@@ -92,9 +92,12 @@ overridden below.
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
    - **Between kit runs, re-run `lease.sh acquire <issue>` on the slot you hold.** It is idempotent. If it
-     prints `YIELD-REQUESTED`, a whole-card issue has waited 30 minutes and is still asking: finish the
-     run in progress, `release`, and acquire again for the next run. A queue that holds a slot for
-     hours otherwise starves every capture.
+   - **A holder that re-acquires its own slot while a whole-card issue has priority gets `YIELDED` (exit 1).**
+     The lease has released its slot, and it has joined the single-slot line. Treat it as busy:
+     - run `tools/dev/iter.sh down` for your container at once, under your export line;
+     - then poll again.
+     Re-acquire only between runs, never during one. A queue that held a slot for hours starved every capture
+     while an advisory yield was ignored.
    - **Poll the lease from the tick's own shell,** in a bounded foreground loop. `lease.sh` records the
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
