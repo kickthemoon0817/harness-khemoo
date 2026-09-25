@@ -11,7 +11,7 @@ cp "$here/bin/lease.sh" "$H/bin/lease.sh"
 export HARNESS_HOME="$H" GPU_SLOTS=3 LEASE_CACHE_BASE="$H/cache"
 L="$H/state/locks"; LEASE="$H/bin/lease.sh"
 ago() { date -u -d "-$1 sec" +%FT%TZ; }
-reset() { rm -f "$L"/resource.lease*; }
+reset() { rm -f "$L"/resource.lease* "$L"/slot-wait.*; }
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 
@@ -112,6 +112,51 @@ out=$("$LEASE" acquire 3); check "without a priority issue no yield is asked" '[
 reset; rm -f "$L"/all-wait.*
 out=$("$LEASE" acquire 3 --all 2>&1); rc=$?
 check "a whole-card acquire that does not say it renders is refused" '[ "$rc" -eq 2 ] && [[ "$out" == REFUSED* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
+
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot issue that has waited 20 min is first in line for a free slot" '[[ "$out" == "BUSY queued behind single-slot issue 5"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ]' "$out"
+out=$("$LEASE" status); check "status names the issue first in line" '[[ "$out" == *"wait single-slot issue 5 for 21 min (first in line)"* ]]' "$out"
+out=$("$LEASE" acquire 5); check "the issue first in line takes the slot, and its wait record is cleared" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [ ! -e "$L/slot-wait.5" ]' "$out"
+out=$("$LEASE" acquire 3); check "the next waiter is not queued behind a wait that ended" '[[ "$out" == "ACQUIRED slot="* ]] && [ ! -e "$L/slot-wait.3" ]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 600) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a younger single-slot wait does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 400)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot wait whose tick stopped asking does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) 999999 $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot wait whose tick is dead does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 7); first1=$(awk '{print $1}' "$L/slot-wait.7")
+sleep 1; out=$("$LEASE" acquire 7); first2=$(awk '{print $1}' "$L/slot-wait.7"); last2=$(awk '{print $3}' "$L/slot-wait.7")
+check "a refused single-slot acquire records its wait and keeps the first time across calls" '[[ "$out" == "BUSY kit limit 2/2"* ]] && [ "$first1" = "$first2" ] && [ "$last2" -gt "$first1" ]' "$out first1=$first1 first2=$first2 last2=$last2"
+
+reset; rm -f "$L"/all-wait.*
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a holder re-acquiring its own slot is not queued" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 5); check "whole-card priority comes before the single-slot line" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+out=$("$LEASE" status); check "status names the whole-card priority issue" '[[ "$out" == *"wait whole-card issue 2 for 33 min (priority)"* ]]' "$out"
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 5 --all --render); check "a whole-card waiter still reserves while a single-slot issue waits" '[[ "$out" == "RESERVING held=2/3"* ]]' "$out"
+"$LEASE" release 5 >/dev/null; rm -f "$L"/all-wait.* "$L"/slot-wait.*
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

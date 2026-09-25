@@ -32,6 +32,9 @@
 #          BUSY kit limit (exit 1) while a free slot file remains.
 #          A tick re-acquiring the slot it holds while a whole-card issue has priority also
 #          gets YIELD-REQUESTED (still exit 0): release after the run in progress.
+#       A single-slot acquire that finds no slot records its wait. The issue that has waited
+#       longest, at least SLOT_PRIORITY_AFTER_S (1200 s) across the ticks that resume it, is first
+#       in line: a slot that frees goes to it, and other ticks print BUSY queued behind ... (exit 1).
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -92,21 +95,28 @@ lapsed() {
 # ALL_WAIT_FRESH_S, so a tick that stops asking for the card holds nothing.
 : "${ALL_PRIORITY_AFTER_S:=1800}"
 : "${ALL_WAIT_FRESH_S:=300}"
-priority_issue() {
-  local m first wpid last best="" best_t="" now
+oldest_wait() {
+  local kind="$1" after="$2" m first wpid last best="" best_t="" now
   now=$(date -u +%s)
-  for m in "$LOCKS"/all-wait.*; do
+  for m in "$LOCKS"/"$kind".*; do
     [ -s "$m" ] || continue
     read -r first wpid last < "$m"
     [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
     [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
-    [ $(( now - first )) -ge "$ALL_PRIORITY_AFTER_S" ] || continue
-    if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/all-wait.}; best_t=$first; fi
+    [ $(( now - first )) -ge "$after" ] || continue
+    if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/"$kind".}; best_t=$first; fi
   done
   echo "$best"
 }
+priority_issue() { oldest_wait all-wait "$ALL_PRIORITY_AFTER_S"; }
+# Single-slot waits form a line of their own, so a freed slot goes to the tick
+# that has asked longest rather than to whichever tick polls first. A wait
+# counts from the issue's first refused acquire, across the ticks that resume
+# it, while its tick keeps asking within ALL_WAIT_FRESH_S.
+: "${SLOT_PRIORITY_AFTER_S:=1200}"
+slot_first_issue() { oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S"; }
 note_wait() {
-  local m="$LOCKS/all-wait.$1" first=""
+  local m="$LOCKS/${2:-all-wait}.$1" first=""
   [ -s "$m" ] && read -r first _ < "$m"
   [[ "$first" =~ ^[0-9]+$ ]] || first=$(date -u +%s)
   echo "$first $pid $(date -u +%s)" > "$m"
@@ -164,7 +174,7 @@ case "${1:-}" in
         note_wait "$issue"
         echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
       fi
-      rm -f "$LOCKS/all-wait.$issue"
+      rm -f "$LOCKS/all-wait.$issue" "$LOCKS/slot-wait.$issue"
       [ -z "$primary" ] && primary=1
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
       cr=$(slot_cache $primary)
@@ -205,15 +215,24 @@ case "${1:-}" in
         hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && kits=$(( kits + 1 ))
       done
       if [ "$kits" -ge "$GPU_KITS_MAX" ]; then
+        note_wait "$issue" slot-wait
         echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
       fi
     fi
     # A whole-card issue with priority gets every slot that frees; only a slot this tick already holds is kept.
     first_issue=$(priority_issue)
     if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ] && [ "$held" != "$own" ]; then
+      note_wait "$issue" slot-wait
       echo "BUSY priority to whole-card issue $first_issue"; exit 1
     fi
+    # A slot that frees goes to the single-slot issue first in line.
+    slot_first=$(slot_first_issue)
+    if [ -n "$held" ] && [ "$held" != "$own" ] && [ -n "$slot_first" ] && [ "$slot_first" != "$issue" ]; then
+      note_wait "$issue" slot-wait
+      echo "BUSY queued behind single-slot issue $slot_first, which has waited longest"; exit 1
+    fi
     if [ -z "$held" ]; then
+      note_wait "$issue" slot-wait
       echo "BUSY $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi
     f=$(slot_file $held); c=$(slot_container $held)
@@ -223,6 +242,7 @@ case "${1:-}" in
       echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
     fi
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d" > "$f"
+    rm -f "$LOCKS/slot-wait.$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
     # A holder re-acquiring its own slot between runs learns that a whole-card
@@ -244,6 +264,19 @@ case "${1:-}" in
       f=$(slot_file $s)
       if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
       else echo "slot $s free"; fi
+    done
+    now=$(date -u +%s); card_first=$(priority_issue); line_first=$(slot_first_issue)
+    for m in "$LOCKS"/all-wait.* "$LOCKS"/slot-wait.*; do
+      [ -s "$m" ] || continue
+      read -r first wpid last < "$m"
+      [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
+      [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
+      kind=${m##*/}; n=${kind#*.}; kind=${kind%%.*}
+      tag=""
+      [ "$kind" = all-wait ] && [ "$n" = "$card_first" ] && tag=" (priority)"
+      [ "$kind" = slot-wait ] && [ "$n" = "$line_first" ] && tag=" (first in line)"
+      label=single-slot; [ "$kind" = all-wait ] && label=whole-card
+      echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
   *) echo "usage: lease.sh acquire <issue> [domain|--all --render] | release <issue> | status" >&2; exit 2;;

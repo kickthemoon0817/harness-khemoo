@@ -56,6 +56,10 @@ overridden below.
    - **At most two kits share the card** (`GPU_KITS_MAX`, 2). A kit that renders the robot's cameras needs
      5–7 GB of the 16 GB card, and a third kit dies of GPU out-of-memory at boot. A third single-slot
      acquire prints `BUSY kit limit` while a slot file is free: treat it as busy.
+   - **Single-slot waits form a line.** A refused single-slot acquire records its wait. Once an issue has
+     waited 20 minutes (across the ticks that resume it), the next slot that frees goes to it, and other
+     ticks read `BUSY queued behind single-slot issue <n>`: treat that as busy. Keep polling in the
+     foreground: a tick that stops asking for 5 minutes leaves the line.
    - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
      slot.
    - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1
