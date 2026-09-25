@@ -55,6 +55,10 @@ overridden below.
    expected values and sources, whole-window traces, frames, the setup check, the tick-cost reading.
    Until the T01 tools land (#1320–#1324 closed), use the existing gate frames and `state-series.jsonl`;
    after, use the render tool, the trace tool, the scenario runner and the packet template.
+   **Fixtures check physics.** A behaviour change's fail-on-head fixture checks the law against a cited
+   reference value wherever the step names one (T05 and T06 list them, for example FC1, FC3, EX1, EX4 and
+   SL2). A pinned document, string, counter or hash is a guard, never the fixture. A test that pins a known
+   wrong result (a negative convergence order, an out-of-band ratio) reports the value, not a pass.
 3. **Capture runs and the card.** Three render products at 1280×720 do not fit beside two sibling
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
    arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
