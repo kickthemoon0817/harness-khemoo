@@ -22,6 +22,8 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   goes first; then resume a released claim (dead claimant); then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
 - An issue labelled `ai:signoff` is waiting for the owner. Never claim it; never merge its PR.
+- An issue labelled `ai:ready` waits for a merge slot (override 3c). While a slot is open, resume it before
+  any other issue; outside a slot, never claim it.
 - An issue labelled `ai:operator` is waiting for the operator. Never claim it. A pause that cannot go on
   until the operator answers (a `Plan finding:` the step depends on) adds `ai:operator` in the same command
   as the pause comment. A pause a later tick can resume by itself (no slot, the budget, owed runs) never
@@ -136,6 +138,41 @@ overridden below.
    things happen: the build hold (#1431), the props (#1437), the spec timing (#1449). A move there changes
    the arms, so re-run the proof on parents recorded with it.
    List the moved files in the packet and say why each cannot change the set. When in doubt, re-run.
+3c. **A merge that moves the identity arms waits for a merge slot (owner, 2026-09-25).** Proofs then run
+   against one base per window, and a landing no longer sends every other proof back to re-run.
+   - **Slots.** A slot opens every three hours on the UTC clock (00:00, 03:00, …, 21:00) and lasts
+     60 minutes. The window base is `origin/ai/manure-mpm` when the slot opens.
+   - **Which PRs wait.** A class A PR that changes code running in an identity arm: an extension the
+     identity kits mount, the scenario runner, the render companion or a scenario file. Docs, tests,
+     analysis tools, unmounted extensions and investigations merge when ready, as before; 3b exempts them.
+   - **Ready.** When the proof holds against the current head and the packet is written:
+     - add `ai:ready` to the issue and the PR;
+     - post `harness tick pid <PID> pausing: ready for the merge slot, proven on <base9>, packet <path>`;
+     - END without merging.
+   - **Landing in a slot.** `claimable.sh` offers `ai:ready` issues only while a slot is open. The tick that
+     takes one runs these steps in order:
+     1. `bin/merge-lock.sh acquire <issue>`, polled in the foreground. It holds one landing at a time.
+     2. Fetch and merge `origin/ai/manure-mpm` into the branch. Resolve only version and CHANGELOG
+        conflicts: one version, one section, as in override 5. On any other conflict, release the lock,
+        remove `ai:ready`, post a pause naming the files, and re-prove in the next window.
+     3. Check what the merge brought: every commit between the proof base and the head must be a
+        batch-mate that landed in this slot or a move 3b exempts. Otherwise, as after an owner-signed
+        class B landing, release, remove `ai:ready` and re-prove on the new head.
+     4. Rebuild and run every case of the touched test files on the merge result.
+     5. Push, merge the PR, close the issue with the merge commit, then
+        `bin/merge-lock.sh release <issue>`.
+     A landing that starts inside the slot may finish after the slot closes.
+   - **The batch is checked as a whole.** Each batch-mate was proven against the window base, not against
+     the others.
+     - **Who checks.** The first tick that records a parent arm on a head a slot produced also compares it
+       with the same scenario's parent arm on the window base.
+     - **Which arm.** The window base is the newest first-parent ancestor with that finished arm under
+       `evidence/parent-<base9>/`.
+     - **What to set aside.** Any key a batch-mate's packet says it added.
+     - **Record.** Write the result per scenario to `evidence/parent-<base9>/chain.txt`.
+     - **If the arms part:** post a `Plan finding:` naming the batch's PRs, and add `ai:operator`.
+   - **Class B** landings on the owner's sign-off are unchanged (override 5). They move the head at any time,
+     and step 3 sends a ready PR proven before one back to re-prove when 3b says so.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
@@ -144,7 +181,8 @@ overridden below.
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
      merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and every case in
-     every touched test file pass, and the packet is written. Then close the issue.
+     every touched test file pass, and the packet is written. Then close the issue. A PR that 3c holds
+     for a merge slot lands only in a slot, as 3c says.
    - **Class B** — a behaviour change: open the PR with the packet linked in `## Verification`, add
      `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting owner
      sign-off, packet <path>`, and END. Never merge a class B PR. The owner merges and closes.
