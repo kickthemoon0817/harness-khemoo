@@ -42,6 +42,10 @@
 #          (exit 1). Refused while a whole-card run holds the card, while another device run is
 #          live, or when the card's used memory plus DEVICE_TEST_MIB would pass its size less
 #          CARD_MARGIN_MIB. A whole-card acquire waits for a live device run to end.
+#   lease.sh prioritize <issue> | prioritize --clear
+#       -> the operator's override: the named issues, in the order named, go before every line on
+#          their next acquire, whole-card or single-slot, and each is used up by that acquire.
+#          Needs no tick.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -67,7 +71,7 @@ if [[ -n "$holder" ]]; then
   [[ "$ancestor" == "$pid" ]] || {
     echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
   }
-elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ]; then
+elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ]; then
   # A lease belongs to the tick. From a loop detached from the tick's tree the
   # walk finds no tick, and recording the loop's own PID would leave a lease
   # that reads as dead the moment the loop ends, handing the slot to a sibling.
@@ -126,8 +130,31 @@ oldest_wait() {
 # The two lines are served oldest first: a whole-card wait takes priority only
 # while no single-slot issue in line has waited longer, so a three-hour
 # single-slot wait is not passed by a thirty-minute whole-card one.
+# The operator's override (`lease.sh prioritize`): issues named in order, each
+# first in its line while its tick is asking, until its next acquire.
+OPERATOR_FILE="$LOCKS/operator-priority"
+operator_first() {
+  local kind="$1" n m first wpid last now
+  [ -s "$OPERATOR_FILE" ] || return 0
+  now=$(date -u +%s)
+  for n in $(cat "$OPERATOR_FILE"); do
+    m="$LOCKS/$kind.$n"
+    [ -s "$m" ] || continue
+    read -r first wpid last < "$m"
+    [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
+    [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
+    echo "$n"; return 0
+  done
+}
+operator_done() {
+  [ -s "$OPERATOR_FILE" ] || return 0
+  local rest; rest=$(tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$1" | tr '\n' ' ')
+  if [ -n "${rest// /}" ]; then echo "$rest" > "$OPERATOR_FILE"; else rm -f "$OPERATOR_FILE"; fi
+}
 priority_issue() {
-  local card card_t line line_t
+  local card card_t line line_t op
+  op=$(operator_first all-wait); [ -n "$op" ] && { echo "$op"; return; }
+  [ -n "$(operator_first slot-wait)" ] && { echo ""; return; }
   read -r card card_t <<<"$(oldest_wait all-wait "$ALL_PRIORITY_AFTER_S")"
   [ -n "$card" ] || { echo ""; return; }
   read -r line line_t <<<"$(oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S")"
@@ -138,7 +165,11 @@ priority_issue() {
 # that has asked longest rather than to whichever tick polls first. A wait
 # counts from the issue's first refused acquire, across the ticks that resume
 # it, while its tick keeps asking within ALL_WAIT_FRESH_S.
-slot_first_issue() { local issue _t; read -r issue _t <<<"$(oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S")"; echo "$issue"; }
+slot_first_issue() {
+  local issue _t op
+  op=$(operator_first slot-wait); [ -n "$op" ] && { echo "$op"; return; }
+  read -r issue _t <<<"$(oldest_wait slot-wait "$SLOT_PRIORITY_AFTER_S")"; echo "$issue"
+}
 note_wait() {
   local m="$LOCKS/${2:-all-wait}.$1" first=""
   [ -s "$m" ] && read -r first _ < "$m"
@@ -224,6 +255,7 @@ case "${1:-}" in
         echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
       fi
       rm -f "$LOCKS/all-wait.$issue" "$LOCKS/slot-wait.$issue"
+      operator_done "$issue"
       [ -z "$primary" ] && primary=1
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
       cr=$(slot_cache $primary)
@@ -299,8 +331,18 @@ case "${1:-}" in
     fi
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d" > "$f"
     rm -f "$LOCKS/slot-wait.$issue"
+    [ "$held" != "$own" ] && operator_done "$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+    ;;
+  prioritize)
+    exec 8>"$K"; flock 8
+    if [ "${2:-}" = "--clear" ]; then rm -f "$OPERATOR_FILE"; echo "CLEARED"; exit 0; fi
+    n="${2:?issue number or --clear}"
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "usage: lease.sh prioritize <issue> | --clear" >&2; exit 2; }
+    { [ -s "$OPERATOR_FILE" ] && tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$n" | tr '\n' ' '; echo "$n"; } | tr -s ' \n' ' ' | sed 's/^ //; s/ $//' > "$OPERATOR_FILE.new"
+    mv -f "$OPERATOR_FILE.new" "$OPERATOR_FILE"
+    echo "PRIORITIZED $(cat "$OPERATOR_FILE")"
     ;;
   release)
     exec 8>"$K"; flock 8
@@ -321,6 +363,7 @@ case "${1:-}" in
     if [ -s "$DEVICE_FILE" ]; then
       device_holder_live && echo "device HELD $(cat "$DEVICE_FILE") (alive)" || echo "device ORPHAN $(cat "$DEVICE_FILE") (pid dead)"
     fi
+    [ -s "$OPERATOR_FILE" ] && echo "operator priority: $(cat "$OPERATOR_FILE")"
     now=$(date -u +%s); card_first=$(priority_issue); line_first=$(slot_first_issue)
     for m in "$LOCKS"/all-wait.* "$LOCKS"/slot-wait.*; do
       [ -s "$m" ] || continue
@@ -335,5 +378,5 @@ case "${1:-}" in
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all --render] | release <issue> | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | status" >&2; exit 2;;
 esac
