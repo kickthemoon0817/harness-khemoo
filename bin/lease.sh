@@ -36,6 +36,12 @@
 #       A single-slot acquire that finds no slot records its wait. The issue that has waited
 #       longest, at least SLOT_PRIORITY_AFTER_S (1200 s) across the ticks that resume it, is first
 #       in line: a slot that frees goes to it, and other ticks print BUSY queued behind ... (exit 1).
+#   lease.sh acquire <issue> --device
+#       -> a device doctest run (iter.sh build --test --device) beside the kits, no kit slot:
+#          ACQUIRED device file=<lease> and an export line naming that file, or BUSY device <why>
+#          (exit 1). Refused while a whole-card run holds the card, while another device run is
+#          live, or when the card's used memory plus DEVICE_TEST_MIB would pass its size less
+#          CARD_MARGIN_MIB. A whole-card acquire waits for a live device run to end.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -73,6 +79,13 @@ else
   pid=$PPID
 fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
+# A device doctest run takes no kit slot: it holds this file, and the card's
+# memory, read at the acquire, says whether it fits beside the running kits.
+DEVICE_FILE="$LOCKS/device.lease"
+: "${DEVICE_TEST_MIB:=3072}"
+: "${CARD_MARGIN_MIB:=1024}"
+card_mib() { nvidia-smi --query-gpu="memory.$1" --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9'; }
+device_holder_live() { [ -s "$DEVICE_FILE" ] && kill -0 "$(awk '{print $2}' "$DEVICE_FILE")" 2>/dev/null; }
 # A whole-card reservation keeps a slot from single-slot ticks for at most
 # ALL_RESERVE_TTL_S, counted from when the slot was first reserved. After that
 # a single-slot acquire may take it, so a long run on another slot never
@@ -151,6 +164,28 @@ case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
     stated="${3:-}"
+    if [ "$stated" = "--device" ]; then
+      exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      for s in $(seq 1 "$GPU_SLOTS"); do
+        f=$(slot_file $s)
+        if [ -s "$f" ] && [[ "$(cat "$f")" == *" exclusive" || "$(cat "$f")" == *" held-for-all" ]] \
+           && kill -0 "$(awk '{print $2}' "$f")" 2>/dev/null; then
+          echo "BUSY device: a whole-card run holds the card [$(cat "$f")]"; exit 1
+        fi
+      done
+      if device_holder_live && [ "$(awk '{print $2}' "$DEVICE_FILE")" != "$pid" ]; then
+        echo "BUSY device: another device run is live [$(cat "$DEVICE_FILE")]"; exit 1
+      fi
+      used=$(card_mib used); total=$(card_mib total)
+      if [ -z "$used" ] || [ -z "$total" ]; then echo "BUSY device: the card's memory could not be read"; exit 1; fi
+      if [ $(( used + DEVICE_TEST_MIB )) -gt $(( total - CARD_MARGIN_MIB )) ]; then
+        echo "BUSY device: ${used} MiB used + ${DEVICE_TEST_MIB} MiB for the tests would pass ${total} MiB less ${CARD_MARGIN_MIB}"; exit 1
+      fi
+      echo "$issue $pid $(date -u +%FT%TZ) domain=0 device" > "$DEVICE_FILE"
+      echo "ACQUIRED device file=$DEVICE_FILE (card ${used}/${total} MiB used)"
+      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE"
+      exit 0
+    fi
     if [ "$stated" = "--all" ]; then
       # The whole card is for runs that render: an identity or measurement run
       # renders nothing and takes one slot, so a whole-card acquire says it renders.
@@ -181,6 +216,9 @@ case "${1:-}" in
         [ "$hp" = "$pid" ] || echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) reserved-for-all" > "$f"
         mine=$(( mine + 1 ))
       done
+      if device_holder_live && [ "$(awk '{print $2}' "$DEVICE_FILE")" != "$pid" ]; then
+        others="$others[$(cat "$DEVICE_FILE")] "
+      fi
       if [ -n "$others" ]; then
         note_wait "$issue"
         echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
@@ -271,6 +309,7 @@ case "${1:-}" in
       f=$(slot_file $s)
       if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f"; out="RELEASED slot=$s"; fi
     done
+    if [ -s "$DEVICE_FILE" ] && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then rm -f "$DEVICE_FILE"; out="RELEASED device"; fi
     echo "$out"
     ;;
   status)
@@ -279,6 +318,9 @@ case "${1:-}" in
       if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
       else echo "slot $s free"; fi
     done
+    if [ -s "$DEVICE_FILE" ]; then
+      device_holder_live && echo "device HELD $(cat "$DEVICE_FILE") (alive)" || echo "device ORPHAN $(cat "$DEVICE_FILE") (pid dead)"
+    fi
     now=$(date -u +%s); card_first=$(priority_issue); line_first=$(slot_first_issue)
     for m in "$LOCKS"/all-wait.* "$LOCKS"/slot-wait.*; do
       [ -s "$m" ] || continue

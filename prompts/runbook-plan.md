@@ -75,6 +75,9 @@ overridden below.
    - **`runbook.md`'s "never wait more than 20 min" for a slot does not apply.** Do the step's host work
      first, then poll for as long as the owed runs still fit before the stop line, then pause with the
      resume recipe. The wait keeps its place in the line across the ticks that resume the issue.
+   - **Device doctests take no kit slot.** For `iter.sh build --test --device`, run
+     `lease.sh acquire <issue> --device` and use its export line. It admits one device run beside the kits
+     when the card has 3 GiB to spare, and never during a whole-card run. Release it right after the tests.
    - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
      slot.
    - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1

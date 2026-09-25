@@ -11,7 +11,10 @@ cp "$here/bin/lease.sh" "$H/bin/lease.sh"
 export HARNESS_HOME="$H" GPU_SLOTS=3 LEASE_CACHE_BASE="$H/cache"
 L="$H/state/locks"; LEASE="$H/bin/lease.sh"
 ago() { date -u -d "-$1 sec" +%FT%TZ; }
-reset() { rm -f "$L"/resource.lease* "$L"/slot-wait.*; }
+reset() { rm -f "$L"/resource.lease* "$L"/slot-wait.* "$L"/device.lease; }
+mkdir -p "$H/fakebin"; export PATH="$H/fakebin:$PATH"
+card() { printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo %s;; *memory.total*) echo 16303;; esac\n' "$1" > "$H/fakebin/nvidia-smi"; chmod +x "$H/fakebin/nvidia-smi"; }
+card 6600
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 
@@ -169,6 +172,23 @@ out=$("$LEASE" acquire 5); check "the older single-slot issue takes the slot the
 echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
 out=$("$LEASE" acquire 5); check "a whole-card issue that has waited longer than the line keeps its priority" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
 rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+reset; rm -f "$L"/all-wait.*; card 6600
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 9 --device); check "a device run fits beside two kits when the card has room" '[[ "$out" == "ACQUIRED device "* ]] && [[ "$out" == *"export MANURE_GATE_LEASE_FILE=$L/device.lease"* ]] && grep -q "^9 $$ .* device$" "$L/device.lease"' "$out"
+out=$("$LEASE" acquire 9 --device); check "the device holder may acquire again" '[[ "$out" == "ACQUIRED device "* ]]' "$out"
+echo "8 $B $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 9 --device); check "one device run at a time" '[[ "$out" == "BUSY device: another device run is live"* ]]' "$out"
+rm -f "$L/device.lease"; card 13000
+out=$("$LEASE" acquire 9 --device); check "a device run that would overfill the card waits" '[[ "$out" == "BUSY device: 13000 MiB used"* ]] && [ ! -e "$L/device.lease" ]' "$out"
+card 6600; reset
+echo "2 $B $(ago 30) domain=77 exclusive" > "$L/resource.lease"
+out=$("$LEASE" acquire 9 --device); check "a device run waits for a whole-card run" '[[ "$out" == "BUSY device: a whole-card run holds the card"* ]]' "$out"
+reset; echo "8 $B $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 5 --all --render); check "a whole-card acquire waits for a live device run" '[[ "$out" == "RESERVING held=3/3"* ]]' "$out"
+"$LEASE" release 5 >/dev/null; reset; rm -f "$L"/all-wait.*
+"$LEASE" acquire 9 --device >/dev/null; out=$("$LEASE" release 9); check "release drops the device lease" '[[ "$out" == "RELEASED device" ]] && [ ! -e "$L/device.lease" ]' "$out"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
