@@ -91,9 +91,9 @@ overridden below.
    - **While it waits, it does the work that needs no card.** It retries the acquire; each retry
      keeps what it has reserved.
    - **It releases as soon as the capture ends.** The packet says which mode the run used.
-   - **Between kit runs, re-run `lease.sh acquire <issue>` on the slot you hold.** It is idempotent. If it
-   - **A holder that re-acquires its own slot while a whole-card issue has priority gets `YIELDED` (exit 1).**
-     The lease has released its slot, and it has joined the single-slot line. Treat it as busy:
+   - **Between kit runs, re-run `lease.sh acquire <issue>` on the slot you hold.** It hands the slot back
+     unless a whole-card issue has priority. Then it prints `YIELDED` (exit 1): the lease has released your
+     slot, and you have joined the single-slot line. Treat that as busy:
      - run `tools/dev/iter.sh down` for your container at once, under your export line;
      - then poll again.
      Re-acquire only between runs, never during one. A queue that held a slot for hours starved every capture
