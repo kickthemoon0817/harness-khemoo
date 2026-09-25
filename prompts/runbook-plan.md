@@ -180,8 +180,15 @@ overridden below.
      - **What to set aside.** Any key a batch-mate's packet says it added.
      - **Record.** Write the result per scenario to `evidence/parent-<base9>/chain.txt`.
      - **If the arms part:** post a `Plan finding:` naming the batch's PRs, and add `ai:operator`.
-   - **Class B** landings on the owner's sign-off are unchanged (override 5). They move the head at any time,
-     and step 3 sends a ready PR proven before one back to re-prove when 3b says so.
+   - **Class B landings on the owner's sign-off also land in a slot, after the slot's class A batch.**
+     - A landing tick claimed outside a slot prepares its merge result (merge, rebuild, touched tests, and
+       any evidence the sign-off made a landing condition), then adds `ai:ready` and pauses.
+     - In a slot, it takes the merge lock only once no class A `ai:ready` issue is left to land, or 30 minutes
+       into the slot. Before merging, it merges the head the batch left, rebuilds, and re-runs its touched tests.
+     - The head then moves at most once per window, and the next window's proofs all re-run against that one
+       head.
+     - When a class B change lands in a slot, the next head's chain check (above) is skipped for the
+       scenarios that change moves. It is recorded as skipped, with the class B PR named.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
@@ -196,7 +203,7 @@ overridden below.
      `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting owner
      sign-off, packet <path>`, and END. Never merge a class B PR. The owner merges and closes.
    - If a class A issue turns out to change behaviour, treat it as class B and say why.
-   - **Class B after the owner's sign-off.** When the issue carries a comment starting
+   - **Class B after the owner's sign-off** (landing in a merge slot, 3c). When the issue carries a comment starting
      `Owner sign-off: approved`, a tick may land the PR: merge `origin/ai/manure-mpm` into the branch,
      move the extension version past the branch's if it was taken (one version, one CHANGELOG section),
      rebuild, re-AOT the cubin if kernels or the device solver moved, run every case of the touched
