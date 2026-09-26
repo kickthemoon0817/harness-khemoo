@@ -33,7 +33,7 @@ def claimant_alive(n):
     return any(os.path.exists("/proc/" + pid) for pid in claimed - withdrawn)
 count = 0
 for i in issues:
-    # An issue waiting for the owner is never claimable, however its claimant ended.
+    # An issue waiting for its sign-off is never claimable, however its claimant ended.
     if any(l["name"] == signoff for l in i["labels"]): continue
     # Nor is one paused until the operator answers it: a tick could only find it waiting.
     if any(l["name"] == operator for l in i["labels"]): continue

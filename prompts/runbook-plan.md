@@ -21,7 +21,8 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
 - An `ai:plan` issue whose body starts with `Operator: **take this before any other claimable issue.**`
   goes first; then resume a released claim (dead claimant); then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
-- An issue labelled `ai:signoff` is waiting for the owner. Never claim it; never merge its PR.
+- An issue labelled `ai:signoff` is waiting for a sign-off. Never claim it; never merge its PR. The owner
+  waived class B sign-off on 2026-09-26, so the operator reviews the packet and signs off in the owner's place.
 - An issue labelled `ai:ready` waits for a merge slot (override 3c). While a slot is open, resume it before
   any other issue; outside a slot, never claim it.
 - An issue labelled `ai:operator` is waiting for the operator. Never claim it. A pause that cannot go on
@@ -184,7 +185,7 @@ overridden below.
      - **What to set aside.** Any key a batch-mate's packet says it added.
      - **Record.** Write the result per scenario to `evidence/parent-<base9>/chain.txt`.
      - **If the arms part:** post a `Plan finding:` naming the batch's PRs, and add `ai:operator`.
-   - **Class B landings on the owner's sign-off also land in a slot, after the slot's class A batch.**
+   - **Class B landings on a sign-off also land in a slot, after the slot's class A batch.**
      - A landing tick claimed outside a slot prepares its merge result (merge, rebuild, touched tests, and
        any evidence the sign-off made a landing condition), then adds `ai:ready` and pauses.
      - In a slot, it takes the merge lock only once no class A `ai:ready` issue is left to land, or 30 minutes
@@ -204,11 +205,11 @@ overridden below.
      every touched test file pass, and the packet is written. Then close the issue. A PR that 3c holds
      for a merge slot lands only in a slot, as 3c says.
    - **Class B** — a behaviour change: open the PR with the packet linked in `## Verification`, add
-     `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting owner
-     sign-off, packet <path>`, and END. Never merge a class B PR. The owner merges and closes.
+     `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting
+     sign-off, packet <path>`, and END. Never merge a class B PR before its sign-off comment.
    - If a class A issue turns out to change behaviour, treat it as class B and say why.
-   - **Class B after the owner's sign-off** (landing in a merge slot, 3c). When the issue carries a comment starting
-     `Owner sign-off: approved`, a tick may land the PR: merge `origin/ai/manure-mpm` into the branch,
+   - **Class B after its sign-off** (landing in a merge slot, 3c). When the issue carries a comment starting
+     `Owner sign-off: approved` or `Operator sign-off: approved`, a tick may land the PR: merge `origin/ai/manure-mpm` into the branch,
      move the extension version past the branch's if it was taken (one version, one CHANGELOG section),
      rebuild, re-AOT the cubin if kernels or the device solver moved, run every case of the touched
      test files on the merge result, push, merge the PR, remove `ai:signoff` and `ai:wip`, and close the
