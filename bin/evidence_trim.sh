@@ -10,6 +10,7 @@
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # Cron gives no environment: take the harness token and PATH the way tick.sh does.
+export HARNESS_HOME="$H"
 [ -r "$H/config/harness.env" ] && set -a && . "$H/config/harness.env" && set +a
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 EV="${EVIDENCE_ROOT:-$HOME/tmp_workspace/artifacts/manure-plan/evidence}"
