@@ -150,6 +150,15 @@ overridden below.
    runs in an identity arm, stop arming the old base. The arms already recorded stay as evidence. Merge the
    head, rebuild, and arm the new base's parents and your change there, because a proof on a base the slot
    no longer has cannot land.
+   **A proof carries across a base move, scenario by scenario, where the chain check allows it.**
+   - **The check.** Compare the new base's `<scenario>-p` against the old base's `-p` (`chain.py`, as 3c's batch check does).
+   - **The condition.** They may part only in state keys the landings in between added or changed, with the particle
+     hashes and the wrench trace identical, and the base move's diff shares no file with your change.
+   - **Then** your change arm on the old base stands for that scenario on the new one. Merge the head, rebuild, run the
+     touched test files, and cite the chain line and the keys set aside in the packet.
+   - **Otherwise** re-run that scenario on the new base.
+   - **Why.** Each base needs its `-p` arms anyway, so a class B landing that moves no physics no longer sends every
+     class A proof back to the start.
    **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
    code that runs in an identity arm and can change §F.3's identity set: state documents, wrench trace or
    particle hashes. A move confined to any of these needs no re-run:
