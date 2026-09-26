@@ -217,8 +217,13 @@ overridden below.
      move the extension version past the branch's if it was taken (one version, one CHANGELOG section),
      rebuild, re-AOT the cubin if kernels or the device solver moved, run every case of the touched
      test files on the merge result, push, merge the PR, remove `ai:signoff` and `ai:wip`, and close the
-     issue with the merge commit. If the merge needs more than version and CHANGELOG resolution —
-     a conflict in engine code the owner did not see — stop and post a `Plan finding:` instead.
+     issue with the merge commit. If the merge needs more than version and CHANGELOG resolution, it
+     depends on the hunks:
+     - **Different lines.** Where both sides edited adjacent but different lines, and one side replaced
+       lines the other did not touch, resolve it as a union. Name each hunk and both commits in the
+       landing comment, and the operator reviews it after the fact.
+     - **The same line.** Where both sides edited the same line, stop and post a `Plan finding:` with
+       the proposed resolution.
 6. **Principle checks in every PR body**: P1 (the diff names no body role — grep the diff for
    bucket, wheel, cutting_edge, carried, parked, tool box; explain any hit), P4 (ledger drift over the
    run), P9 (every new constant with its class: MATERIAL, DERIVED, SHARED RULE, SETTING — a bare
