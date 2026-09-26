@@ -146,7 +146,11 @@ overridden below.
      unchanged.
    - **A pair that parts** is re-run with the parent arm in your own session, beside your change arm,
      before it counts as a finding (R32: timing, load).
-3b. **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
+3b. **Fetch before every arm, not only at the claim.** When `origin/ai/manure-mpm` has moved in code that
+   runs in an identity arm, stop arming the old base. The arms already recorded stay as evidence. Merge the
+   head, rebuild, and arm the new base's parents and your change there, because a proof on a base the slot
+   no longer has cannot land.
+   **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
    code that runs in an identity arm and can change §F.3's identity set: state documents, wrench trace or
    particle hashes. A move confined to any of these needs no re-run:
    - docs, tests, and tools that never run inside an identity arm (analysis and comparison scripts);
