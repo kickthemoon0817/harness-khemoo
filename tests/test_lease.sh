@@ -188,6 +188,14 @@ out=$("$LEASE" acquire 9 --device); check "a device run waits for a whole-card r
 reset; echo "8 $B $(ago 30) domain=0 device" > "$L/device.lease"
 out=$("$LEASE" acquire 5 --all --render); check "a whole-card acquire waits for a live device run" '[[ "$out" == "RESERVING held=3/3"* ]]' "$out"
 "$LEASE" release 5 >/dev/null; reset; rm -f "$L"/all-wait.*
+reset; rm -f "$L"/all-wait.*; card 6600
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 9 --device); check "a device run waits while a whole-card issue has priority" '[[ "$out" == "BUSY device: whole-card issue 2 has priority" ]] && [ ! -e "$L/device.lease" ]' "$out"
+echo "9 $$ $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 9 --device); rc=$?
+check "the device holder asking again while a whole-card issue has priority gives the lane up" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED device to whole-card issue 2"* ]] && [ ! -e "$L/device.lease" ]' "rc=$rc $out"
+out=$("$LEASE" acquire 2 --device); check "the priority issue itself may take the device lane" '[[ "$out" == "ACQUIRED device "* ]]' "$out"
+reset; rm -f "$L"/all-wait.*
 "$LEASE" acquire 9 --device >/dev/null; out=$("$LEASE" release 9); check "release drops the device lease" '[[ "$out" == "RELEASED device" ]] && [ ! -e "$L/device.lease" ]' "$out"
 
 reset; rm -f "$L"/all-wait.* "$L"/operator-priority

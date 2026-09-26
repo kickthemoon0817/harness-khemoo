@@ -205,6 +205,18 @@ case "${1:-}" in
           echo "BUSY device: a whole-card run holds the card [$(cat "$f")]"; exit 1
         fi
       done
+      # A whole-card acquire waits while a device holder lives, so a holder that
+      # takes the lane run after run would hold the card from a whole-card issue
+      # with priority for its whole tick. The lane yields to that issue: a new
+      # device run waits, and the holder asking again gives its lease up.
+      first_issue=$(priority_issue)
+      if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
+        if device_holder_live && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then
+          rm -f "$DEVICE_FILE"
+          echo "YIELDED device to whole-card issue $first_issue, which has priority; ask again once it has run"; exit 1
+        fi
+        echo "BUSY device: whole-card issue $first_issue has priority"; exit 1
+      fi
       if device_holder_live && [ "$(awk '{print $2}' "$DEVICE_FILE")" != "$pid" ]; then
         echo "BUSY device: another device run is live [$(cat "$DEVICE_FILE")]"; exit 1
       fi
