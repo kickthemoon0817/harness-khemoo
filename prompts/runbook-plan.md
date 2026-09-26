@@ -80,6 +80,10 @@ overridden below.
    - **Device doctests take no kit slot.** For `iter.sh build --test --device`, run
      `lease.sh acquire <issue> --device` and use its export line. It admits one device run beside the kits
      when the card has 3 GiB to spare, and never during a whole-card run. Release it right after the tests.
+     A whole-card acquire waits while a device holder lives, so the lane yields to a whole-card issue
+     with priority: a new device run gets `BUSY device: whole-card issue N has priority`, and a holder
+     asking again gets `YIELDED device` and loses its lease. Poll as for a slot, and do host work
+     meanwhile. A sweep of many binaries asks once per binary, never holding the lane across the sweep.
    - **Only a run that renders needs the whole card.** Host measurement runs render nothing and take one
      slot.
    - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1
