@@ -110,9 +110,10 @@ lapsed() {
 # other whole-card waiters yield to it, so the card drains to it within the
 # longest run in progress. all-wait.<issue> holds "<first wait epoch> <pid>
 # <last call epoch>"; a wait counts only while its tick has asked within
-# ALL_WAIT_FRESH_S, so a tick that stops asking for the card holds nothing.
+# ALL_WAIT_FRESH_S, so a tick that stops asking for the card holds nothing: a
+# waiter gone off to host work leaves the card to the others within two minutes.
 : "${ALL_PRIORITY_AFTER_S:=1800}"
-: "${ALL_WAIT_FRESH_S:=300}"
+: "${ALL_WAIT_FRESH_S:=120}"
 : "${SLOT_PRIORITY_AFTER_S:=1200}"
 oldest_wait() {
   local kind="$1" after="$2" m first wpid last best="" best_t="" now

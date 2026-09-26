@@ -71,7 +71,8 @@ overridden below.
    - **Single-slot waits form a line.** A refused single-slot acquire records its wait. Once an issue has
      waited 20 minutes (across the ticks that resume it), the next slot that frees goes to it, and other
      ticks read `BUSY queued behind single-slot issue <n>`: treat that as busy. Keep polling in the
-     foreground: a tick that stops asking for 5 minutes leaves the line.
+     foreground, at least every 60 seconds: a tick that stops asking for 2 minutes leaves the line, and a
+     whole-card priority lapses the same way, so do host work before or after the wait, not during it.
    - **`runbook.md`'s "never wait more than 20 min" for a slot does not apply.** Do the step's host work
      first, then poll for as long as the owed runs still fit before the stop line, then pause with the
      resume recipe. The wait keeps its place in the line across the ticks that resume the issue.
