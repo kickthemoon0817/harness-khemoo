@@ -95,11 +95,15 @@ overridden below.
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
      you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
-   - **A class B render session takes one slot.** Change against parent, lockstep with moments, frames for
-     V5: take a plain `lease.sh acquire <issue>` and run its arms on that slot, like any other kit run.
+   - **A class B render session takes one slot, with `lease.sh acquire <issue> --render`.** Change against
+     parent, lockstep with moments, frames for V5, run on that one slot.
      - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
-     - **Memory fits.** A rendering kit (5–7 GB) fits beside an identity kit (5.1 GB) or another rendering
-       kit (two at 11.6 GB) under the two-kit cap. The out-of-memory kill was a third kit.
+     - **One rendering kit at a time.** A rendering kit now takes about 8 GB. It fits beside an identity kit
+       (5.1 GB) on the 16 GB card, but two rendering kits do not: two RS3 attempts died of GPU out-of-memory
+       that way (#1524).
+       - `--render` marks the slot. While another tick's rendering kit is live, the call prints
+         `BUSY render` and records a wait that holds no place ahead of kits that can start.
+       - A renewal between arms keeps the mark.
      - **Tick cost** read in such a session is marked `shared card` in the packet. It is a recorded reading,
        not a bar (D4), and T09 measures real time.
    - **A baseline, or a perf A/B reading, holds the card alone.** It uses

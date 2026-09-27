@@ -221,5 +221,31 @@ out=$("$LEASE" acquire 3); check "a prioritized issue whose tick is dead does no
 out=$("$LEASE" prioritize --clear); check "the operator can clear the override" '[[ "$out" == "CLEARED" ]] && [ ! -e "$L/operator-priority" ]' "$out"
 rm -f "$L"/all-wait.* "$L"/slot-wait.*
 
+# One rendering kit at a time: a second one is refused, a plain kit is not.
+sleep 600 & C=$!
+sleep 600 & D=$!
+reset; rm -f "$L"/slot-wait.*
+echo "4 $C $(ago 30) domain=77 render" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); rc=$?
+check "a rendering acquire waits while another tick's rendering kit is live" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY render"* ]] && [ ! -e "$L/resource.lease.2" ] && grep -q " render$" "$L/slot-wait.3"' "rc=$rc $out"
+rm -f "$L"/slot-wait.*
+out=$("$LEASE" acquire 5); check "a plain kit takes a free slot beside a rendering kit" '[[ "$out" == "ACQUIRED slot=2 "* ]] && ! grep -q " render$" "$L/resource.lease.2"' "$out"
+"$LEASE" release 5 >/dev/null
+reset; echo "5 $D $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); check "a rendering kit takes a free slot beside a plain kit, and its slot is marked" '[[ "$out" == "ACQUIRED slot=2 "* ]] && grep -q "^3 $$ .* render$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 3); check "a holder renewing its rendering slot keeps the mark, however it asks" '[[ "$out" == "ACQUIRED slot=2 "* ]] && grep -q " render$" "$L/resource.lease.2"' "$out"
+"$LEASE" release 3 >/dev/null
+reset; rm -f "$L"/slot-wait.*
+echo "4 $C $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 3000) $B $(old 10) render" > "$L/slot-wait.8"
+out=$("$LEASE" acquire 5); check "a render wait that cannot start holds no place ahead of a plain kit" '[[ "$out" == "ACQUIRED slot=2 "* ]]' "$out"
+"$LEASE" release 5 >/dev/null
+reset; rm -f "$L"/slot-wait.*
+echo "$(old 3000) $B $(old 10) render" > "$L/slot-wait.8"
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 5); check "with no rendering kit live, a render wait keeps its place in line" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
+kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

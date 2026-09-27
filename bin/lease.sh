@@ -36,6 +36,11 @@
 #       A single-slot acquire that finds no slot records its wait. The issue that has waited
 #       longest, at least SLOT_PRIORITY_AFTER_S (1200 s) across the ticks that resume it, is first
 #       in line: a slot that frees goes to it, and other ticks print BUSY queued behind ... (exit 1).
+#   lease.sh acquire <issue> --render
+#       -> one slot, as a plain acquire, for a kit that renders (a class B session with moments).
+#          The slot is marked render. While another tick's rendering kit is live the call prints
+#          BUSY render (exit 1) and records a render wait, which holds no place in the line ahead
+#          of kits that can start, since two rendering kits overfill the card.
 #   lease.sh acquire <issue> --device
 #       -> a device doctest run (iter.sh build --test --device) beside the kits, no kit slot:
 #          ACQUIRED device file=<lease> and an export line naming that file, or BUSY device <why>
@@ -116,11 +121,14 @@ lapsed() {
 : "${ALL_WAIT_FRESH_S:=120}"
 : "${SLOT_PRIORITY_AFTER_S:=1200}"
 oldest_wait() {
-  local kind="$1" after="$2" m first wpid last best="" best_t="" now
+  local kind="$1" after="$2" m first wpid last wkind best="" best_t="" now
   now=$(date -u +%s)
   for m in "$LOCKS"/"$kind".*; do
     [ -s "$m" ] || continue
-    read -r first wpid last < "$m"
+    read -r first wpid last wkind < "$m"
+    # A wait for a rendering slot cannot be served while another rendering kit
+    # runs, so it holds no place ahead of kits that can start now.
+    [ "${wkind:-}" = render ] && [ "$render_busy" = 1 ] && continue
     [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
     [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
     [ $(( now - first )) -ge "$after" ] || continue
@@ -135,13 +143,14 @@ oldest_wait() {
 # first in its line while its tick is asking, until its next acquire.
 OPERATOR_FILE="$LOCKS/operator-priority"
 operator_first() {
-  local kind="$1" n m first wpid last now
+  local kind="$1" n m first wpid last wkind now
   [ -s "$OPERATOR_FILE" ] || return 0
   now=$(date -u +%s)
   for n in $(cat "$OPERATOR_FILE"); do
     m="$LOCKS/$kind.$n"
     [ -s "$m" ] || continue
-    read -r first wpid last < "$m"
+    read -r first wpid last wkind < "$m"
+    [ "${wkind:-}" = render ] && [ "$render_busy" = 1 ] && continue
     [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
     [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
     echo "$n"; return 0
@@ -175,7 +184,20 @@ note_wait() {
   local m="$LOCKS/${2:-all-wait}.$1" first=""
   [ -s "$m" ] && read -r first _ < "$m"
   [[ "$first" =~ ^[0-9]+$ ]] || first=$(date -u +%s)
-  echo "$first $pid $(date -u +%s)" > "$m"
+  echo "$first $pid $(date -u +%s)${3:+ $3}" > "$m"
+}
+# One rendering kit at a time: two of them overfill the card (about 8 GB each on
+# a 16 GB card), while a rendering kit fits beside an identity kit (5.1 GB).
+render_busy=0
+render_live() {
+  local s f hp
+  for s in $(seq 1 "$GPU_SLOTS"); do
+    f=$(slot_file $s); [ -s "$f" ] || continue
+    [[ "$(cat "$f")" == *" render" ]] || continue
+    hp=$(awk '{print $2}' "$f")
+    [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null && return 0
+  done
+  return 1
 }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
@@ -288,6 +310,9 @@ case "${1:-}" in
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+    render=""
+    if [ "$stated" = "--render" ]; then render=1; stated=""; fi
+    render_live && render_busy=1
     # This tick's own slot first, then a free or dead one, then a lapsed reservation.
     held=""; free=""; stale=""; own=""
     for s in $(seq 1 "$GPU_SLOTS"); do
@@ -301,6 +326,12 @@ case "${1:-}" in
       fi
     done
     [ -z "$held" ] && held=${free:-$stale}
+    # A holder renewing its slot between arms keeps the slot's render mark, however it asks.
+    [ -n "$own" ] && [[ "$(cat "$(slot_file "$own")")" == *" render" ]] && render=1
+    if [ -n "$render" ] && [ "$render_busy" = 1 ] && { [ -z "$own" ] || [ "$held" != "$own" ]; }; then
+      note_wait "$issue" slot-wait render
+      echo "BUSY render: one rendering kit at a time $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
+    fi
     if [ -n "$held" ] && [ "$held" != "$own" ]; then
       kits=0
       for s in $(seq 1 "$GPU_SLOTS"); do
@@ -342,7 +373,7 @@ case "${1:-}" in
     if [ -n "$cr" ] && ! seed_cache "$cr"; then
       echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
     fi
-    echo "$issue $pid $(date -u +%FT%TZ) domain=$d" > "$f"
+    echo "$issue $pid $(date -u +%FT%TZ) domain=$d${render:+ render}" > "$f"
     rm -f "$LOCKS/slot-wait.$issue"
     [ "$held" != "$own" ] && operator_done "$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
