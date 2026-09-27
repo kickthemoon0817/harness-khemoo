@@ -274,8 +274,11 @@ overridden below.
     - it must contain neither `bootstrap FAILED` nor `lockstep invalidated`;
     - it must show the robot actually moving. Read that from the robot's joint states with
       `tools/eval/boot_check.py <run folder>` (#1509, PR #1511), never from `robots[].links`. Since #1476 that
-      block lists only the links a zone composes. RS1 commands no motion by design, and its boot is proven by
-      its joints settling after the build hold.
+      block lists only the links a zone composes.
+      **A plan that commands no motion** (`boot_check.py` prints whether it does; RS1, RS2 and RS5 do not) proves
+      its boot by the robot's joint-state series advancing in time: the articulation publishes throughout the run.
+      It does not need joint travel. Whether the joints visibly settle after the build hold depends on when the
+      observer starts, so travel there is not evidence either way (operator, 2026-09-27, #1466).
     **A kit that mounts the branch's `worv.robots.catalog` must also mount the branch's
     `worv.robots.locomotion` and `worv.robots.attachments` builds.** The baked image's locomotion rejects
     `[drive].wheel_odom_hz`, and the robot never boots. That is how #1367's first traces were all invalid.
