@@ -223,7 +223,13 @@ overridden below.
    - **Every landing, class A or B, runs the image gates on its merge result:**
      `python3 tools/test/p1_role_ratchet.py` and `tools/test/extension_version_gate.py`. A word above its
      baseline lands only on an operator grant named in the landing comment; otherwise stop with a
-     `Plan finding:`. A head that fails an image gate is repaired before anything else lands. Then close the issue. A PR that 3c holds
+     `Plan finding:`.
+   - **A class B landing also runs the whole fast set on its merge result** (`bin/slow_set.sh fast`, host), not only its
+     touched files. A case green on the head and red on the merge blocks the landing. #1464 turned two cases in files
+     it did not touch red (#1524).
+   - **A head that fails an image gate or the fast set is repaired first:** its repair issue is take-first. Other
+     landings may go on only if they add no failure to the fast set on their merge result, and the landing comment
+     names the head's own red cases. Then close the issue. A PR that 3c holds
      for a merge slot lands only in a slot, as 3c says.
    - **Class B** — a behaviour change: open the PR with the packet linked in `## Verification`, add
      `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting
