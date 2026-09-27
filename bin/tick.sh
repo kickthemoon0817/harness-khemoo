@@ -141,6 +141,11 @@ fable_lane() {  # true when this tick should run on the fable lane
 }
 
 # ---------------------------------------------------------------- runner mode
+# bash parses this whole block when a runner starts, so a running runner keeps
+# chaining ticks on the code it started with. After changing the block, stop the
+# runner shells (`kill` the `tick.sh runner` process, never its tick). A tick
+# outlives its runner and keeps the slot lock through the descriptor it
+# inherited, and cron starts runners on the new code.
 if [ "${1:-}" = "runner" ]; then
     slotmax=${2:-1}
     stagger=${3:-0}
