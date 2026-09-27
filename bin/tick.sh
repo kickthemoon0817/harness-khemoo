@@ -120,6 +120,26 @@ harness_paused() {
     return 1
 }
 
+# The fable lane: an issue labelled FABLE_LABEL (the operator sets it on difficult or important
+# issues) is worked on FABLE_MODEL. A tick runs on that lane while claimable fable issues outnumber
+# the live fable ticks, and its prompt tells it to claim only those; other ticks leave them alone.
+# While FABLE_MODEL cools down on its usage limit, any tick may claim them, so none waits on it.
+: "${FABLE_MODEL:=claude-fable-5-1}"
+: "${FABLE_LABEL:=ai:fable}"
+fable_cooling() {
+    local stamp="$MODEL_COOL/$FABLE_MODEL"
+    [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
+}
+fable_lane() {  # true when this tick should run on the fable lane
+    [ -n "$FABLE_MODEL" ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
+    fable_cooling && return 1
+    local want_f live_f
+    want_f=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$FABLE_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
+    [[ "$want_f" =~ ^[0-9]+$ ]] && [ "$want_f" -gt 0 ] || return 1
+    live_f=$(pgrep -fc -- "claude -p .*--model $FABLE_MODEL" 2>/dev/null || true)
+    [ "${live_f:-0}" -lt "$want_f" ]
+}
+
 # ---------------------------------------------------------------- runner mode
 if [ "${1:-}" = "runner" ]; then
     slotmax=${2:-1}
@@ -150,16 +170,28 @@ if [ "${1:-}" = "runner" ]; then
         # usage limit cools that model and re-runs at once on the next one in the list.
         tried=""; model=""; rc=0
         while :; do
-            model=$(pick_model "$tried")
-            if [ -z "$model" ]; then
-                echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
-                break
+            if fable_lane && [[ " $tried " != *" $FABLE_MODEL "* ]]; then
+                model="$FABLE_MODEL"
+                lane="This tick runs on $FABLE_MODEL, the fable lane: claim only an issue labelled \`$FABLE_LABEL\`. If none is claimable, print a one-line summary and end."
+            else
+                model=$(pick_model "$tried")
+                if [ -z "$model" ]; then
+                    echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
+                    break
+                fi
+                if fable_cooling; then
+                    lane="This tick runs on $model. $FABLE_MODEL is cooling down on its usage limit, so an issue labelled \`$FABLE_LABEL\` may be claimed too."
+                else
+                    lane="This tick runs on $model: never claim an issue labelled \`$FABLE_LABEL\`; those are worked on the fable lane."
+                fi
             fi
             flags="$(printf '%s' "$CLAUDE_FLAGS" | sed -E 's/--model[= ][^ ]+//') --model $model"
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
             log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
-            "$CLAUDE_BIN" -p "$(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
+            "$CLAUDE_BIN" -p "$lane
+
+$(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
             rc=$?
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s model=$model" >>"$log"

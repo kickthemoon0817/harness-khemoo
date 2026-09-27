@@ -25,6 +25,11 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   waived class B sign-off on 2026-09-26, so the operator reviews the packet and signs off in the owner's place.
 - An issue labelled `ai:ready` waits for a merge slot (override 3c). While a slot is open, resume it before
   any other issue; outside a slot, never claim it.
+- An issue labelled `ai:fable` is difficult or important, and it is worked on Fable 5.1 (the fable lane). The first line
+  of your prompt says which lane this tick is on:
+  - a fable-lane tick claims only `ai:fable` issues;
+  - any other tick never claims one, unless its first line says Fable is cooling down on its usage limit.
+  `ai:fable` is the operator's to set, like `ai:long`: a tick never adds or removes it.
 - An issue labelled `ai:operator` is waiting for the operator. Never claim it. A pause that cannot go on
   until the operator answers (a `Plan finding:` the step depends on) adds `ai:operator` in the same command
   as the pause comment. A pause a later tick can resume by itself (no slot, the budget, owed runs) never
