@@ -62,7 +62,16 @@ range=${green:+$(git -C "$TARGET_REPO" log --merges --format='- %h %s' "$green..
 # that failed as expected exits 0, and its ERROR lines are not a failure. Each
 # failing case runs once more alone: one that passes alone is load-sensitive, one
 # that fails alone is a regression, and the issue says which.
-failing=""
+# The whole set holds the fast set, so while the fast set's issue is open, a case
+# that issue already names is its to repair: it is left out here, and a whole-set
+# run red only in such cases files nothing.
+failing=""; owned=""; fast_open=""; owned_text=""
+if [ "$mode" = full ]; then
+    fast_open=$(gh issue list --repo "$GH_REPO" --state open --search 'in:title "the fast set is red"' \
+        --json number -q '.[0].number' 2>/dev/null)
+    [ -n "$fast_open" ] && owned_text=$(gh issue view "$fast_open" --repo "$GH_REPO" --json body,comments \
+        --jq '.body, .comments[].body' 2>/dev/null)
+fi
 for f in "$out"/*.txt; do
     [ -e "$f" ] || continue
     name=$(basename "$f" .txt)
@@ -75,6 +84,9 @@ for f in "$out"/*.txt; do
         read -r status _ <"$shard/case.$index.rc" 2>/dev/null || status=255
         [ "$status" = 0 ] && continue
         [[ "$c" =~ [[:cntrl:]] ]] && continue
+        if [ -n "$owned_text" ] && grep -qF -- "$c" <<<"$owned_text"; then
+            owned="$owned$name :: $c\n"; continue
+        fi
         # The case name is an argument, never shell text: a name is test output.
         # doctest splits -tc= on commas, so they are escaped as the runner escapes them.
         filter=$(printf '%s' "$c" | sed -e 's/\\/\\\\/g' -e 's/,/\\,/g')
@@ -91,8 +103,13 @@ for f in "$out"/*.txt; do
         failing="$failing$name :: $c  [$verdict]\n${errors:-exit $status, no error line printed}\n"
     done <"$shard/cases"
 done
+if [ -z "$failing" ] && [ -n "$owned" ] && [ "$build_rc" -eq 0 ]; then
+    printf 'RED %s, only in cases #%s owns:\n%b' "$sha" "$fast_open" "$owned" >>"$log"
+    exit 0
+fi
 [ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E '^GATE:|^ERROR:|^\[doctest\] test cases:' | head -40)
 [ "$build_rc" -ne 0 ] && failing="build failed:\n$(tail -30 "$log")"
+[ -n "$owned" ] && failing="$failing\nAlso red, and #$fast_open's to repair:\n$owned"
 body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe %s is red on `%s` at `%s` (`bin/slow_set.sh %s`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
     "$set_name" "$WORK_BRANCH" "$short" "$mode" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
 open=$(gh issue list --repo "$GH_REPO" --state open --search "in:title \"the $set_name is red\"" --json number -q '.[0].number' 2>/dev/null)
