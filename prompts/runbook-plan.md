@@ -94,8 +94,15 @@ overridden below.
    - **`--no-moments` identity runs take one slot.** Since #1419 (257d59520) they drop the scenario's C1
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
-     you merge the head. Only held arms and frame captures take `--all --render`.
-   - **A baseline, or any capture of several scenarios, holds the card alone.** It uses
+     you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
+   - **A class B render session takes one slot.** Change against parent, lockstep with moments, frames for
+     V5: take a plain `lease.sh acquire <issue>` and run its arms on that slot, like any other kit run.
+     - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
+     - **Memory fits.** A rendering kit (5–7 GB) fits beside an identity kit (5.1 GB) or another rendering
+       kit (two at 11.6 GB) under the two-kit cap. The out-of-memory kill was a third kit.
+     - **Tick cost** read in such a session is marked `shared card` in the packet. It is a recorded reading,
+       not a bar (D4), and T09 measures real time.
+   - **A baseline, or a perf A/B reading, holds the card alone.** It uses
      `lease.sh acquire <issue> --all --render`. Without `--render` the call is refused: a run that renders
      nothing takes one slot. Each call reserves every free slot for the tick and prints
      `RESERVING held=n/N` until the last sibling releases, then prints `ACQUIRED ... exclusive=all`
@@ -123,10 +130,9 @@ overridden below.
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
      loop ended, and a sibling would take the card mid-capture. A script that holds the lease for its
      whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
-   - **A tick with rendering and non-rendering runs splits them.** It runs the non-rendering arms on
-     one slot, and holds the whole card only for the arms that render: release, then
-     `acquire <issue> --all --render` again for those. A series of lockstep arms run under `--all` while only
-     some of them render keeps every sibling off the card for the whole series.
+   - **A tick that holds the whole card for a baseline** runs only the baseline's arms under it, and
+     releases before any other arm. A series of arms run under `--all` keeps every sibling off the card for
+     the whole series.
    - A render product is never read on the update it was armed on.
 3a. **Parent arms are shared per base commit.** Every refactor proving §F.3 against the same base runs the
    same parent arms (lockstep, `--no-moments`, same seed), so run them once and share them:
