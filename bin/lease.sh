@@ -344,6 +344,17 @@ case "${1:-}" in
         echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
       fi
     fi
+    # A rendering holder renewing between runs hands its slot to a render wait the
+    # operator named: one rendering kit fits the card, so without this a queue of
+    # many arms keeps a critical-path render waiting through all of them.
+    if [ -n "$render" ] && [ -n "$own" ] && [ "$held" = "$own" ]; then
+      op=$(operator_first slot-wait)
+      if [ -n "$op" ] && [ "$op" != "$issue" ] && [ "$(awk '{print $4}' "$LOCKS/slot-wait.$op" 2>/dev/null)" = render ]; then
+        rm -f "$(slot_file "$own")"
+        note_wait "$issue" slot-wait render
+        echo "YIELDED render slot=$own to operator-priority issue $op: the lease is released; acquire again with --render once its session ends"; exit 1
+      fi
+    fi
     # A whole-card issue with priority gets every slot that frees, and a holder
     # re-acquiring between runs hands its slot over: an advisory yield let a
     # queue keep the card while the reserved slots sat idle.

@@ -244,8 +244,19 @@ reset; rm -f "$L"/slot-wait.*
 echo "$(old 3000) $B $(old 10) render" > "$L/slot-wait.8"
 echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
 out=$("$LEASE" acquire 5); check "with no rendering kit live, a render wait keeps its place in line" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
+# A rendering holder renewing between arms yields to a render wait the operator named.
+reset; rm -f "$L"/slot-wait.* "$L/operator-priority"
+echo "3 $$ $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 60) $D $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); rc=$?
+check "a rendering holder yields between arms to a render wait the operator named" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED render slot=1 to operator-priority issue 9"* ]] && [ ! -e "$L/resource.lease" ] && grep -q " render$" "$L/slot-wait.3"' "rc=$rc $out"
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 60) $D $(old 10) render" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "without the operator's priority a rendering holder keeps its slot" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null
 kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
-rm -f "$L"/all-wait.* "$L"/slot-wait.*
+rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
