@@ -133,11 +133,16 @@ fable_cooling() {
 fable_lane() {  # true when this tick should run on the fable lane
     [ -n "$FABLE_MODEL" ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
     fable_cooling && return 1
-    local want_f live_f
+    local want_f young_f=0 pid age
     want_f=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$FABLE_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
     [[ "$want_f" =~ ^[0-9]+$ ]] && [ "$want_f" -gt 0 ] || return 1
-    live_f=$(pgrep -fc -- "claude -p .*--model $FABLE_MODEL" 2>/dev/null || true)
-    [ "${live_f:-0}" -lt "$want_f" ]
+    # The count excludes issues a live tick holds, so only a fable tick young enough
+    # to be still choosing its issue stands for one of them (compute_want's rule).
+    for pid in $(pgrep -f -- "claude -p .*--model $FABLE_MODEL" 2>/dev/null); do
+        age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young_f=$(( young_f + 1 ))
+    done
+    [ "$young_f" -lt "$want_f" ]
 }
 
 # ---------------------------------------------------------------- runner mode
