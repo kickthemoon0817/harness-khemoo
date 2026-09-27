@@ -272,7 +272,10 @@ overridden below.
     `kit.log`:
     - it must contain `scene bootstrap complete`;
     - it must contain neither `bootstrap FAILED` nor `lockstep invalidated`;
-    - it must show the robot actually moving.
+    - it must show the robot actually moving. Read that from the robot's joint states with
+      `tools/eval/boot_check.py <run folder>` (#1509, PR #1511), never from `robots[].links`. Since #1476 that
+      block lists only the links a zone composes. RS1 commands no motion by design, and its boot is proven by
+      its joints settling after the build hold.
     **A kit that mounts the branch's `worv.robots.catalog` must also mount the branch's
     `worv.robots.locomotion` and `worv.robots.attachments` builds.** The baked image's locomotion rejects
     `[drive].wheel_odom_hz`, and the robot never boots. That is how #1367's first traces were all invalid.
