@@ -57,27 +57,41 @@ fi
 # Red: one open issue carries every red run; a new head appends a comment.
 green=$(cat "$S/last_green" 2>/dev/null)
 range=${green:+$(git -C "$TARGET_REPO" log --merges --format='- %h %s' "$green..$sha" | head -40)}
-# Each failing case runs once more alone: one that passes alone is load-sensitive,
-# one that fails alone is a regression, and the issue says which.
+# A failing case is one whose own process exited non-zero, read from the runner's
+# per-case status files (line N of `cases` is `case.<N>.rc`): a `should_fail` case
+# that failed as expected exits 0, and its ERROR lines are not a failure. Each
+# failing case runs once more alone: one that passes alone is load-sensitive, one
+# that fails alone is a regression, and the issue says which.
 failing=""
 for f in "$out"/*.txt; do
     [ -e "$f" ] || continue
     name=$(basename "$f" .txt)
     [[ "$name" =~ ^test_[A-Za-z0-9_]+$ ]] || continue
-    cases=$(awk '/^TEST CASE:/{sub(/^TEST CASE: +/,""); c=$0} /ERROR:|FATAL ERROR|TIMEOUT/{if(c!="") print c}' "$f" | sort -u)
+    shard="$out/$name"
+    [ -r "$shard/cases" ] || continue
+    i=0
     while IFS= read -r c; do
-        [ -n "$c" ] || continue
+        i=$((i + 1)); index=$(printf '%06d' "$i")
+        read -r status _ <"$shard/case.$index.rc" 2>/dev/null || status=255
+        [ "$status" = 0 ] && continue
         [[ "$c" =~ [[:cntrl:]] ]] && continue
         # The case name is an argument, never shell text: a name is test output.
+        # doctest splits -tc= on commas, so they are escaped as the runner escapes them.
+        filter=$(printf '%s' "$c" | sed -e 's/\\/\\\\/g' -e 's/,/\\,/g')
         docker run --rm --runtime=runc -e CUDA_VISIBLE_DEVICES= -e NVIDIA_VISIBLE_DEVICES=void \
             -v "$SLOW_SET_WORKTREE":/w:ro \
             --entrypoint "/w/extensions/env/worv.env.manure/bin/tests/$name" "$BUILDER_IMAGE" \
-            "-tc=$c" >"$out/alone.txt" 2>&1 \
+            "-tc=$filter" >"$out/alone.$name.$index.txt" 2>&1 \
             && verdict="passes alone: load-sensitive" || verdict="fails alone: regression"
-        failing="$failing$name :: $c  [$verdict]\n$(grep -E 'ERROR|values:' "$f" | grep -A1 -F "" | head -4)\n"
-    done <<< "$cases"
+        case "$status" in
+            124) errors="killed past its CPU time limit" ;;
+            125) errors="killed: it gained no CPU time within the stall window" ;;
+            *) errors=$(grep -E -A1 'ERROR|FATAL' "$shard/case.$index.log" 2>/dev/null | grep -v '^--$' | head -6) ;;
+        esac
+        failing="$failing$name :: $c  [$verdict]\n${errors:-exit $status, no error line printed}\n"
+    done <"$shard/cases"
 done
-[ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E 'FAILED|TIMEOUT|ERROR' | sort -u | head -40)
+[ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E '^GATE:|^ERROR:|^\[doctest\] test cases:' | head -40)
 [ "$build_rc" -ne 0 ] && failing="build failed:\n$(tail -30 "$log")"
 body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe %s is red on `%s` at `%s` (`bin/slow_set.sh %s`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
     "$set_name" "$WORK_BRANCH" "$short" "$mode" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
