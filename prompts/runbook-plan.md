@@ -219,7 +219,11 @@ overridden below.
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
      merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and every case in
-     every touched test file pass, and the packet is written. Then close the issue. A PR that 3c holds
+     every touched test file pass, and the packet is written.
+   - **Every landing, class A or B, runs the image gates on its merge result:**
+     `python3 tools/test/p1_role_ratchet.py` and `tools/test/extension_version_gate.py`. A word above its
+     baseline lands only on an operator grant named in the landing comment; otherwise stop with a
+     `Plan finding:`. A head that fails an image gate is repaired before anything else lands. Then close the issue. A PR that 3c holds
      for a merge slot lands only in a slot, as 3c says.
    - **Class B** — a behaviour change: open the PR with the packet linked in `## Verification`, add
      `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting
