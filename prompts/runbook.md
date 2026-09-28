@@ -106,7 +106,11 @@ read-only.
    `extensions/env/worv.env.climate` (native runtime + Fabric array writes,
    `FabricGpuArray.h`), `extensions/_template_worv_cpp/README.md` (new-extension checklist).
    Build: `tools/dev/iter.sh build worv.env.manure` from the WORKTREE root (plus any other
-   ext you touched). The PhysX-header issue changes the Dockerfile BUILDER stage: after it lands,
+   ext you touched).
+   BUILD ONLY WHAT THE STEP NEEDS:
+   - A host-only loop (fixtures, `-sf` runs, the fast set) builds just the extensions the change touches (`git diff --name-only <base>`, mapped to their `extensions/<cat>/<ext>` dirs), plus any extension that includes a header the change touches in another extension.
+   - Build the kit set (worv.comm.base, worv.comm.ros2, worv.env.manure and the robots.* extensions the scenario loads) only right before a kit run.
+   - Never copy `obj/` or `bin/` trees between worktrees. Stale objects pass make's timestamp check. The PhysX-header issue changes the Dockerfile BUILDER stage: after it lands,
    every tick must run `tools/dev/iter.sh builder` once from its worktree before building (the
    builder image tag `worv-builder:isaac6` is shared — rebuild it under the stack lock and post the
    image id on the issue). AOT cubins: the tooling carries this now (#916, PR #918) -- `iter.sh build` prints
