@@ -188,6 +188,9 @@ overridden below.
    against one base per window, and a landing no longer sends every other proof back to re-run.
    - **Slots.** A slot opens every three hours on the UTC clock (00:00, 03:00, …, 21:00) and lasts
      60 minutes. The window base is `origin/ai/manure-mpm` when the slot opens.
+   - **The lock decides.** A landing whose merge lock was taken inside the slot may finish after the slot
+     closes. A tick that would take the lock after the close does not take it: it prepares its merge result,
+     pauses with the recipe, and lands first in the next slot.
    - **Which PRs wait.** A class A PR that changes code running in an identity arm: an extension the
      identity kits mount, the scenario runner, the render companion or a scenario file. Docs, tests,
      analysis tools, unmounted extensions and investigations merge when ready, as before; 3b exempts them.
