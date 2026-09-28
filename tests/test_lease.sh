@@ -299,6 +299,20 @@ out=$("$LEASE" acquire 3); rc=$?; check "once dropped, the holder yields to the 
 "$LEASE" prioritize --clear >/dev/null; rm -f "$L"/slot-wait.*
 kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
 rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
+# A whole-card waiter reserves nothing while a single-slot issue the operator named waits.
+sleep 600 & E=$!
+sleep 600 & F=$!
+reset; echo "1 $F $(ago 30) domain=77" > "$L/resource.lease"
+echo "$(old 60) $E $(old 10)" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 2 --all --render); rc=$?
+check "a whole-card waiter yields to a single-slot wait the operator named and reserves nothing" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDING to operator-priority issue 9"* ]] && ! grep -qs "reserved-for-all" "$L/resource.lease.2" "$L/resource.lease.3" && [ -s "$L/all-wait.2" ]' "rc=$rc $out"
+echo "2 $$ $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 2 --all --render); rc=$?
+check "its earlier reservations are dropped when it yields" '[ "$rc" -eq 1 ] && [ ! -e "$L/resource.lease.2" ]' "rc=$rc $out"
+"$LEASE" prioritize --clear >/dev/null
+out=$("$LEASE" acquire 2 --all --render); check "without the operator naming a wait, the whole-card waiter reserves as before" '[[ "$out" == "RESERVING held=2/3"* ]]' "$out"
+kill $E $F 2>/dev/null; wait $E $F 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -284,6 +284,17 @@ case "${1:-}" in
         note_wait "$issue"
         echo "YIELDING to whole-card issue $first_issue, which has waited longest"; exit 1
       fi
+      # A single-slot issue the operator named is waiting: a reservation would keep each slot
+      # it frees from that issue until the reservation lapses, so reserve nothing.
+      op=$(operator_first slot-wait)
+      if [ -n "$op" ] && [ "$op" != "$issue" ] && ! operator_ahead "$issue" "$op"; then
+        for s in $(seq 1 "$GPU_SLOTS"); do
+          f=$(slot_file $s)
+          [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
+        done
+        note_wait "$issue"
+        echo "YIELDING to operator-priority issue $op"; exit 1
+      fi
       mine=0; primary=""; others=""
       for s in $(seq 1 "$GPU_SLOTS"); do
         f=$(slot_file $s); hp=""
