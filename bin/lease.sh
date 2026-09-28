@@ -50,7 +50,10 @@
 #   lease.sh prioritize <issue> | prioritize --clear
 #       -> the operator's override: the named issues, in the order named, go before every line on
 #          their next acquire, whole-card or single-slot, and each is used up by that acquire.
-#          Needs no tick.
+#          A holder renewing its slot between runs hands it to the first named issue that is
+#          waiting, unless its own issue is named ahead of it, when that wait cannot start
+#          beside it: while the kits fill the card, or, for a rendering holder, a render wait.
+#          It prints YIELDED (exit 1) and joins the line. Needs no tick.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
 set -u
@@ -160,6 +163,16 @@ operator_done() {
   [ -s "$OPERATOR_FILE" ] || return 0
   local rest; rest=$(tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$1" | tr '\n' ' ')
   if [ -n "${rest// /}" ]; then echo "$rest" > "$OPERATOR_FILE"; else rm -f "$OPERATOR_FILE"; fi
+}
+# True when the operator named issue $1 ahead of issue $2.
+operator_ahead() {
+  local n
+  [ -s "$OPERATOR_FILE" ] || return 1
+  for n in $(cat "$OPERATOR_FILE"); do
+    [ "$n" = "$1" ] && return 0
+    [ "$n" = "$2" ] && return 1
+  done
+  return 1
 }
 priority_issue() {
   local card card_t line line_t op
@@ -332,27 +345,33 @@ case "${1:-}" in
       note_wait "$issue" slot-wait render
       echo "BUSY render: one rendering kit at a time $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi
+    # Kits running on the card, this tick's own included.
+    kits=0
+    for s in $(seq 1 "$GPU_SLOTS"); do
+      f=$(slot_file $s); [ -s "$f" ] || continue
+      [[ "$(cat "$f")" == *" reserved-for-all" ]] && continue
+      hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && kits=$(( kits + 1 ))
+    done
     if [ -n "$held" ] && [ "$held" != "$own" ]; then
-      kits=0
-      for s in $(seq 1 "$GPU_SLOTS"); do
-        f=$(slot_file $s); [ -s "$f" ] || continue
-        [[ "$(cat "$f")" == *" reserved-for-all" ]] && continue
-        hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && kits=$(( kits + 1 ))
-      done
       if [ "$kits" -ge "$GPU_KITS_MAX" ]; then
         note_wait "$issue" slot-wait
         echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
       fi
     fi
-    # A rendering holder renewing between runs hands its slot to a render wait the
-    # operator named: one rendering kit fits the card, so without this a queue of
-    # many arms keeps a critical-path render waiting through all of them.
-    if [ -n "$render" ] && [ -n "$own" ] && [ "$held" = "$own" ]; then
+    # A holder renewing between runs hands its slot to the wait the operator put
+    # first, unless the operator named this holder's issue ahead of it, when that
+    # wait cannot start beside it: a render wait behind this rendering kit, or any
+    # wait while the kits fill the card. Without this, a queue of many arms keeps
+    # a critical-path wait out through all of them.
+    if [ -n "$own" ] && [ "$held" = "$own" ]; then
       op=$(operator_first slot-wait)
-      if [ -n "$op" ] && [ "$op" != "$issue" ] && [ "$(awk '{print $4}' "$LOCKS/slot-wait.$op" 2>/dev/null)" = render ]; then
-        rm -f "$(slot_file "$own")"
-        note_wait "$issue" slot-wait render
-        echo "YIELDED render slot=$own to operator-priority issue $op: the lease is released; acquire again with --render once its session ends"; exit 1
+      if [ -n "$op" ] && [ "$op" != "$issue" ] && ! operator_ahead "$issue" "$op"; then
+        op_kind=$(awk '{print $4}' "$LOCKS/slot-wait.$op" 2>/dev/null)
+        if { [ -n "$render" ] && [ "$op_kind" = render ]; } || [ "$kits" -ge "$GPU_KITS_MAX" ]; then
+          rm -f "$(slot_file "$own")"
+          note_wait "$issue" slot-wait ${render:+render}
+          echo "YIELDED ${render:+render }slot=$own to operator-priority issue $op: the lease is released; acquire again${render:+ with --render} once its session ends"; exit 1
+        fi
       fi
     fi
     # A whole-card issue with priority gets every slot that frees, and a holder
