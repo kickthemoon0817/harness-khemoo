@@ -5,15 +5,17 @@
 set -u
 : "${GH_REPO:?}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"; : "${SIGNOFF_LABEL:=ai:signoff}"
 : "${OPERATOR_LABEL:=ai:operator}"; : "${READY_LABEL:=ai:ready}"
+# A tick takes a local claim (bin/claim.sh) before its claim comment reaches GitHub.
+CLAIM_LOCKS="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/state/locks"
 json=$(gh issue list --repo "$GH_REPO" --label "$ISSUE_LABEL" --state open --limit 100 \
     --json number,body,labels 2>/dev/null) || { echo 1; exit 0; }
 # The issue list goes through a file, never argv: forty issue bodies exceed ARG_MAX,
 # and the heredoc below already owns stdin.
 list_file=$(mktemp); trap 'rm -f "$list_file"' EXIT; printf '%s' "$json" > "$list_file"
-python3 - "$list_file" "$WIP_LABEL" "$GH_REPO" "$SIGNOFF_LABEL" "$OPERATOR_LABEL" "$READY_LABEL" <<'PY'
+python3 - "$list_file" "$WIP_LABEL" "$GH_REPO" "$SIGNOFF_LABEL" "$OPERATOR_LABEL" "$READY_LABEL" "$CLAIM_LOCKS" <<'PY'
 import json, os, re, subprocess, sys
 issues = json.load(open(sys.argv[1])); wip = sys.argv[2]; repo = sys.argv[3]; signoff = sys.argv[4]
-operator = sys.argv[5]; ready = sys.argv[6]
+operator = sys.argv[5]; ready = sys.argv[6]; claim_locks = sys.argv[7]
 import datetime
 # Merge slots (runbook-plan override 3c): the first hour of every third UTC hour.
 slot_open = datetime.datetime.now(datetime.timezone.utc).hour % 3 == 0
@@ -31,8 +33,16 @@ def claimant_alive(n):
     claimed = set(re.findall(r"harness tick .*?pid (\d+) (?:claiming|resuming)", out))
     withdrawn = set(re.findall(r"pid (\d+) (?:withdrawing|pausing|releasing)", out))
     return any(os.path.exists("/proc/" + pid) for pid in claimed - withdrawn)
+def local_claim_alive(n):
+    # The local claim is taken before the comment, so it sees a claimant the comments do not show yet.
+    try:
+        pid = open(os.path.join(claim_locks, "claim.%d" % n)).read().split()[1]
+    except (OSError, IndexError):
+        return False
+    return pid.isdigit() and os.path.exists("/proc/" + pid)
 count = 0
 for i in issues:
+    if local_claim_alive(i["number"]): continue
     # An issue waiting for its sign-off is never claimable, however its claimant ended.
     if any(l["name"] == signoff for l in i["labels"]): continue
     # Nor is one paused until the operator answers it: a tick could only find it waiting.

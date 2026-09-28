@@ -65,7 +65,9 @@ read-only.
 1. **Setup** — `git fetch origin`. Every push and
    branch mutation runs under `flock /home/khemoo/tmp_workspace/claude-issue-harness/state/locks/stack.lock`.
    Never run `git checkout`, `git stash`, `git clean` or any edit in TARGET_REPO itself.
-2. **Claim** — add `ai:wip`, comment `harness tick <UTC timestamp> pid <PID> claiming
+2. **Claim** — first take the local claim: `/home/khemoo/tmp_workspace/claude-issue-harness/bin/claim.sh acquire <N>`.
+   `BUSY` means another live tick holds the issue: pick the next claimable one, and post nothing on this one.
+   Only on `ACQUIRED` add `ai:wip` and comment `harness tick <UTC timestamp> pid <PID> claiming
    (host <hostname>)`. The PID must be the long-lived `claude -p` process, never a tool
    shell (those die within seconds and would look orphaned). Get it ONLY with
    `PID=$(/home/khemoo/tmp_workspace/claude-issue-harness/bin/tick-pid.sh)` in the same command
