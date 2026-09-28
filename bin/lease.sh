@@ -47,9 +47,10 @@
 #          (exit 1). Refused while a whole-card run holds the card, while another device run is
 #          live, or when the card's used memory plus DEVICE_TEST_MIB would pass its size less
 #          CARD_MARGIN_MIB. A whole-card acquire waits for a live device run to end.
-#   lease.sh prioritize <issue> | prioritize --clear
-#       -> the operator's override: the named issues, in the order named, go before every line on
-#          their next acquire, whole-card or single-slot, and each is used up by that acquire.
+#   lease.sh prioritize <issue> | prioritize --drop <issue> | prioritize --clear
+#       -> the operator's ranking: the named issues, in the order named, go before every line,
+#          whole-card or single-slot. An entry stays until the operator drops it or clears the
+#          list, so a named holder keeps its place across its arms.
 #          A holder renewing its slot between runs hands it to the first named issue that is
 #          waiting, unless its own issue is named ahead of it, when that wait cannot start
 #          beside it: while the kits fill the card, or, for a rendering holder, a render wait.
@@ -303,7 +304,6 @@ case "${1:-}" in
         echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
       fi
       rm -f "$LOCKS/all-wait.$issue" "$LOCKS/slot-wait.$issue"
-      operator_done "$issue"
       [ -z "$primary" ] && primary=1
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
       cr=$(slot_cache $primary)
@@ -408,15 +408,18 @@ case "${1:-}" in
     fi
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d${render:+ render}" > "$f"
     rm -f "$LOCKS/slot-wait.$issue"
-    [ "$held" != "$own" ] && operator_done "$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
     ;;
   prioritize)
     exec 8>"$K"; flock 8
     if [ "${2:-}" = "--clear" ]; then rm -f "$OPERATOR_FILE"; echo "CLEARED"; exit 0; fi
+    if [ "${2:-}" = "--drop" ]; then
+      d="${3:?issue number}"; [[ "$d" =~ ^[0-9]+$ ]] || { echo "usage: lease.sh prioritize --drop <issue>" >&2; exit 2; }
+      operator_done "$d"; echo "PRIORITIZED $(cat "$OPERATOR_FILE" 2>/dev/null)"; exit 0
+    fi
     n="${2:?issue number or --clear}"
-    [[ "$n" =~ ^[0-9]+$ ]] || { echo "usage: lease.sh prioritize <issue> | --clear" >&2; exit 2; }
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "usage: lease.sh prioritize <issue> | --drop <issue> | --clear" >&2; exit 2; }
     { [ -s "$OPERATOR_FILE" ] && tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$n" | tr '\n' ' '; echo "$n"; } | tr -s ' \n' ' ' | sed 's/^ //; s/ $//' > "$OPERATOR_FILE.new"
     mv -f "$OPERATOR_FILE.new" "$OPERATOR_FILE"
     echo "PRIORITIZED $(cat "$OPERATOR_FILE")"

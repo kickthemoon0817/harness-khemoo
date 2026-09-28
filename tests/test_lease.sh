@@ -206,14 +206,14 @@ out=$("$LEASE" acquire 3); check "a prioritized whole-card wait goes before an o
 echo "1 $$ $(ago 60) domain=77" > "$L/resource.lease"
 out=$("$LEASE" acquire 1); rc=$?
 check "a holder re-acquiring yields to a prioritized whole-card issue" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to whole-card issue 7"* ]]' "rc=$rc $out"
-out=$("$LEASE" acquire 7 --all --render); check "the prioritized issue takes the card and its priority is used up" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/operator-priority" ]' "$out"
+out=$("$LEASE" acquire 7 --all --render); check "the prioritized issue takes the card and keeps its entry" '[[ "$out" == *"exclusive=all"* ]] && grep -qw 7 "$L/operator-priority"' "$out"
 "$LEASE" release 7 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*
 echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
 echo "$(old 30) $B $(old 10)" > "$L/slot-wait.8"
 "$LEASE" prioritize 8 >/dev/null
 out=$("$LEASE" acquire 5); check "a prioritized single-slot wait goes before an older one" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
 out=$("$LEASE" status); check "status names the operator priority" '[[ "$out" == *"operator priority: 8"* ]]' "$out"
-out=$("$LEASE" acquire 8); check "the prioritized single-slot issue takes the slot and its priority is used up" '[[ "$out" == "ACQUIRED slot="* ]] && [ ! -e "$L/operator-priority" ]' "$out"
+out=$("$LEASE" acquire 8); check "the prioritized single-slot issue takes the slot and keeps its entry" '[[ "$out" == "ACQUIRED slot="* ]] && grep -qw 8 "$L/operator-priority"' "$out"
 "$LEASE" release 8 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*
 echo "$(old 30) 999999 $(old 10)" > "$L/all-wait.9"; "$LEASE" prioritize 9 >/dev/null
 out=$("$LEASE" acquire 3); check "a prioritized issue whose tick is dead does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
@@ -263,7 +263,7 @@ echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
 echo "$(old 60) $C $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
 out=$("$LEASE" acquire 3); rc=$?
 check "a plain holder yields between runs to a wait the operator named while the kits fill the card" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to operator-priority issue 9"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ] && ! grep -q " render$" "$L/slot-wait.3" && grep -qx "9" "$L/operator-priority"' "rc=$rc $out"
-out=$("$LEASE" acquire 9 --render); check "the named render wait then takes the freed slot and its priority is used up" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q " render$" "$L/resource.lease" && [ ! -e "$L/operator-priority" ]' "$out"
+out=$("$LEASE" acquire 9 --render); check "the named render wait then takes the freed slot and keeps its entry" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q " render$" "$L/resource.lease" && grep -qw 9 "$L/operator-priority"' "$out"
 reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
 echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
 echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
@@ -287,6 +287,16 @@ out=$("$LEASE" acquire 3 --render); rc=$?
 check "a plain holder asking to render waits while another rendering kit is live, and keeps its slot" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY render"* ]] && grep -q "^3 $$ " "$L/resource.lease" && ! grep -q " render$" "$L/resource.lease"' "rc=$rc $out"
 out=$("$LEASE" acquire 3); check "the same holder renewing without --render keeps its plain slot" '[[ "$out" == "ACQUIRED slot=1 "* ]] && ! grep -q " render$" "$L/resource.lease"' "$out"
 "$LEASE" release 3 >/dev/null
+# A named holder keeps its place after acquiring, so a wait named after it cannot take its slot.
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+"$LEASE" prioritize 3 >/dev/null; "$LEASE" prioritize 9 >/dev/null
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a named issue acquires and stays in the ranking" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -qw 3 "$L/operator-priority"' "$out"
+echo "$(old 60) $C $(old 10)" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "a holder named ahead keeps its slot from a later-named wait across its arms" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+out=$("$LEASE" prioritize --drop 3); check "the operator drops an entry" '[[ "$out" == "PRIORITIZED 9" ]] && ! grep -qw 3 "$L/operator-priority"' "$out"
+out=$("$LEASE" acquire 3); rc=$?; check "once dropped, the holder yields to the named wait while the kits fill the card" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to operator-priority issue 9"* ]]' "rc=$rc $out"
+"$LEASE" prioritize --clear >/dev/null; rm -f "$L"/slot-wait.*
 kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
 rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
