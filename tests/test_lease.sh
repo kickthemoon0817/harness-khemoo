@@ -207,14 +207,14 @@ echo "1 $$ $(ago 60) domain=77" > "$L/resource.lease"
 out=$("$LEASE" acquire 1); rc=$?
 check "a holder re-acquiring yields to a prioritized whole-card issue" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to whole-card issue 7"* ]]' "rc=$rc $out"
 out=$("$LEASE" acquire 7 --all --render); check "the prioritized issue takes the card and keeps its entry" '[[ "$out" == *"exclusive=all"* ]] && grep -qw 7 "$L/operator-priority"' "$out"
-"$LEASE" release 7 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*
+"$LEASE" release 7 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
 echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
 echo "$(old 30) $B $(old 10)" > "$L/slot-wait.8"
 "$LEASE" prioritize 8 >/dev/null
 out=$("$LEASE" acquire 5); check "a prioritized single-slot wait goes before an older one" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
 out=$("$LEASE" status); check "status names the operator priority" '[[ "$out" == *"operator priority: 8"* ]]' "$out"
 out=$("$LEASE" acquire 8); check "the prioritized single-slot issue takes the slot and keeps its entry" '[[ "$out" == "ACQUIRED slot="* ]] && grep -qw 8 "$L/operator-priority"' "$out"
-"$LEASE" release 8 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*
+"$LEASE" release 8 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
 echo "$(old 30) 999999 $(old 10)" > "$L/all-wait.9"; "$LEASE" prioritize 9 >/dev/null
 out=$("$LEASE" acquire 3); check "a prioritized issue whose tick is dead does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 "$LEASE" release 3 >/dev/null

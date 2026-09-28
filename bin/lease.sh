@@ -162,7 +162,7 @@ operator_first() {
 }
 operator_done() {
   [ -s "$OPERATOR_FILE" ] || return 0
-  local rest; rest=$(tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$1" | tr '\n' ' ')
+  local rest; rest=$(tr ' ' '\n' < "$OPERATOR_FILE" | grep -vx "$1" | grep -v '^$' | tr '\n' ' ' | sed 's/ *$//')
   if [ -n "${rest// /}" ]; then echo "$rest" > "$OPERATOR_FILE"; else rm -f "$OPERATOR_FILE"; fi
 }
 # True when the operator named issue $1 ahead of issue $2.
