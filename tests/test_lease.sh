@@ -279,6 +279,14 @@ echo "6 $D $(ago 30) domain=78 render" > "$L/resource.lease.2"
 echo "$(old 60) $C $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
 out=$("$LEASE" acquire 3); check "a plain holder keeps its slot from a render wait another rendering kit blocks" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 "$LEASE" release 3 >/dev/null; "$LEASE" prioritize --clear >/dev/null
+# A plain holder asking to render waits while another tick's rendering kit is live.
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "6 $D $(ago 30) domain=78 render" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3 --render); rc=$?
+check "a plain holder asking to render waits while another rendering kit is live, and keeps its slot" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY render"* ]] && grep -q "^3 $$ " "$L/resource.lease" && ! grep -q " render$" "$L/resource.lease"' "rc=$rc $out"
+out=$("$LEASE" acquire 3); check "the same holder renewing without --render keeps its plain slot" '[[ "$out" == "ACQUIRED slot=1 "* ]] && ! grep -q " render$" "$L/resource.lease"' "$out"
+"$LEASE" release 3 >/dev/null
 kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
 rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 

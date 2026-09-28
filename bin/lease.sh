@@ -340,8 +340,11 @@ case "${1:-}" in
     done
     [ -z "$held" ] && held=${free:-$stale}
     # A holder renewing its slot between arms keeps the slot's render mark, however it asks.
-    [ -n "$own" ] && [[ "$(cat "$(slot_file "$own")")" == *" render" ]] && render=1
-    if [ -n "$render" ] && [ "$render_busy" = 1 ] && { [ -z "$own" ] || [ "$held" != "$own" ]; }; then
+    own_render=""
+    [ -n "$own" ] && [[ "$(cat "$(slot_file "$own")")" == *" render" ]] && own_render=1 && render=1
+    # A holder of a plain slot that asks to render waits like any other render
+    # request while another tick's rendering kit is live, and keeps its slot.
+    if [ -n "$render" ] && [ "$render_busy" = 1 ] && { [ -z "$own" ] || [ "$held" != "$own" ] || [ -z "$own_render" ]; }; then
       note_wait "$issue" slot-wait render
       echo "BUSY render: one rendering kit at a time $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi
