@@ -95,6 +95,14 @@ overridden below.
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
      you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
+   - **A single-slot grant may be on the remote card** (slots 4–5, domains 80–81, `remote=` in the ACQUIRED line).
+     - Its export line sets `DOCKER_HOST` and puts `bin/remote-docker` first on `PATH`. So every `docker` and
+       `nvidia-smi` call made under it, from `iter.sh`, `scenario_run.py` and the queue, runs on that host.
+       The shims copy the run's bind mounts across and read that card.
+     - A remote arm is identical to a local one: RS4 on parent-af846aec8 matched bit for bit, 431/431
+       documents and the whole wrench trace. So change and parent arms may run on either card.
+     - Keep every kit-side call of the run under the export line. A bare `docker ps` or `iter.sh logs` outside
+       it looks at the local host.
    - **A class B render session takes one slot, with `lease.sh acquire <issue> --render`.** Change against
      parent, lockstep with moments, frames for V5, run on that one slot.
      - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
