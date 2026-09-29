@@ -103,6 +103,10 @@ overridden below.
        documents and the whole wrench trace. So change and parent arms may run on either card.
      - Keep every kit-side call of the run under the export line. A bare `docker ps` or `iter.sh logs` outside
        it looks at the local host.
+     - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
+       `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
+       - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
+         kills `topics` mid-replacement, and every arm dies without a kit. Docker over ssh widens that window.
    - **A class B render session takes one slot, with `lease.sh acquire <issue> --render`.** Change against
      parent, lockstep with moments, frames for V5, run on that one slot.
      - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
