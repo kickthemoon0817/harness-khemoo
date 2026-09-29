@@ -169,6 +169,10 @@ overridden below.
    - **Every scenario of the set.** A §F.3 proof covers RS1–RS6. RS4 joined on bases from 8ec107ad3 (#1417,
      D16a), and runs under `lockstep_sync --no-moments` like the rest. A missing parent arm is a reason to claim and run it, never a reason to leave its scenario
      out. A class A merge with a scenario left out is not proven: pause instead, and say which arms are owed.
+   - **Keys set aside in every identity comparison:** `header`, `models`, `models_sha256` and
+     `collider_set.queries` (operator, 2026-09-29).
+     - The last is a reader-query count that includes the queries made before the first document. It depends
+       on when the observer starts, not on the physics, so it parts by one between identical runs.
    - **One cubin.** Your change tree runs the parent tree's cubin (§F.3) while the kernel sources are
      unchanged.
    - **A pair that parts** is re-run with the parent arm in your own session, beside your change arm,
