@@ -86,7 +86,7 @@ if [[ -n "$holder" ]]; then
   [[ "$ancestor" == "$pid" ]] || {
     echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
   }
-elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ]; then
+elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ] && [ "${1:-}" != remote ]; then
   # A lease belongs to the tick. From a loop detached from the tick's tree the
   # walk finds no tick, and recording the loop's own PID would leave a lease
   # that reads as dead the moment the loop ends, handing the slot to a sibling.
