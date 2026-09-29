@@ -241,6 +241,38 @@ overridden below.
        head.
      - When a class B change lands in a slot, the next head's chain check (above) is skipped for the
        scenarios that change moves. It is recorded as skipped, with the class B PR named.
+3d. **PRs are proven in groups, not one by one (owner, 2026-09-29).** One proof covers a group, and the
+   combination that lands is the combination tested.
+   - **A group is an issue.**
+     - The operator opens it with `ai:plan` and `ai:group`, and lists its members in landing order
+       (`Members: #a, #b, …`) and the group's class.
+     - While a member is in a group it carries `ai:operator` and a `Group: #<g>` comment, and its own tick
+       runs no scenario arm.
+     - The group's tick claims the group issue as usual.
+   - **Class A group** (identity-preserving members whose host checks are green):
+     1. **Build the group branch.** Create `ai/group-<g>` from `origin/ai/manure-mpm` and merge each member's
+        branch in order.
+        - A member whose merge needs more than version and CHANGELOG resolution leaves the group. Post the
+          conflict on it, drop it from the list, and lift its hold.
+     2. **Host checks.** Build, then run every case of the union of the members' touched test files, and the
+        fast set.
+     3. **One set of arms.** Run RS1–RS6 change arms of the group branch against the shared parent pairs
+        (3a), one set for the whole group, on either card.
+     4. **All identical.** Set aside only the keys the members' packets name.
+        - Post `Group proof: identical on <base9>, packet <path>` on each member.
+        - Lift the holds and add `ai:ready` to each member and its PR.
+        - The members land one by one in the slot, in group order, as 3c says.
+     5. **A scenario parts.** Bisect on that scenario only: re-run it on half the members, then narrow.
+        - The parting member leaves the group with the reading, to become class B or be fixed.
+        - The rest are re-proven on that scenario.
+        - Every run goes in the group's packet.
+   - **Class B group** (behaviour changes to the same physics, such as the bucket–steel contact):
+     1. **Member evidence.** Each member keeps its own fixtures and fail-on-head evidence in its own packet.
+     2. **Read the combination.** The group branch, built as above, carries every member. Its scenario arms
+        (change against parent), V5 and tick cost are read on that combination, the tree that will land.
+     3. **Sign-off and landing.** The operator signs off the group on the group's packet.
+        - The members then land together in one slot, in order, after that slot's class A batch.
+        - Each re-runs its touched tests on the merge result.
 4. **Visual check by independent eyes (V5).** For every behaviour change (merge class B), spawn a
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
