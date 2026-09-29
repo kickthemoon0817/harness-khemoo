@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The docker CLI for a run on a remote card. When DOCKER_HOST names an ssh://
+# daemon, a bind mount's source is a path on that host, so `docker run` and
+# `docker create` first copy every absolute host path they mount to the same
+# path there. Paths under /tmp stay the remote's own: shader caches and the X
+# socket belong to the host that runs the kit.
+set -u
+self_dir=$(cd "$(dirname "$0")" && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) command -v docker)
+[ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
+case "${DOCKER_HOST:-}" in ssh://*) ;; *) exec "$real" "$@" ;; esac
+target=${DOCKER_HOST#ssh://}
+sub=""
+for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
+if [ "$sub" = run ] || [ "$sub" = create ]; then
+  prev=""
+  for a in "$@"; do
+    src=""
+    case "$prev" in
+      -v|--volume) src=${a%%:*} ;;
+      --mount) src=$(sed -n 's/.*\(source\|src\)=\([^,]*\).*/\2/p' <<<"$a") ;;
+    esac
+    case "$a" in
+      --volume=*) v=${a#--volume=}; src=${v%%:*} ;;
+      --mount=*) src=$(sed -n 's/.*\(source\|src\)=\([^,]*\).*/\2/p' <<<"${a#--mount=}") ;;
+    esac
+    prev=$a
+    case "$src" in /tmp|/tmp/*|"") continue ;; /*) ;; *) continue ;; esac
+    [ -e "$src" ] || continue
+    parent=$(dirname "$src")
+    ssh -o BatchMode=yes "$target" "mkdir -p '$parent'" &&
+      rsync -a --delete -e "ssh -o BatchMode=yes" "$src" "$target:$parent/" ||
+      { echo "remote-docker: could not copy $src to $target" >&2; exit 1; }
+  done
+fi
+exec "$real" "$@"

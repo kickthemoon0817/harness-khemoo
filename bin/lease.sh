@@ -64,6 +64,12 @@ H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # the robot's cameras needs 5-7 GB of the 16 GB card. GPU_SLOTS still names
 # every slot file, so a whole-card acquire sees every holder.
 : "${GPU_KITS_MAX:=2}"
+# A second card on another host adds REMOTE_KITS_MAX single-slot kits
+# (`lease.sh remote <user@host>`, reached by ssh with a key). Its slots follow the
+# local ones. A run there reaches that host's docker daemon through DOCKER_HOST,
+# and the shims in bin/remote-docker copy the run's bind mounts across and read
+# that card's memory. The whole card and device runs stay on the local card.
+: "${REMOTE_KITS_MAX:=2}"
 LOCKS="$H/state/locks"; K="$LOCKS/resource.lock"; G=/tmp/isaac-cppmig-gpu-runtime.lock
 # An explicit holder (a task wrapper, or a script that holds the lease for its
 # whole run) must be a live ancestor, never an arbitrary lease claimant.
@@ -92,6 +98,9 @@ else
   pid=$PPID
 fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
+REMOTE_FILE="$LOCKS/remote-card"
+REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(cat "$REMOTE_FILE" 2>/dev/null)}"
+remote_slots() { [ -n "$REMOTE_CARD_HOST" ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX )); }
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
 DEVICE_FILE="$LOCKS/device.lease"
@@ -217,6 +226,41 @@ slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
 SEED_IMAGE="${WORV_BUILDER_IMAGE:-worv-builder:isaac6}"
 slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
+# A single-slot run the local card cannot take goes to the remote card: this
+# tick's own remote slot, else a free one while that card's kits and its one
+# rendering kit allow it and no one else is first in line. Prints the grant and
+# exits 0, or returns 1. A remote slot's cache stays under /tmp on that host.
+remote_grant() {
+  [ -n "$REMOTE_CARD_HOST" ] || return 1
+  local s f hp own_r="" free_r="" kits_r=0 render_r=0 take first
+  for s in $(remote_slots); do
+    f=$(slot_file $s); hp=""
+    [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+    if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+      if [ "$hp" = "$pid" ]; then own_r=$s; continue; fi
+      kits_r=$(( kits_r + 1 ))
+      [[ "$(cat "$f")" == *" render" ]] && render_r=1
+    elif [ -z "$free_r" ]; then
+      free_r=$s
+    fi
+  done
+  take=$own_r
+  if [ -z "$take" ]; then
+    [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ] || return 1
+    [ -n "$render" ] && [ "$render_r" = 1 ] && return 1
+    first=$(slot_first_issue)
+    [ -n "$first" ] && [ "$first" != "$issue" ] && return 1
+    take=$free_r
+  fi
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_CARD_HOST" true >/dev/null 2>&1 || return 1
+  f=$(slot_file $take)
+  local c="worv-iter-$take" d=$(( 76 + take )) cr="$CACHE_BASE/cache-slot$take"
+  echo "$issue $pid $(date -u +%FT%TZ) domain=$d remote${render:+ render}" > "$f"
+  rm -f "$LOCKS/slot-wait.$issue"
+  echo "ACQUIRED slot=$take file=$f container=$c domain=$d cache=$cr remote=$REMOTE_CARD_HOST"
+  echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d WORV_ITER_CACHE_ROOT=$cr DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"
+  exit 0
+}
 # The caches are root-owned (docker creates the bind sources), so the copy runs
 # in a container. A partial copy is staged under .seeding and renamed, so a
 # killed seed is retried rather than taken for a warm root.
@@ -337,6 +381,11 @@ case "${1:-}" in
     render=""
     if [ "$stated" = "--render" ]; then render=1; stated=""; fi
     render_live && render_busy=1
+    # A tick that holds a remote slot renews it there.
+    for s in $(remote_slots); do
+      f=$(slot_file $s)
+      [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && remote_grant
+    done
     # This tick's own slot first, then a free or dead one, then a lapsed reservation.
     held=""; free=""; stale=""; own=""
     for s in $(seq 1 "$GPU_SLOTS"); do
@@ -356,6 +405,7 @@ case "${1:-}" in
     # A holder of a plain slot that asks to render waits like any other render
     # request while another tick's rendering kit is live, and keeps its slot.
     if [ -n "$render" ] && [ "$render_busy" = 1 ] && { [ -z "$own" ] || [ "$held" != "$own" ] || [ -z "$own_render" ]; }; then
+      remote_grant
       note_wait "$issue" slot-wait render
       echo "BUSY render: one rendering kit at a time $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi
@@ -368,6 +418,7 @@ case "${1:-}" in
     done
     if [ -n "$held" ] && [ "$held" != "$own" ]; then
       if [ "$kits" -ge "$GPU_KITS_MAX" ]; then
+        remote_grant
         note_wait "$issue" slot-wait
         echo "BUSY kit limit $kits/$GPU_KITS_MAX $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
       fi
@@ -398,6 +449,7 @@ case "${1:-}" in
         note_wait "$issue" slot-wait
         echo "YIELDED slot=$own to whole-card issue $first_issue, which has waited longest: the lease is released; acquire again once the card is back"; exit 1
       fi
+      remote_grant
       note_wait "$issue" slot-wait
       echo "BUSY priority to whole-card issue $first_issue"; exit 1
     fi
@@ -408,6 +460,7 @@ case "${1:-}" in
       echo "BUSY queued behind single-slot issue $slot_first, which has waited longest"; exit 1
     fi
     if [ -z "$held" ]; then
+      remote_grant
       note_wait "$issue" slot-wait
       echo "BUSY $(for s in $(seq 1 "$GPU_SLOTS"); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
     fi
@@ -438,15 +491,24 @@ case "${1:-}" in
   release)
     exec 8>"$K"; flock 8
     out="NOT-HOLDER"
-    for s in $(seq 1 "$GPU_SLOTS"); do
+    for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
       if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f"; out="RELEASED slot=$s"; fi
     done
     if [ -s "$DEVICE_FILE" ] && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then rm -f "$DEVICE_FILE"; out="RELEASED device"; fi
     echo "$out"
     ;;
+  remote)
+    exec 8>"$K"; flock 8
+    case "${2:?user@host or --off}" in
+      --off) rm -f "$REMOTE_FILE"; echo "REMOTE off" ;;
+      *@*) echo "$2" > "$REMOTE_FILE"; echo "REMOTE $2 slots $(( GPU_SLOTS + 1 ))-$(( GPU_SLOTS + REMOTE_KITS_MAX ))" ;;
+      *) echo "usage: lease.sh remote <user@host> | remote --off" >&2; exit 2 ;;
+    esac
+    ;;
   status)
-    for s in $(seq 1 "$GPU_SLOTS"); do
+    [ -n "$REMOTE_CARD_HOST" ] && echo "remote card: $REMOTE_CARD_HOST"
+    for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
       if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
       else echo "slot $s free"; fi
@@ -469,5 +531,5 @@ case "${1:-}" in
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | status" >&2; exit 2;;
 esac

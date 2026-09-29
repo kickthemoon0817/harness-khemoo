@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# nvidia-smi for a run on a remote card: the card a run's kits use is the
+# DOCKER_HOST's, so its memory and processes are read there.
+set -u
+self_dir=$(cd "$(dirname "$0")" && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) command -v nvidia-smi)
+case "${DOCKER_HOST:-}" in
+  ssh://*) exec ssh -o BatchMode=yes "${DOCKER_HOST#ssh://}" nvidia-smi "$(printf '%q ' "$@")" ;;
+esac
+[ -n "$real" ] || { echo "nvidia-smi: not found" >&2; exit 127; }
+exec "$real" "$@"

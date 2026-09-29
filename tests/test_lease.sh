@@ -314,5 +314,37 @@ out=$("$LEASE" acquire 2 --all --render); check "without the operator naming a w
 kill $E $F 2>/dev/null; wait $E $F 2>/dev/null
 reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
+# A second card on another host takes the single-slot runs the local card cannot.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
+sleep 600 & RA=$!
+sleep 600 & RB=$!
+full_local() { reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5
+  echo "1 $RA $(ago 30) domain=77" > "$L/resource.lease"; echo "2 $RB $(ago 30) domain=78" > "$L/resource.lease.2"; }
+full_local
+out=$("$LEASE" acquire 3); check "without a remote card a full local card is busy" '[[ "$out" == "BUSY kit limit"* ]]' "$out"
+out=$("$LEASE" remote fake@host); check "the operator names the remote card" '[[ "$out" == "REMOTE fake@host slots 4-5" ]]' "$out"
+full_local
+out=$("$LEASE" acquire 3); check "a full local card sends a single-slot run to the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]] && [[ "$out" == *"bin/remote-docker:\$PATH"* ]] && grep -q " domain=80 remote$" "$L/resource.lease.4"' "$out"
+out=$("$LEASE" acquire 3); check "the tick renews its remote slot" '[[ "$out" == *"ACQUIRED slot=4 "* ]]' "$out"
+out=$("$LEASE" status); check "status names the remote card and its slots" '[[ "$out" == *"remote card: fake@host"* ]] && [[ "$out" == *"slot 4 HELD"* ]] && [[ "$out" == *"slot 5 free"* ]]' "$out"
+out=$("$LEASE" release 3); check "release drops the remote slot" '[ ! -e "$L/resource.lease.4" ]' "$out"
+full_local; echo "7 $RA $(ago 30) domain=80 remote render" > "$L/resource.lease.4"
+out=$("$LEASE" acquire 3 --render); check "a render run waits while the remote card's rendering kit is live" '[[ "$out" == BUSY* ]]' "$out"
+out=$("$LEASE" acquire 3); check "a plain run takes the remote card's second slot beside its rendering kit" '[[ "$out" == *"ACQUIRED slot=5 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+full_local; echo "7 $RA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $RB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "a full remote card is busy too" '[[ "$out" == BUSY* ]]' "$out"
+full_local; echo "$(old 3000) $RB $(old 10)" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "the remote card keeps the line: a run behind the first in line waits" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+full_local; echo "$(old 2000) $RB $(old 10)" > "$L/all-wait.9"
+out=$("$LEASE" acquire 3); check "a whole-card priority on the local card does not hold the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"remote="* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+full_local; printf '#!/usr/bin/env bash\nexit 255\n' > "$H/fakebin/ssh"
+out=$("$LEASE" acquire 3); check "an unreachable remote card grants nothing" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"
+out=$("$LEASE" remote --off); full_local; out2=$("$LEASE" acquire 3); check "with the remote card off a full local card is busy again" '[[ "$out" == "REMOTE off" ]] && [[ "$out2" == "BUSY kit limit"* ]]' "$out $out2"
+kill $RA $RB 2>/dev/null; wait $RA $RB 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
