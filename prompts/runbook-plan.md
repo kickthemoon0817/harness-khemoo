@@ -103,6 +103,11 @@ overridden below.
        documents and the whole wrench trace. So change and parent arms may run on either card.
      - Keep every kit-side call of the run under the export line. A bare `docker ps` or `iter.sh logs` outside
        it looks at the local host.
+     - **The local card is off (owner, 2026-09-30): every kit, whole-card and device run goes to the remote card.**
+       - `lease.sh` grants remote slots only. A whole-card run takes both remote slots, and a device run's export line
+         carries `DOCKER_HOST`.
+       - Builds without `--device` stay on this host: run `iter.sh build` outside the export line, or its outputs land
+         in the remote copy of the worktree instead of here.
      - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
        `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
        - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then

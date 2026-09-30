@@ -86,7 +86,7 @@ if [[ -n "$holder" ]]; then
   [[ "$ancestor" == "$pid" ]] || {
     echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
   }
-elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ] && [ "${1:-}" != remote ]; then
+elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ] && [ "${1:-}" != remote ] && [ "${1:-}" != local ]; then
   # A lease belongs to the tick. From a loop detached from the tick's tree the
   # walk finds no tick, and recording the loop's own PID would leave a lease
   # that reads as dead the moment the loop ends, handing the slot to a sibling.
@@ -101,12 +101,25 @@ slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/res
 REMOTE_FILE="$LOCKS/remote-card"
 REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(cat "$REMOTE_FILE" 2>/dev/null)}"
 remote_slots() { [ -n "$REMOTE_CARD_HOST" ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX )); }
+# With the local card off (`lease.sh local --off`), every kit, whole-card and
+# device run goes to the remote card, and the local card is left to its owner.
+LOCAL_OFF_FILE="$LOCKS/local-card-off"
+local_off() { [ -n "$REMOTE_CARD_HOST" ] && [ -e "$LOCAL_OFF_FILE" ]; }
+# The slots a whole-card or device run looks at: the card that runs it.
+card_slots() { if local_off; then remote_slots; else seq 1 "$GPU_SLOTS"; fi; }
+remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
 DEVICE_FILE="$LOCKS/device.lease"
 : "${DEVICE_TEST_MIB:=3072}"
 : "${CARD_MARGIN_MIB:=1024}"
-card_mib() { nvidia-smi --query-gpu="memory.$1" --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9'; }
+card_mib() {
+  if local_off; then
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_CARD_HOST" nvidia-smi --query-gpu="memory.$1" --format=csv,noheader,nounits 2>/dev/null
+  else
+    nvidia-smi --query-gpu="memory.$1" --format=csv,noheader,nounits 2>/dev/null
+  fi | head -1 | tr -dc '0-9'
+}
 device_holder_live() { [ -s "$DEVICE_FILE" ] && kill -0 "$(awk '{print $2}' "$DEVICE_FILE")" 2>/dev/null; }
 # A whole-card reservation keeps a slot from single-slot ticks for at most
 # ALL_RESERVE_TTL_S, counted from when the slot was first reserved. After that
@@ -278,7 +291,7 @@ case "${1:-}" in
     stated="${3:-}"
     if [ "$stated" = "--device" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
-      for s in $(seq 1 "$GPU_SLOTS"); do
+      for s in $(card_slots); do
         f=$(slot_file $s)
         if [ -s "$f" ] && [[ "$(cat "$f")" == *" exclusive" || "$(cat "$f")" == *" held-for-all" ]] \
            && kill -0 "$(awk '{print $2}' "$f")" 2>/dev/null; then
@@ -306,8 +319,8 @@ case "${1:-}" in
         echo "BUSY device: ${used} MiB used + ${DEVICE_TEST_MIB} MiB for the tests would pass ${total} MiB less ${CARD_MARGIN_MIB}"; exit 1
       fi
       echo "$issue $pid $(date -u +%FT%TZ) domain=0 device" > "$DEVICE_FILE"
-      echo "ACQUIRED device file=$DEVICE_FILE (card ${used}/${total} MiB used)"
-      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE"
+      echo "ACQUIRED device file=$DEVICE_FILE (card ${used}/${total} MiB used)$(local_off && echo " remote=$REMOTE_CARD_HOST")"
+      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(remote_env)"
       exit 0
     fi
     if [ "$stated" = "--all" ]; then
@@ -321,7 +334,7 @@ case "${1:-}" in
       first_issue=$(priority_issue)
       if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
         # Yield to the issue with priority: drop this tick's reservations, keep the wait on record.
-        for s in $(seq 1 "$GPU_SLOTS"); do
+        for s in $(card_slots); do
           f=$(slot_file $s)
           [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
         done
@@ -332,7 +345,7 @@ case "${1:-}" in
       # it frees from that issue until the reservation lapses, so reserve nothing.
       op=$(operator_first slot-wait)
       if [ -n "$op" ] && [ "$op" != "$issue" ] && ! operator_ahead "$issue" "$op"; then
-        for s in $(seq 1 "$GPU_SLOTS"); do
+        for s in $(card_slots); do
           f=$(slot_file $s)
           [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
         done
@@ -340,7 +353,7 @@ case "${1:-}" in
         echo "YIELDING to operator-priority issue $op"; exit 1
       fi
       mine=0; primary=""; others=""
-      for s in $(seq 1 "$GPU_SLOTS"); do
+      for s in $(card_slots); do
         f=$(slot_file $s); hp=""
         [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
         if [ -n "$hp" ] && [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null; then
@@ -356,25 +369,25 @@ case "${1:-}" in
       fi
       if [ -n "$others" ]; then
         note_wait "$issue"
-        echo "RESERVING held=$mine/$GPU_SLOTS waiting for $others"; exit 1
+        echo "RESERVING held=$mine/$(card_slots | wc -l) waiting for $others"; exit 1
       fi
       rm -f "$LOCKS/all-wait.$issue" "$LOCKS/slot-wait.$issue"
-      [ -z "$primary" ] && primary=1
+      [ -z "$primary" ] && primary=$(card_slots | head -1)
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
       cr=$(slot_cache $primary)
-      if [ -n "$cr" ] && ! seed_cache "$cr"; then
+      if [ -n "$cr" ] && ! local_off && ! seed_cache "$cr"; then
         echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
       fi
       echo "$issue $pid $(date -u +%FT%TZ) domain=$d exclusive" > "$f"
       # The reservations become holds, which never lapse while the capture runs.
-      for s in $(seq 1 "$GPU_SLOTS"); do
+      for s in $(card_slots); do
         [ "$s" -eq "$primary" ] && continue
         rf=$(slot_file $s)
         [ -s "$rf" ] && [ "$(awk '{print $2}' "$rf")" = "$pid" ] \
           && echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) held-for-all" > "$rf"
       done
-      echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}"
-      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+      echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}$(local_off && echo " remote=$REMOTE_CARD_HOST")"
+      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(remote_env)"
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
@@ -386,6 +399,18 @@ case "${1:-}" in
       f=$(slot_file $s)
       [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && remote_grant
     done
+    # With the local card off, a single-slot run goes to the remote card only, and
+    # a tick renewing a local slot gives it up and moves there.
+    if local_off; then
+      for s in $(seq 1 "$GPU_SLOTS"); do
+        f=$(slot_file $s)
+        [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] \
+          && [[ "$(cat "$f")" != *"-for-all" && "$(cat "$f")" != *" exclusive" ]] && rm -f "$f"
+      done
+      remote_grant
+      note_wait "$issue" slot-wait ${render:+render}
+      echo "BUSY remote card (the local card is off) $(for s in $(remote_slots); do printf '[%s] ' "$(cat "$(slot_file $s)" 2>/dev/null)"; done)"; exit 1
+    fi
     # This tick's own slot first, then a free or dead one, then a lapsed reservation.
     held=""; free=""; stale=""; own=""
     for s in $(seq 1 "$GPU_SLOTS"); do
@@ -498,6 +523,16 @@ case "${1:-}" in
     if [ -s "$DEVICE_FILE" ] && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then rm -f "$DEVICE_FILE"; out="RELEASED device"; fi
     echo "$out"
     ;;
+  local)
+    exec 8>"$K"; flock 8
+    case "${2:?--off or --on}" in
+      --off)
+        [ -n "$REMOTE_CARD_HOST" ] || { echo "REFUSED: no remote card is named; run lease.sh remote <user@host> first" >&2; exit 2; }
+        touch "$LOCAL_OFF_FILE"; echo "LOCAL off: kits, whole-card and device runs go to $REMOTE_CARD_HOST" ;;
+      --on) rm -f "$LOCAL_OFF_FILE"; echo "LOCAL on" ;;
+      *) echo "usage: lease.sh local --off | --on" >&2; exit 2 ;;
+    esac
+    ;;
   remote)
     exec 8>"$K"; flock 8
     case "${2:?user@host or --off}" in
@@ -508,6 +543,7 @@ case "${1:-}" in
     ;;
   status)
     [ -n "$REMOTE_CARD_HOST" ] && echo "remote card: $REMOTE_CARD_HOST"
+    local_off && echo "local card: off (every run goes to the remote card)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
       if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
@@ -531,5 +567,5 @@ case "${1:-}" in
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | local --off|--on | status" >&2; exit 2;;
 esac

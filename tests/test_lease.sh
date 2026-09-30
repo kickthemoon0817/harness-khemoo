@@ -346,5 +346,31 @@ out=$("$LEASE" remote --off); full_local; out2=$("$LEASE" acquire 3); check "wit
 kill $RA $RB 2>/dev/null; wait $RA $RB 2>/dev/null
 reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card"
 
+# With the local card off, every kit, whole-card and device run goes to the remote card.
+printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo 1000;; *memory.total*) echo 16303;; esac\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
+sleep 600 & LA=$!
+sleep 600 & LB=$!
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/local-card-off"
+out=$("$LEASE" local --off); check "the local card cannot be turned off without a remote card" '[[ "$out" != "LOCAL off"* ]]' "$out"
+"$LEASE" remote fake@host >/dev/null
+out=$("$LEASE" local --off); check "the operator turns the local card off" '[[ "$out" == "LOCAL off"* ]] && [ -e "$L/local-card-off" ]' "$out"
+out=$("$LEASE" acquire 3); check "with the local card off a run takes a remote slot while the local slots are free" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 3); check "a tick renewing its local slot is moved to the remote card" '[[ "$out" == *"ACQUIRED slot=4 "* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+echo "7 $LA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $LB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "with the local card off and the remote card full a run waits" '[[ "$out" == "BUSY remote card"* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+rm -f "$L"/resource.lease.4 "$L"/resource.lease.5 "$L"/slot-wait.*
+out=$("$LEASE" acquire 3 --all --render); check "a whole-card run takes the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"exclusive=all"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]] && grep -q " held-for-all$" "$L/resource.lease.5" && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+out=$("$LEASE" acquire 3 --device); check "a device run goes to the remote card" '[[ "$out" == *"ACQUIRED device"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+out=$("$LEASE" status); check "status says the local card is off" '[[ "$out" == *"local card: off"* ]]' "$out"
+out=$("$LEASE" local --on); out2=$("$LEASE" acquire 3); check "with the local card on again a run takes a local slot" '[[ "$out" == "LOCAL on" ]] && [[ "$out2" == "ACQUIRED slot=1 "* ]]' "$out $out2"
+"$LEASE" release 3 >/dev/null; "$LEASE" remote --off >/dev/null
+kill $LA $LB 2>/dev/null; wait $LA $LB 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card" "$L/local-card-off"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
