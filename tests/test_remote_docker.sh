@@ -87,12 +87,23 @@ check "runs of different trees do not wait on each other" '[ "$(echo "$waited < 
 # bin/remote-env.sh: the function exists only while the local host is off and a remote host is named.
 out=$(HARNESS_HOME="$here" HARNESS_STATE="$T/state" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; type -t docker || echo none')
 check "with the local host on, no docker function is set" '[ "$out" = none ] || [ "$out" = file ]' "$out"
+out=$(env -u DOCKER_HOST HARNESS_HOME="$here" HARNESS_STATE="$T/state" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; echo "${DOCKER_HOST:-unset}"')
+check "with the local host on, DOCKER_HOST is left alone" '[ "$out" = unset ]' "$out"
 echo fake@host > "$T/state/locks/remote-card"; touch "$T/state/locks/local-card-off"
 out=$(HARNESS_HOME="$here" HARNESS_STATE="$T/state" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; bash -c "export PATH=/usr/bin:/bin; type -t docker"')
 check "with the local host off, a child bash with its own PATH still runs docker through the shim" '[ "$out" = function ]' "$out"
 : > "$LOG"
 HARNESS_HOME="$here" HARNESS_STATE="$T/state" PATH="$T/fake:$PATH" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; unset DOCKER_HOST; bash -c "docker run --rm -v '"$RW"':/b img make"'
 check "the function sends the run to the named host through the shim" 'grep -q "docker DOCKER_HOST=ssh://fake@host run --rm -v $RW:/b img make" "$LOG" && grep -q "rsync -a --update" "$LOG"' "$(calls)"
+: > "$LOG"
+HARNESS_HOME="$here" HARNESS_STATE="$T/state" PATH="$T/fake:$PATH" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; timeout 5 docker ps; xargs docker ps <<< "-q"'
+check "a docker binary reached past the function finds no daemon on this host" '[ "$(grep -c "^docker DOCKER_HOST=unix:///run/local-host-off/" "$LOG")" -eq 2 ] && ! grep -q "DOCKER_HOST= ps" "$LOG"' "$(calls)"
+: > "$LOG"
+HARNESS_HOME="$here" HARNESS_STATE="$T/state" PATH="$T/fake:$PATH" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; bash -c "docker run --rm -v '"$RW"':/b img make"'
+check "the function takes that inherited DOCKER_HOST as unset and sends the run to the remote host" 'grep -q "docker DOCKER_HOST=ssh://fake@host run --rm -v $RW:/b img make" "$LOG"' "$(calls)"
+: > "$LOG"
+HARNESS_HOME="$here" HARNESS_STATE="$T/state" PATH="$T/fake:$PATH" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; DOCKER_HOST=ssh://other@h2 docker ps; timeout 5 bash -c "docker ps -a"'
+check "an explicit ssh DOCKER_HOST wins, and bash -c under timeout keeps the function" 'grep -q "docker DOCKER_HOST=ssh://other@h2 ps$" "$LOG" && grep -q "docker DOCKER_HOST=ssh://fake@host ps -a" "$LOG"' "$(calls)"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -112,8 +112,12 @@ overridden below.
          writable mounts back, so `iter.sh build`'s binaries, an AOT's cubin and a test's logs land in the worktree here
          as before. A detached kit copies nothing back; its outputs come back through `docker exec` and `docker cp`.
        - Runs that share a worktree or a packet wait for each other while one of them writes it.
-       - A `docker` call from Python or `docker compose` does not see the function and runs on this host. Keep them out
-         of a tick unless the step needs them.
+       - A `docker` binary reached past the function finds no daemon: `timeout docker …`, `xargs docker`, `env docker`,
+         Python's `subprocess` and a `sh` script read a `DOCKER_HOST` that names a missing socket
+         (`…/use-the-docker-function-or-bash-c.sock`) and fail to connect instead of running on this host.
+         - Put the docker call inside bash: `timeout 600 bash -c 'docker run …'`.
+         - Run Python that calls docker under a slot's export line, which sets `DOCKER_HOST` and the shims' `PATH`.
+       - `docker compose` goes through the function to the remote daemon but copies no mounts; ticks do not use it.
        - `lease.sh` grants remote slots only. A whole-card run takes both remote slots, and a device run's export line
          carries `DOCKER_HOST`.
      - **Every scenario arm mounts `worv.core.scene` from its own tree, parent arms included,** until the runtime image is
