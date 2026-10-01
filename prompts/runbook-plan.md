@@ -306,6 +306,15 @@ overridden below.
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
    and save its `visual-check.md` in the packet. A *fails* or *cannot tell* blocks until explained.
+   - **RS6's push is a bifurcation (#1704, operator 2026-10-01).** Sub-millimetre differences before the drive decide
+     whether the crate climbs the face (z ≈ 1 m) or wedges against it (z ≈ 0.67 m); unchanged parents end at Base x
+     1.52–2.05 m, and the moments alone move a draw 0.32 m. So:
+     - RS6's push travel, crate path and V-i are read over at least three seeds per arm (the scenario runner's seed
+       option, as `2026-10-01-1626-seed-draws/` did), each draw's branch named from its final Base x and crate z
+       (`evidence/2026-10-01-1704-parked-sleep/checks/final.py`);
+     - a single draw that passes V5 needs no more draws. A single draw's worse frames are the change's only when they
+       recur in the change's draws of the same branch and are absent from the parent's draws of that branch;
+     - never attribute a deeper or shallower park to a change from one draw per arm.
 5. **Merge rule by class** (the issue states the class):
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
