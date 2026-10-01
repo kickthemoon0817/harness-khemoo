@@ -104,13 +104,18 @@ overridden below.
        The shims copy the run's bind mounts across and read that card.
      - A remote arm is identical to a local one: RS4 on parent-af846aec8 matched bit for bit, 431/431
        documents and the whole wrench trace. So change and parent arms may run on either card.
-     - Keep every kit-side call of the run under the export line. A bare `docker ps` or `iter.sh logs` outside
-       it looks at the local host.
-     - **The local card is off (owner, 2026-09-30): every kit, whole-card and device run goes to the remote card.**
+     - Keep every kit-side call of the run under the export line.
+     - **The local host is off (owner, 2026-10-01): builds, AOT, tests and kits all run on the remote host.**
+       - Every bash a tick starts carries an exported `docker` function (`bin/remote-env.sh`). It sends each `docker`
+         command through `bin/remote-docker` to the remote host, inside or outside an export line.
+       - Before a run, the shim copies the paths the run mounts to the remote. After a foreground run it copies the
+         writable mounts back, so `iter.sh build`'s binaries, an AOT's cubin and a test's logs land in the worktree here
+         as before. A detached kit copies nothing back; its outputs come back through `docker exec` and `docker cp`.
+       - Runs that share a worktree or a packet wait for each other while one of them writes it.
+       - A `docker` call from Python or `docker compose` does not see the function and runs on this host. Keep them out
+         of a tick unless the step needs them.
        - `lease.sh` grants remote slots only. A whole-card run takes both remote slots, and a device run's export line
          carries `DOCKER_HOST`.
-       - Builds without `--device` stay on this host: run `iter.sh build` outside the export line, or its outputs land
-         in the remote copy of the worktree instead of here.
      - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
        `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
        - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
