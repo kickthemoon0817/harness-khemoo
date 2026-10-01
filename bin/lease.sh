@@ -222,12 +222,15 @@ note_wait() {
   [[ "$first" =~ ^[0-9]+$ ]] || first=$(date -u +%s)
   echo "$first $pid $(date -u +%s)${3:+ $3}" > "$m"
 }
-# One rendering kit at a time: two of them overfill the card (about 8 GB each on
+# One rendering kit per card: two of them overfill a card (about 8 GB each on
 # a 16 GB card), while a rendering kit fits beside an identity kit (5.1 GB).
+# render_busy says another tick's rendering kit is live on the card a grant is
+# for, so a render wait holds no place in that card's line: the local card's
+# here, the remote card's inside remote_grant.
 render_busy=0
-render_live() {
+slots_render_live() {
   local s f hp
-  for s in $(seq 1 "$GPU_SLOTS"); do
+  for s in "$@"; do
     f=$(slot_file $s); [ -s "$f" ] || continue
     [[ "$(cat "$f")" == *" render" ]] || continue
     hp=$(awk '{print $2}' "$f")
@@ -235,6 +238,7 @@ render_live() {
   done
   return 1
 }
+render_live() { slots_render_live $(seq 1 "$GPU_SLOTS"); }
 slot_container() { [ "$1" -eq 1 ] && echo worv-iter || echo "worv-iter-$1"; }
 CACHE_BASE="${LEASE_CACHE_BASE:-/tmp/isaac-sim}"
 SEED_IMAGE="${WORV_BUILDER_IMAGE:-worv-builder:isaac6}"
@@ -245,12 +249,19 @@ slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
 # exits 0, or returns 1. A remote slot's cache stays under /tmp on that host.
 remote_grant() {
   [ -n "$REMOTE_CARD_HOST" ] || return 1
-  local s f hp own_r="" free_r="" kits_r=0 render_r=0 take first
+  local s f hp own_r="" free_r="" stale_r="" kits_r=0 render_r=0 take first
+  local render_busy=0
+  slots_render_live $(remote_slots) && render_busy=1
   for s in $(remote_slots); do
     f=$(slot_file $s); hp=""
     [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
     if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
       if [ "$hp" = "$pid" ]; then own_r=$s; continue; fi
+      # A whole-card reservation runs no kit, and it lapses as a local one does.
+      if [[ "$(cat "$f")" == *" reserved-for-all" ]]; then
+        [ -z "$stale_r" ] && lapsed "$f" && stale_r=$s
+        continue
+      fi
       kits_r=$(( kits_r + 1 ))
       [[ "$(cat "$f")" == *" render" ]] && render_r=1
     elif [ -z "$free_r" ]; then
@@ -259,6 +270,7 @@ remote_grant() {
   done
   take=$own_r
   if [ -z "$take" ]; then
+    free_r=${free_r:-$stale_r}
     [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ] || return 1
     [ -n "$render" ] && [ "$render_r" = 1 ] && return 1
     first=$(slot_first_issue)

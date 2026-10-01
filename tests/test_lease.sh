@@ -331,6 +331,13 @@ out=$("$LEASE" release 3); check "release drops the remote slot" '[ ! -e "$L/res
 full_local; echo "7 $RA $(ago 30) domain=80 remote render" > "$L/resource.lease.4"
 out=$("$LEASE" acquire 3 --render); check "a render run waits while the remote card's rendering kit is live" '[[ "$out" == BUSY* ]]' "$out"
 out=$("$LEASE" acquire 3); check "a plain run takes the remote card's second slot beside its rendering kit" '[[ "$out" == *"ACQUIRED slot=5 "* ]]' "$out"
+reset; rm -f "$L"/slot-wait.* "$L"/resource.lease.4 "$L"/resource.lease.5; echo "1 $RA $(ago 30) domain=77 render" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); check "a render run goes to the remote card while the local rendering kit is live" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && grep -q " remote render$" "$L/resource.lease.4"' "$out"
+echo "$(old 3000) $RB $(old 10) render" > "$L/slot-wait.9"; "$LEASE" release 3 >/dev/null
+out=$("$LEASE" acquire 3); check "a plain run takes a free local slot beside the local rendering kit, ahead of a render wait that card cannot start" '[[ "$out" == "ACQUIRED slot=2 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null; full_local; echo "$(old 3000) $RB $(old 10) render" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "on the remote card a render wait it can start keeps its place ahead of a plain run" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+rm -f "$L"/slot-wait.*
 "$LEASE" release 3 >/dev/null
 full_local; echo "7 $RA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $RB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
 out=$("$LEASE" acquire 3); check "a full remote card is busy too" '[[ "$out" == BUSY* ]]' "$out"
@@ -362,6 +369,16 @@ out=$("$LEASE" acquire 3); check "a tick renewing its local slot is moved to the
 echo "7 $LA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $LB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
 out=$("$LEASE" acquire 3); check "with the local card off and the remote card full a run waits" '[[ "$out" == "BUSY remote card"* ]] && [ ! -e "$L/resource.lease" ]' "$out"
 rm -f "$L"/resource.lease.4 "$L"/resource.lease.5 "$L"/slot-wait.*
+echo "7 $LA $(ago 30) domain=80 remote render" > "$L/resource.lease.4"
+echo "$(old 3000) $LB $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "with the local card off, a render wait the remote rendering kit blocks holds no place ahead of a plain run" '[[ "$out" == *"ACQUIRED slot=5 "*"remote=fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null; "$LEASE" prioritize --clear >/dev/null; rm -f "$L"/resource.lease.4 "$L"/slot-wait.*
+echo "6 $LA $(ago 700) domain=80 reserved-for-all" > "$L/resource.lease.4"; echo "8 $LB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "a remote whole-card reservation lapses after its time, as a local one does" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null; rm -f "$L"/resource.lease.4 "$L"/resource.lease.5
+echo "6 $LA $(ago 30) domain=80 reserved-for-all" > "$L/resource.lease.4"
+out=$("$LEASE" acquire 3); check "a fresh remote reservation keeps its slot and counts as no kit" '[[ "$out" == *"ACQUIRED slot=5 "* ]] && grep -q " reserved-for-all$" "$L/resource.lease.4"' "$out"
+"$LEASE" release 3 >/dev/null; rm -f "$L"/resource.lease.4 "$L"/resource.lease.5 "$L"/slot-wait.*
 out=$("$LEASE" acquire 3 --all --render); check "a whole-card run takes the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"exclusive=all"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]] && grep -q " held-for-all$" "$L/resource.lease.5" && [ ! -e "$L/resource.lease" ]' "$out"
 "$LEASE" release 3 >/dev/null
 out=$("$LEASE" acquire 3 --device); check "a device run goes to the remote card" '[[ "$out" == *"ACQUIRED device"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]]' "$out"
