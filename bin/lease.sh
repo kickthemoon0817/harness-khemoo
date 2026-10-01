@@ -167,7 +167,7 @@ oldest_wait() {
 # while no single-slot issue in line has waited longer, so a three-hour
 # single-slot wait is not passed by a thirty-minute whole-card one.
 # The operator's override (`lease.sh prioritize`): issues named in order, each
-# first in its line while its tick is asking, until its next acquire.
+# first in its line while its tick is asking, until `prioritize --drop` removes it.
 OPERATOR_FILE="$LOCKS/operator-priority"
 operator_first() {
   local kind="$1" n m first wpid last wkind now
