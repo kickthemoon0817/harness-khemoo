@@ -116,6 +116,11 @@ overridden below.
          of a tick unless the step needs them.
        - `lease.sh` grants remote slots only. A whole-card run takes both remote slots, and a device run's export line
          carries `DOCKER_HOST`.
+     - **Every scenario arm mounts `worv.core.scene` from its own tree, parent arms included,** until the runtime image is
+       rebuilt from `ai/manure-mpm` (owner's release step). The image bakes master's 0.5.4, which lacks #1636's
+       external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
+       side only parts at the pile's build (#1682). Put it in `BASE_EXTS`. `tools/eval/series_compare.py` voids a pair
+       whose kits loaded different builds of an extension.
      - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
        `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
        - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
