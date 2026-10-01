@@ -30,8 +30,10 @@ recent=$( { git -C "$REPO" rev-list --first-parent --since="$KEEP_HOURS hours ag
 # The remote host holds a copy of every worktree a run there mounted; its containers count too.
 remote=$(cat "$H/state/locks/remote-card" 2>/dev/null)
 rdocker() { DOCKER_HOST="ssh://$remote" command docker "$@"; }
+# This host's own daemon, whatever DOCKER_HOST the caller carries (bin/remote-env.sh points it at a missing socket).
+ldocker() { DOCKER_HOST= command docker "$@"; }
 busy=$( { for p in /proc/[0-9]*; do readlink "$p/cwd" 2>/dev/null; done
-          command docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null
+          for c in $(ldocker ps -q 2>/dev/null); do ldocker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
           if [ -n "$remote" ]; then
             for c in $(rdocker ps -q 2>/dev/null); do rdocker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
           fi
@@ -56,7 +58,7 @@ done
 [ "$apply" = 1 ] && [ "${#removed[@]}" -gt 0 ] || { [ "$apply" = 1 ] || echo "(dry run)"; exit 0; }
 for d in "${removed[@]}"; do git -C "$REPO" worktree remove --force "$WT/$d" >/dev/null 2>&1; done
 left=(); for d in "${removed[@]}"; do [ -e "$WT/$d" ] && left+=("/w/$d"); done
-[ "${#left[@]}" -gt 0 ] && command docker run --rm --runtime=runc -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${left[*]}"
+[ "${#left[@]}" -gt 0 ] && ldocker run --rm --runtime=runc -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${left[*]}"
 if [ -n "$remote" ]; then
   gone=(); for d in "${removed[@]}"; do gone+=("/w/$d"); done
   rdocker run --rm -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${gone[*]}" >/dev/null 2>&1
