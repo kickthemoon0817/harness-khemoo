@@ -35,6 +35,8 @@ export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 LOGS="$HARNESS_STATE/logs"
 LOCKS="$HARNESS_STATE/locks"
 mkdir -p "$LOGS" "$LOCKS"
+# shellcheck source=/dev/null
+. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
 
 read_cache_field() {  # $1 = json field name
     [ -r "$USAGE_CACHE" ] || return 0

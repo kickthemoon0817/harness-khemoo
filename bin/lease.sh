@@ -101,8 +101,9 @@ slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/res
 REMOTE_FILE="$LOCKS/remote-card"
 REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(cat "$REMOTE_FILE" 2>/dev/null)}"
 remote_slots() { [ -n "$REMOTE_CARD_HOST" ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX )); }
-# With the local card off (`lease.sh local --off`), every kit, whole-card and
+# With the local host off (`lease.sh local --off`), every kit, whole-card and
 # device run goes to the remote card, and the local card is left to its owner.
+# Builds and tests go to the remote host too (bin/remote-env.sh).
 LOCAL_OFF_FILE="$LOCKS/local-card-off"
 local_off() { [ -n "$REMOTE_CARD_HOST" ] && [ -e "$LOCAL_OFF_FILE" ]; }
 # The slots a whole-card or device run looks at: the card that runs it.
@@ -540,7 +541,7 @@ case "${1:-}" in
     case "${2:?--off or --on}" in
       --off)
         [ -n "$REMOTE_CARD_HOST" ] || { echo "REFUSED: no remote card is named; run lease.sh remote <user@host> first" >&2; exit 2; }
-        touch "$LOCAL_OFF_FILE"; echo "LOCAL off: kits, whole-card and device runs go to $REMOTE_CARD_HOST" ;;
+        touch "$LOCAL_OFF_FILE"; echo "LOCAL off: kits, whole-card and device runs, builds and tests go to $REMOTE_CARD_HOST" ;;
       --on) rm -f "$LOCAL_OFF_FILE"; echo "LOCAL on" ;;
       *) echo "usage: lease.sh local --off | --on" >&2; exit 2 ;;
     esac
@@ -555,7 +556,8 @@ case "${1:-}" in
     ;;
   status)
     [ -n "$REMOTE_CARD_HOST" ] && echo "remote card: $REMOTE_CARD_HOST"
-    local_off && echo "local card: off (every run goes to the remote card)"
+    local_off && echo "local card: off (every run goes to the remote card)" \
+      && echo "local host: off (builds and tests go to the remote host)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
       if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"

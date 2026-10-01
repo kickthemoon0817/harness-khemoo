@@ -18,6 +18,8 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set_name="fast set"; lock="fastset"; else S="$HARNESS_STATE/slow-set"; fast_flag=""; set_name="whole doctest set, \`[slow]\` cases included"; lock="slowset"; fi
 mkdir -p "$S/logs" "$HARNESS_STATE/locks"
+# shellcheck source=/dev/null
+. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
 exec 7>"$HARNESS_STATE/locks/$lock.lock"; flock -n 7 || exit 0
 [ -e "$HARNESS_STATE/paused" ] && exit 0
 

@@ -27,8 +27,14 @@ git -C "$REPO" fetch -q origin ai/manure-mpm 2>/dev/null
 recent=$( { git -C "$REPO" rev-list --first-parent --since="$KEEP_HOURS hours ago" origin/ai/manure-mpm
             git -C "$REPO" rev-list --first-parent -n 1 --until="$KEEP_HOURS hours ago" origin/ai/manure-mpm
             git -C "$REPO" rev-list --first-parent -n "$KEEP_HEADS" origin/ai/manure-mpm; } | cut -c1-8 | sort -u)
+# The remote host holds a copy of every worktree a run there mounted; its containers count too.
+remote=$(cat "$H/state/locks/remote-card" 2>/dev/null)
+rdocker() { DOCKER_HOST="ssh://$remote" command docker "$@"; }
 busy=$( { for p in /proc/[0-9]*; do readlink "$p/cwd" 2>/dev/null; done
-          docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null
+          command docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' 2>/dev/null
+          if [ -n "$remote" ]; then
+            for c in $(rdocker ps -q 2>/dev/null); do rdocker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
+          fi
         } | grep "^$WT/" | sed "s|^$WT/||; s|/.*||" | sort -u)
 removed=()
 for path in "$WT"/*; do
@@ -50,6 +56,10 @@ done
 [ "$apply" = 1 ] && [ "${#removed[@]}" -gt 0 ] || { [ "$apply" = 1 ] || echo "(dry run)"; exit 0; }
 for d in "${removed[@]}"; do git -C "$REPO" worktree remove --force "$WT/$d" >/dev/null 2>&1; done
 left=(); for d in "${removed[@]}"; do [ -e "$WT/$d" ] && left+=("/w/$d"); done
-[ "${#left[@]}" -gt 0 ] && docker run --rm --runtime=runc -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${left[*]}"
+[ "${#left[@]}" -gt 0 ] && command docker run --rm --runtime=runc -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${left[*]}"
+if [ -n "$remote" ]; then
+  gone=(); for d in "${removed[@]}"; do gone+=("/w/$d"); done
+  rdocker run --rm -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${gone[*]}" >/dev/null 2>&1
+fi
 git -C "$REPO" worktree prune
 echo "$(date -u +%FT%TZ) removed ${#removed[@]}: ${removed[*]}; /home $(df -h /home | awk 'NR==2{print $4}') free" >> "$LOG"
