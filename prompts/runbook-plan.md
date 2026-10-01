@@ -121,6 +121,9 @@ overridden below.
        external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
        side only parts at the pile's build (#1682). Put it in `BASE_EXTS`. `tools/eval/series_compare.py` voids a pair
        whose kits loaded different builds of an extension.
+     - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
+       `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
+       gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
      - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
        `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
        - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
