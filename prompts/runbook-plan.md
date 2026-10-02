@@ -320,6 +320,11 @@ overridden below.
      - a single draw that passes V5 needs no more draws. A single draw's worse frames are the change's only when they
        recur in the change's draws of the same branch and are absent from the parent's draws of that branch;
      - never attribute a deeper or shallower park to a change from one draw per arm.
+     - **A change that picks the branch itself** (operator, 2026-10-02, #1704): when every draw of the change takes one
+       branch over at least three seeds, and the parent's branch per seed repeats on the base, the branch move is the
+       change's. Read RS6 across branches, and do not count the branch against it. Weigh a change-only V5 item with a
+       census of the particles there: support root, asleep or awake, the holding rule, speed. Supported debris of the
+       branch does not block; material the change itself holds up does.
 5. **Merge rule by class** (the issue states the class):
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
