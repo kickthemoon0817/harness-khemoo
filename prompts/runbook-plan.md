@@ -311,6 +311,10 @@ overridden below.
    subagent (the Agent tool) that did not write the change, give it ONLY the frames and the checklist
    (T01's V-a…V-i; T14's R-a…R-j where they apply) — never your description of what they should show —
    and save its `visual-check.md` in the packet. A *fails* or *cannot tell* blocks until explained.
+   - **Read a moment by its held physics step (operator, 2026-10-02, #1700).** In a run with moments, the state
+     documents' `header.stamp.sim_time_s` runs ahead of physics time by the moment holds (M2's held step 12721 is
+     stamped 61.6 s, not 53.0 s). Match documents to M1–M3 by each moment's `held_step`, never by the stamp; an
+     "M2→M3" read by the stamp is the settle before M2.
    - **RS6's push is a bifurcation (#1704, operator 2026-10-01).** Sub-millimetre differences before the drive decide
      whether the crate climbs the face (z ≈ 1 m) or wedges against it (z ≈ 0.67 m); unchanged parents end at Base x
      1.52–2.05 m, and the moments alone move a draw 0.32 m. So:
