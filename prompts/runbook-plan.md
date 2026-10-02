@@ -213,6 +213,11 @@ overridden below.
    - **Then** your change arm on the old base stands for that scenario on the new one. Merge the head, rebuild, run the
      touched test files, and cite the chain line and the keys set aside in the packet.
    - **Otherwise** re-run that scenario on the new base.
+   - **A class B pair carries the same way (operator, 2026-10-02, #1702).** A change-against-parent pair on scenario S
+     stands on a new base when the move shares no file with the change beyond version and CHANGELOG, and every landing
+     in the move is tests only, class A by identity, or class B whose own packet shows S's particle hashes and wrench
+     identical to its parent. A class B landing that parts S's particles voids S's carry: re-pair S on the new base.
+     Name each carried pair and its base in the sign-off packet.
    - **Why.** Each base needs its `-p` arms anyway, so a class B landing that moves no physics no longer sends every
      class A proof back to the start.
    **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
