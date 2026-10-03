@@ -218,6 +218,10 @@ overridden below.
      in the move is tests only, class A by identity, or class B whose own packet shows S's particle hashes and wrench
      identical to its parent. A class B landing that parts S's particles voids S's carry: re-pair S on the new base.
      Name each carried pair and its base in the sign-off packet.
+     - **Where the landing's packet has no pair for S, the chain check decides** (operator, 2026-10-03, #1734). Compare the
+       new base's `<S>-p` against the old base's `<S>-p` (`chain.py`), which costs nothing extra because each base needs its
+       `-p` arms anyway. Identical particle hashes and wrench mean S's pair carries. Never re-pair a scenario the landing
+       may not have moved before reading that check.
    - **Why.** Each base needs its `-p` arms anyway, so a class B landing that moves no physics no longer sends every
      class A proof back to the start.
    **When the base moves under a finished §F.3 proof,** merge it. Re-run the proof only if the move changes
