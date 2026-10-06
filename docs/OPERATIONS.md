@@ -89,4 +89,8 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
 - **Re-scope deliberately.** Discovery, fixing, and porting want different priorities. Say
   which phase you are in at the top of the runbook.
 - **Watch the weekly window, not just the 5-hour one.** The 5-hour recovers on its own; the
-  weekly is what actually ends a long run.
+  weekly is what actually ends a long run. The harness stops each window short of 90 %
+  (`USAGE_CEILING_PCT`); `bin/usage_ok.sh` prints the reading.
+- **Pausing.** `touch state/paused` (or comment out the `tick.sh` cron line): the launcher
+  starts nothing and runners chain nothing. A tick already running finishes its claim, so
+  stop one that must not go on by its PID.

@@ -59,10 +59,14 @@ the process exits, so a crashed tick never leaks a slot.
 
 ### Allocator
 
-Maps `max(fiveHourPercent, weeklyPercent)` to a cap. Using the *worse* window means a healthy
-5-hour window cannot mask an exhausted weekly one. The bands step down rather than cut off, so
-the harness degrades to one careful tick before stopping entirely at 95%, leaving the last
-slice of budget for the human.
+Keeps both rate-limit windows under `USAGE_CEILING_PCT` (90 %), leaving the last tenth of each
+for the human. Each window maps to its own cap and the smaller one wins, so a healthy 5-hour
+window cannot mask an exhausted weekly one. A window steps down to half width, then one slot,
+then none, and stops well under the ceiling, because the ticks already running keep spending
+until they end: the 5-hour window fills several times faster, so it stops at 80 % and the
+weekly one at 88 %. With no fresh reading nothing starts. The ceiling itself is held inside
+the ticks: each runs `bin/usage_ok.sh` before starting work and pauses two points under it, so
+its wind-down stays under the ceiling too.
 
 Reading percentages rather than counting tokens keeps the harness honest about usage it did
 not cause — the human's own sessions consume the same budget.

@@ -27,10 +27,13 @@ queue. Most firings cost nothing and log nothing.
 **Slots.** Concurrency is bounded by `flock`ed slot files. A runner that cannot take a slot
 exits quietly, so spawning is racy-safe by construction.
 
-**Allocator.** The worse of your 5-hour and weekly utilization maps to a cap: `MAX_SLOTS` below
-`USAGE_FULL_BELOW` (90 %), half of it below 95 %, one below 98 %, else `0`. With no
-usage data it runs capped at 3 rather than blind at full width. Decisions are appended to
-`state/logs/allocator.log`.
+**Allocator.** Neither the 5-hour nor the weekly utilization may reach `USAGE_CEILING_PCT`
+(90 %). Ticks already running keep spending after spawning stops, so each window cuts the
+pool well under the ceiling: the 5-hour window to half at 60 %, one slot at 70 % and none at
+80 %; the weekly one to half at 80 %, one at 85 % and none at 88 % (`FIVE_*_AT`, `WEEK_*_AT`).
+The tighter window decides. With no fresh usage data it starts nothing. A running tick checks
+`bin/usage_ok.sh` before each build, suite, kit or agent and pauses two points under the
+ceiling (`USAGE_TICK_STOP_PCT`). Decisions are appended to `state/logs/allocator.log`.
 
 **Ticks.** Each tick is one `claude -p` invocation that reads `prompts/tick-prompt.md`, which
 points at `prompts/runbook.md`. The runbook is where your project's rules live — the harness

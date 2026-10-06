@@ -23,10 +23,8 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${STAGGER_SECONDS:=8}"
 : "${HEARTBEAT_INTERVAL:=1800}"
 : "${LOG_RETENTION:=200}"
-: "${USAGE_CACHE:=$HOME/.claude/usage-cache.json}"
-: "${USAGE_FETCH:=$HOME/.claude/scripts/usage-fetch.sh}"
-: "${USAGE_MAX_AGE:=1800}"
-: "${USAGE_REFRESH_AFTER:=120}"
+# shellcheck source=/dev/null
+. "$HARNESS_HOME/bin/usage-lib.sh"
 : "${CLAUDE_BIN:=claude}"
 # Set, but possibly empty: an explicit `CLAUDE_FLAGS=` means "pass no flags".
 [ -z "${CLAUDE_FLAGS+x}" ] && CLAUDE_FLAGS="--dangerously-skip-permissions"
@@ -37,40 +35,6 @@ LOCKS="$HARNESS_STATE/locks"
 mkdir -p "$LOGS" "$LOCKS"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
-
-read_cache_field() {  # $1 = json field name
-    [ -r "$USAGE_CACHE" ] || return 0
-    grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+" "$USAGE_CACHE" | grep -oE '[0-9]+$' | head -1
-}
-
-# Sets five, week, pct and allowed: the slot cap the worse rate-limit window permits.
-compute_allowed() {
-    local cache_ms
-    # Refresh usage only when the cache is stale, so most firings make no API call.
-    cache_ms=$(read_cache_field timestamp)
-    if [ $(( $(date +%s) - ${cache_ms:-0} / 1000 )) -ge "$USAGE_REFRESH_AFTER" ] && [ -x "$USAGE_FETCH" ]; then
-        "$USAGE_FETCH" 2>/dev/null || true
-    fi
-    five=""; week=""
-    cache_ms=$(read_cache_field timestamp)
-    if [ $(( $(date +%s) - ${cache_ms:-0} / 1000 )) -le "$USAGE_MAX_AGE" ]; then
-        five=$(read_cache_field fiveHourPercent)
-        week=$(read_cache_field weeklyPercent)
-    fi
-    if [ -n "$five" ] && [ -n "$week" ]; then
-        pct=$(( five > week ? five : week ))
-        # Full width until USAGE_FULL_BELOW (90 %), then half, then one; none past 98 %.
-        if   [ "$pct" -lt "${USAGE_FULL_BELOW:-90}" ]; then allowed=$MAX_SLOTS
-        elif [ "$pct" -lt 95 ]; then allowed=$(( (MAX_SLOTS + 1) / 2 ))
-        elif [ "$pct" -lt 98 ]; then allowed=1
-        else allowed=0
-        fi
-        [ "$allowed" -gt "$MAX_SLOTS" ] && allowed=$MAX_SLOTS
-    else
-        # No fresh usage data: run conservatively rather than blind at full width.
-        pct="?"; allowed=$(( MAX_SLOTS < 3 ? MAX_SLOTS : 3 ))
-    fi
-}
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
 compute_want() {
@@ -254,6 +218,14 @@ done
 [ -z "$(pick_model "")" ] && exit 0
 
 compute_allowed
+if [ "$pct" = "?" ]; then
+    # Say so at most hourly: the launcher fires every couple of minutes.
+    stamp="$LOCKS/usage-unknown.stamp"
+    if [ ! -f "$stamp" ] || [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -ge 3600 ]; then
+        touch "$stamp"
+        echo "$(date -u +%Y%m%dT%H%M%SZ) no fresh usage reading in $USAGE_CACHE; starting nothing" >>"$LOGS/allocator.log"
+    fi
+fi
 compute_want
 # With an empty queue keep one heartbeat/audit tick alive, but rate-limit it — the
 # launcher itself fires every couple of minutes.

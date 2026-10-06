@@ -33,6 +33,12 @@ ends, and nothing scheduled survives it. Therefore:
   done, what is running, and the resume recipe so far, so a tick that dies leaves a recipe.
   The first line must not use the words withdrawing, pausing or releasing, because the claim
   check reads those as the end of the claim.
+- USAGE CEILING: the harness never takes the 5-hour or the weekly usage window past 90 %. Run
+  `/home/khemoo/tmp_workspace/claude-issue-harness/bin/usage_ok.sh` before you start any build,
+  suite, kit, render queue or agent, and at least every 15 minutes inside any wait. When it exits
+  non-zero (1: a window is within two points of the ceiling; 2: no fresh reading), start nothing
+  new, tear down, post the pause with the resume recipe, print the summary and END, as at the
+  budget's end.
 
 Before you commit, run ONE review pass over your own change, scoped to this tick's purpose and
 what it touches (the runbook's ONE REVIEW PER TICK rail). One pass, not two.
