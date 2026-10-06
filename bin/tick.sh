@@ -114,8 +114,9 @@ pick_model() {  # $1 = models already tried this tick
     done
 }
 
-# The harness is paused when its cron line is commented out or state/paused exists; a
-# running chain honours both, so pausing the cron also stops ticks already in flight.
+# The harness is paused when its cron line is commented out or state/paused exists. The
+# launcher starts nothing and a runner chains nothing while paused; a tick already running
+# finishes its own claim.
 harness_paused() {
     [ -e "$HARNESS_STATE/paused" ] && return 0
     crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh' || return 0
@@ -158,6 +159,8 @@ if [ "${1:-}" = "runner" ]; then
     stagger=${3:-0}
     # Stagger keeps concurrent runners from claiming the same issue in the same second.
     [ "$stagger" -gt 0 ] && sleep "$stagger"
+    # A pause set while the launcher staggered its runners still stops the ones not yet started.
+    harness_paused && exit 0
 
     slot=""
     s=1
@@ -235,6 +238,8 @@ $(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
 fi
 
 # -------------------------------------------------------------- launcher mode
+
+harness_paused && exit 0
 
 # 1. Cheapest gate: if every slot is held there is nothing to decide.
 busy=0; free=0; s=1
