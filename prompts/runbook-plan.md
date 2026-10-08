@@ -218,6 +218,15 @@ overridden below.
      in the move is tests only, class A by identity, or class B whose own packet shows S's particle hashes and wrench
      identical to its parent. A class B landing that parts S's particles voids S's carry: re-pair S on the new base.
      Name each carried pair and its base in the sign-off packet.
+     - **A shared file does not void the carry when the move is identity-proven** (operator, 2026-10-08, #1777). The
+       pair still carries across a file the move shares with the change when all of these hold:
+       - every landing in the move is tests only or class A by identity, its own packet showing S identical to its
+         parent but for keys it added;
+       - in each shared file, the merge result differs from the new base by exactly the change's own lines;
+       - the touched test files, the fast set and, for a change in device code, the device parity binary pass on the
+         merge result.
+
+       Name each shared file and that check in the packet. A class B landing in the move still voids S as above.
      - **Where the landing's packet has no pair for S, the chain check decides** (operator, 2026-10-03, #1734). Compare the
        new base's `<S>-p` against the old base's `<S>-p` (`chain.py`), which costs nothing extra because each base needs its
        `-p` arms anyway. Identical particle hashes and wrench mean S's pair carries. Never re-pair a scenario the landing
