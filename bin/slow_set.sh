@@ -114,6 +114,14 @@ fi
 [ -n "$owned" ] && failing="$failing\nAlso red, and #$fast_open's to repair:\n$owned"
 body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe %s is red on `%s` at `%s` (`bin/slow_set.sh %s`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
     "$set_name" "$WORK_BRANCH" "$short" "$mode" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
+# A red on a head that has since moved is not filed: a repair may have landed while the set ran,
+# and the next run tests the new head (last_run holds the old one).
+git -C "$TARGET_REPO" fetch -q origin "$WORK_BRANCH" 2>/dev/null
+now=$(git -C "$TARGET_REPO" rev-parse "origin/$WORK_BRANCH" 2>/dev/null)
+if [ -n "$now" ] && [ "$now" != "$sha" ]; then
+    printf 'RED %s, not filed: the head moved to %s while the set ran\n' "$sha" "$now" >>"$log"
+    exit 0
+fi
 open=$(gh issue list --repo "$GH_REPO" --state open --search "in:title \"the $set_name is red\"" --json number -q '.[0].number' 2>/dev/null)
 if [ -n "$open" ]; then
     gh issue comment "$open" --repo "$GH_REPO" --body "$body" >>"$log" 2>&1
