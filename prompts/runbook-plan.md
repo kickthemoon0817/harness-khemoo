@@ -270,6 +270,14 @@ overridden below.
      5. Push, merge the PR, close the issue with the merge commit, then
         `bin/merge-lock.sh release <issue>`.
      A landing that starts inside the slot may finish after the slot closes.
+     - **Prepare before the lock** (operator, 2026-10-09). Do steps 2–4 on the current head *before* step 1,
+       together with any re-AOT, the fast set or device parity the landing owes: merge, rebuild, test.
+       Then take the lock and fetch.
+       - **The head is still the base you prepared on:** push and merge at once.
+       - **It moved:** release the lock, re-prepare on the new head, and try again inside the slot.
+
+       The lock is for the push alone, not for a 25-minute AOT or fast set. One landing that holds it through
+       its preparation fills the slot, and every landing behind it, class B above all, slips three hours.
    - **The batch is checked as a whole.** Each batch-mate was proven against the window base, not against
      the others.
      - **Who checks.** The first tick that records a parent arm on a head a slot produced also compares it
