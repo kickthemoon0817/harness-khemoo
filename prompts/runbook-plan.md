@@ -266,7 +266,11 @@ overridden below.
      3. Check what the merge brought: every commit between the proof base and the head must be a
         batch-mate that landed in this slot or a move 3b exempts. Otherwise, as after an owner-signed
         class B landing, release, remove `ai:ready` and re-prove on the new head.
-     4. Rebuild and run every case of the touched test files on the merge result.
+     4. Rebuild and run every case of the touched test files on the merge result. A landing that changes code in
+        an extension the identity kits mount also runs the whole fast set there, class A included (operator,
+        2026-10-09, #1822). A change to a shared quantity can red a test it never touched: #1812's audit change
+        to the thin-plate split reddened `test_added_mass_exchange.cpp`'s contact-energy check, and only the
+        cron fast set caught it after the landing. Done before the lock, the fast set costs the slot nothing.
      5. Push, merge the PR, close the issue with the merge commit, then
         `bin/merge-lock.sh release <issue>`.
      A landing that starts inside the slot may finish after the slot closes.
