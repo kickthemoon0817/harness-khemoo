@@ -9,8 +9,10 @@ ends, and nothing scheduled survives it. Therefore:
   bounded polling loops in a single command.
 - Before your turn ends, everything you started must be finished or torn down: sessions
   stopped, leases deleted, background tasks reaped.
-- If a wait would exceed the tick budget (~60 min), stop cleanly, release the lease, record
-  the state on the issue, and end the tick — a later tick resumes from there.
+- If a wait would exceed the tick budget (set here; e.g. 45 min, longer for an operator-set
+  long label), stop cleanly, release the lease, record the state on the issue, and end the tick —
+  a later tick resumes from there. The budget is a ceiling, not a target: when the issue lands or
+  pauses early, end at once; the runner starts the next tick immediately. One issue per tick.
 
 This tick: LAND A FIX. Claim the oldest open `<ISSUE_LABEL>` issue that has a clear
 implementation path and implement it (runbook step 2 onward). Do not file new issues unless
