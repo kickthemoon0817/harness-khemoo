@@ -28,7 +28,8 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
 - An issue labelled `ai:fable` is in its diagnosis or design phase: a root cause to find, a law to choose, or a question
   the evidence does not yet settle. It is worked on Fable 5.1 (the fable lane). The first line of your prompt says which
   lane this tick is on:
-  - a fable-lane tick claims only `ai:fable` issues;
+  - a fable-lane tick claims only `ai:fable` issues, resumes included: a released claim without the label at the
+    moment of the claim is not the fable lane's, even if the label left seconds before (operator, 2026-10-10, #1845);
   - any other tick never claims one, unless its first line says Fable is cooling down on its usage limit.
   `ai:fable` is the operator's to set, like `ai:long`: a tick never adds or removes it. The operator takes it off once the
   design is settled and what remains is implementation, runs or a landing. When your work reaches that point on a fable
