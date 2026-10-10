@@ -284,6 +284,9 @@ overridden below.
 
        The lock is for the push alone, not for a 25-minute AOT or fast set. One landing that holds it through
        its preparation fills the slot, and every landing behind it, class B above all, slips three hours.
+       Take it only once the merge result's suites are green. A preparation still running when the slot closes
+       waits for the next slot; taking the lock to keep the slot while a suite runs is the case this rule forbids
+       (operator, 2026-10-10, #1835: lock at 09:57Z, fast set under it until 10:06Z, merged 10:07Z).
    - **The batch is checked as a whole.** Each batch-mate was proven against the window base, not against
      the others.
      - **Who checks.** The first tick that records a parent arm on a head a slot produced also compares it
