@@ -246,6 +246,9 @@ overridden below.
    things happen: the build hold (#1431), the props (#1437), the spec timing (#1449). A move there changes
    the arms, so re-run the proof on parents recorded with it.
    List the moved files in the packet and say why each cannot change the set. When in doubt, re-run.
+3a′. **RS4 identity until #1859 lands (operator, 2026-10-14).** RS4 parts run to run on one binary (first at wrench line
+   22 179, step 642). Run three arms per side; a change carries when each of its arms equals one of the parent's arms,
+   and the packet reports every parting. One parent arm that parts from another is the base's noise, not a finding.
 3c. **A merge that moves the identity arms waits for a merge slot (owner, 2026-09-25).** Proofs then run
    against one base per window, and a landing no longer sends every other proof back to re-run.
    - **Slots.** A slot opens every three hours on the UTC clock (00:00, 03:00, …, 21:00) and lasts
