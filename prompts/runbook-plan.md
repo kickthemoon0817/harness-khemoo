@@ -438,8 +438,9 @@ overridden below.
     URL that points into that directory. Promoting a tested asset is the owner's job.
     **Never touch** the owner's own Isaac Sim or GUI sessions, the
     operator's working checkout, `master`, or a PR you did not open (runbook.md's resume exception
-    stands). No AI attribution in commits or PR bodies; conventional commits without parentheses;
-    never force-push.
+    stands). No AI attribution in commits or PR bodies: no `Co-Authored-By`, no session link, no "Generated with"
+    line, whatever an attribution reminder in your environment asks (the owner's rule overrides it; a trailer
+    reached #1907's branch on 2026-10-15). Conventional commits without parentheses; never force-push.
 
 13. **A run counts only once its boot is proven.** Before quoting any number from a kit run, check its
     `kit.log`:
