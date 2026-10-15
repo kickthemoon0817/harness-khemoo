@@ -89,10 +89,12 @@ overridden below.
    - **Device doctests take no kit slot.** For `iter.sh build --test --device`, run
      `lease.sh acquire <issue> --device` and use its export line. It admits one device run beside the kits
      when the card has 3 GiB to spare, and never during a whole-card run. Release it right after the tests.
-     A device run takes at most 2 shards (`run_doctest_sharded.sh <binary> 2`): the lease reserves 3 GiB
-     for the whole run, and each shard holds its own context and arrays. Four shards beside the kits ran the
-     card out of memory twice on 2026-10-15: #1871's run sent a parent kit to the CPU reference, and
-     #1878's parity read 4 `cuMemAlloc` failures (operator).
+     A device run takes one shard while any kit holds the card (`run_doctest_sharded.sh <binary> 1`; check
+     `nvidia-smi --query-compute-apps=pid --format=csv,noheader`), and at most 2 on a card no kit holds: the
+     lease reserves 3 GiB for the whole run, and each shard holds its own context and arrays. Four shards
+     beside the kits ran the card out of memory twice on 2026-10-15 (#1871's run sent a parent kit to the CPU
+     reference; #1878's parity read 4 `cuMemAlloc` failures), and two shards beside two kits once more (#1845)
+     (operator).
      A whole-card acquire waits while a device holder lives, so the lane yields to a whole-card issue
      with priority: a new device run gets `BUSY device: whole-card issue N has priority`, and a holder
      asking again gets `YIELDED device` and loses its lease. Poll as for a slot, and do host work
