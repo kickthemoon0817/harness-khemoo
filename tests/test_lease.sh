@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# Exercises bin/lease.sh in a scratch harness home, with sleeping processes as live holders.
+set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+H=$(mktemp -d)
+sleep 600 & A=$!
+sleep 600 & B=$!
+trap 'kill $A $B 2>/dev/null; rm -rf "$H"' EXIT
+mkdir -p "$H/bin" "$H/state/locks" "$H/cache/cache-slot2" "$H/cache/cache-slot3"
+cp "$here/bin/lease.sh" "$H/bin/lease.sh"
+export HARNESS_HOME="$H" GPU_SLOTS=3 LEASE_CACHE_BASE="$H/cache"
+L="$H/state/locks"; LEASE="$H/bin/lease.sh"
+ago() { date -u -d "-$1 sec" +%FT%TZ; }
+reset() { rm -f "$L"/resource.lease* "$L"/slot-wait.* "$L"/device.lease; }
+mkdir -p "$H/fakebin"; export PATH="$H/fakebin:$PATH"
+card() { printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo %s;; *memory.total*) echo 16303;; esac\n' "$1" > "$H/fakebin/nvidia-smi"; chmod +x "$H/fakebin/nvidia-smi"; }
+card 6600
+pass=0; fail=0
+check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
+
+reset; echo "1 $A $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
+echo "2 $B $(ago 30) domain=79 reserved-for-all" > "$L/resource.lease.3"
+out=$("$LEASE" acquire 3); check "fresh reservations block a single-slot acquire" '[[ "$out" == BUSY* ]]' "$out"
+
+reset; echo "1 $A $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 700) domain=78 reserved-for-all" > "$L/resource.lease.2"
+echo "2 $B $(ago 700) domain=79 reserved-for-all" > "$L/resource.lease.3"
+out=$("$LEASE" acquire 3); check "a lapsed reservation is taken, lowest slot first" '[[ "$out" == "ACQUIRED slot=2 "* ]] && grep -q "^3 $$ " "$L/resource.lease.2"' "$out"
+
+reset; echo "2 $B $(ago 700) domain=77 reserved-for-all" > "$L/resource.lease"
+echo "1 $A $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a free slot is preferred over a lapsed reservation" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
+
+reset; echo "2 $B $(ago 700) domain=77 exclusive" > "$L/resource.lease"
+echo "2 $B $(ago 700) domain=78 held-for-all" > "$L/resource.lease.2"
+echo "2 $B $(ago 700) domain=79 held-for-all" > "$L/resource.lease.3"
+out=$("$LEASE" acquire 3); check "a whole-card hold never lapses" '[[ "$out" == BUSY* ]]' "$out"
+
+reset; echo "1 $A $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 2 --all --render); check "--all reserves the free slots while a sibling runs" '[[ "$out" == "RESERVING held=2/3"* ]] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
+kill $A; wait $A 2>/dev/null
+out=$("$LEASE" acquire 2 --all --render); check "--all acquires in the slot it already held once the sibling is gone" '[[ "$out" == "ACQUIRED slot=2 "*"exclusive=all"* ]] && grep -q " exclusive$" "$L/resource.lease.2"' "$out"
+check "--all turns its other reservations into holds" 'grep -q " held-for-all$" "$L/resource.lease" && grep -q " held-for-all$" "$L/resource.lease.3"' "$(cat "$L"/resource.lease*)"
+out=$("$LEASE" release 2); check "release drops every slot" '[ ! -e "$L/resource.lease" ] && [ ! -e "$L/resource.lease.2" ] && [ ! -e "$L/resource.lease.3" ]' "$out"
+
+reset; echo "2 $$ $(ago 700) domain=77 reserved-for-all" > "$L/resource.lease"
+out=$("$LEASE" acquire 2); check "a tick re-acquiring gets its own slot back" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+old() { echo "$(( $(date -u +%s) - $1 ))"; }
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "an issue that has waited 30 min for the card blocks a single-slot acquire" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 60) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a younger whole-card wait does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) 999999 $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a wait whose tick is dead gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+echo "2 $B $(ago 700) domain=78 reserved-for-all" > "$L/resource.lease.2"
+echo "4 $$ $(ago 30) domain=79 reserved-for-all" > "$L/resource.lease.3"
+out=$("$LEASE" acquire 4 --all --render); check "another whole-card waiter yields to the priority issue and drops its reservations" '[[ "$out" == "YIELDING to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease.3" ] && [ -s "$L/all-wait.4" ] && grep -q " reserved-for-all$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 3); check "the priority issue's reservation never lapses" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 400)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); check "a wait whose tick stopped asking gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+sleep 600 & C=$!
+echo "1 $C $(ago 30) domain=77" > "$L/resource.lease"
+echo "$(old 2000) 1" > "$L/all-wait.5"
+out=$("$LEASE" acquire 5 --all --render); check "the priority issue reserves and keeps its first wait time" '[[ "$out" == "RESERVING held=2/3"* ]] && [ "$(awk "{print \$1}" "$L/all-wait.5")" -le "$(old 1999)" ] && [ "$(awk "{print \$2}" "$L/all-wait.5")" = "$$" ]' "$out"
+kill $C; wait $C 2>/dev/null
+out=$("$LEASE" acquire 5 --all --render); check "the priority issue acquires once the card drains, and its wait record is cleared" '[[ "$out" == *"exclusive=all"* ]] && [ ! -e "$L/all-wait.5" ]' "$out"
+"$LEASE" release 5 >/dev/null
+
+reset; rm -f "$L"/all-wait.*
+printf '#!/usr/bin/env bash\necho "ERROR: no claude -p ancestor" >&2; exit 1\n' > "$H/bin/tick-pid.sh"; chmod +x "$H/bin/tick-pid.sh"
+out=$("$LEASE" acquire 3 2>&1); rc=$?
+check "an acquire with no tick above it is refused, not recorded under a transient pid" '[ "$rc" -eq 2 ] && [[ "$out" == *"no claude -p tick"* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
+out=$("$LEASE" status 2>&1); rc=$?
+check "status needs no tick" '[ "$rc" -eq 0 ] && [[ "$out" == *"slot 1 free"* ]]' "rc=$rc $out"
+out=$(LEASE_HOLDER_PID=$$ "$LEASE" acquire 3 2>&1)
+check "a script can hold the lease as a named live ancestor" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q "^3 $$ " "$L/resource.lease"' "$out"
+LEASE_HOLDER_PID=$$ "$LEASE" release 3 >/dev/null
+rm -f "$H/bin/tick-pid.sh"
+
+sleep 600 & D=$!
+trap 'kill $A $B $D 2>/dev/null; rm -rf "$H"' EXIT
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a third kit waits while two run, though a slot file is free" '[[ "$out" == "BUSY kit limit 2/2"* ]] && [ ! -e "$L/resource.lease.3" ]' "$out"
+out=$(GPU_KITS_MAX=3 "$LEASE" acquire 3); check "the kit limit is a setting" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a whole-card reservation is not a kit" '[[ "$out" == "ACQUIRED slot=3 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 3); rc=$?
+check "a holder re-acquiring while a whole-card issue has priority hands its slot over" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to whole-card issue 2"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ]' "rc=$rc $out"
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
+rm -f "$L"/all-wait.*
+out=$("$LEASE" acquire 3); check "without a priority issue no yield is asked" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+out=$("$LEASE" acquire 3 --all 2>&1); rc=$?
+check "a whole-card acquire that does not say it renders is refused" '[ "$rc" -eq 2 ] && [[ "$out" == REFUSED* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
+
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot issue that has waited 20 min is first in line for a free slot" '[[ "$out" == "BUSY queued behind single-slot issue 5"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ]' "$out"
+out=$("$LEASE" status); check "status names the issue first in line" '[[ "$out" == *"wait single-slot issue 5 for 21 min (first in line)"* ]]' "$out"
+out=$("$LEASE" acquire 5); check "the issue first in line takes the slot, and its wait record is cleared" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [ ! -e "$L/slot-wait.5" ]' "$out"
+out=$("$LEASE" acquire 3); check "the next waiter is not queued behind a wait that ended" '[[ "$out" == "ACQUIRED slot="* ]] && [ ! -e "$L/slot-wait.3" ]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 600) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a younger single-slot wait does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 400)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot wait whose tick stopped asking does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) 999999 $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot wait whose tick is dead does not queue others" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 7); first1=$(awk '{print $1}' "$L/slot-wait.7")
+sleep 1; out=$("$LEASE" acquire 7); first2=$(awk '{print $1}' "$L/slot-wait.7"); last2=$(awk '{print $3}' "$L/slot-wait.7")
+check "a refused single-slot acquire records its wait and keeps the first time across calls" '[[ "$out" == "BUSY kit limit 2/2"* ]] && [ "$first1" = "$first2" ] && [ "$last2" -gt "$first1" ]' "$out first1=$first1 first2=$first2 last2=$last2"
+
+reset; rm -f "$L"/all-wait.*
+echo "3 $$ $(ago 60) domain=77" > "$L/resource.lease"
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a holder re-acquiring its own slot is not queued" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [[ "$out" != *YIELD* ]]' "$out"
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 5); check "whole-card priority comes before the single-slot line" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+out=$("$LEASE" status); check "status names the whole-card priority issue" '[[ "$out" == *"wait whole-card issue 2 for 33 min (priority)"* ]]' "$out"
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 5 --all --render); check "a whole-card waiter still reserves while a single-slot issue waits" '[[ "$out" == "RESERVING held=2/3"* ]]' "$out"
+"$LEASE" release 5 >/dev/null; rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+reset; rm -f "$L"/all-wait.*
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 3); check "a single-slot issue that has waited longer defers whole-card priority" '[[ "$out" == "BUSY queued behind single-slot issue 5"* ]]' "$out"
+out=$("$LEASE" acquire 5); check "the older single-slot issue takes the slot the whole-card issue would have" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 5 >/dev/null
+echo "$(old 1300) $B $(old 10)" > "$L/slot-wait.5"
+out=$("$LEASE" acquire 5); check "a whole-card issue that has waited longer than the line keeps its priority" '[[ "$out" == "BUSY priority to whole-card issue 2"* ]]' "$out"
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+reset; rm -f "$L"/all-wait.*; card 6600
+echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
+echo "2 $B $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 9 --device); check "a device run fits beside two kits when the card has room" '[[ "$out" == "ACQUIRED device "* ]] && [[ "$out" == *"export MANURE_GATE_LEASE_FILE=$L/device.lease"* ]] && grep -q "^9 $$ .* device$" "$L/device.lease"' "$out"
+out=$("$LEASE" acquire 9 --device); check "the device holder may acquire again" '[[ "$out" == "ACQUIRED device "* ]]' "$out"
+echo "8 $B $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 9 --device); check "one device run at a time" '[[ "$out" == "BUSY device: another device run is live"* ]]' "$out"
+rm -f "$L/device.lease"; card 13000
+out=$("$LEASE" acquire 9 --device); check "a device run that would overfill the card waits" '[[ "$out" == "BUSY device: 13000 MiB used"* ]] && [ ! -e "$L/device.lease" ]' "$out"
+card 6600; reset
+echo "2 $B $(ago 30) domain=77 exclusive" > "$L/resource.lease"
+out=$("$LEASE" acquire 9 --device); check "a device run waits for a whole-card run" '[[ "$out" == "BUSY device: a whole-card run holds the card"* ]]' "$out"
+reset; echo "8 $B $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 5 --all --render); check "a whole-card acquire waits for a live device run" '[[ "$out" == "RESERVING held=3/3"* ]]' "$out"
+"$LEASE" release 5 >/dev/null; reset; rm -f "$L"/all-wait.*
+reset; rm -f "$L"/all-wait.*; card 6600
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 9 --device); check "a device run waits while a whole-card issue has priority" '[[ "$out" == "BUSY device: whole-card issue 2 has priority" ]] && [ ! -e "$L/device.lease" ]' "$out"
+echo "9 $$ $(ago 30) domain=0 device" > "$L/device.lease"
+out=$("$LEASE" acquire 9 --device); rc=$?
+check "the device holder asking again while a whole-card issue has priority gives the lane up" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED device to whole-card issue 2"* ]] && [ ! -e "$L/device.lease" ]' "rc=$rc $out"
+out=$("$LEASE" acquire 2 --device); check "the priority issue itself may take the device lane" '[[ "$out" == "ACQUIRED device "* ]]' "$out"
+reset; rm -f "$L"/all-wait.*
+"$LEASE" acquire 9 --device >/dev/null; out=$("$LEASE" release 9); check "release drops the device lease" '[[ "$out" == "RELEASED device" ]] && [ ! -e "$L/device.lease" ]' "$out"
+
+reset; rm -f "$L"/all-wait.* "$L"/operator-priority
+echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
+echo "$(old 60) $B $(old 10)" > "$L/all-wait.7"
+out=$("$LEASE" prioritize 7); check "the operator names an issue first" '[[ "$out" == "PRIORITIZED 7" ]]' "$out"
+out=$("$LEASE" acquire 3); check "a prioritized whole-card wait goes before an older single-slot line" '[[ "$out" == "BUSY priority to whole-card issue 7"* ]]' "$out"
+echo "1 $$ $(ago 60) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 1); rc=$?
+check "a holder re-acquiring yields to a prioritized whole-card issue" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to whole-card issue 7"* ]]' "rc=$rc $out"
+out=$("$LEASE" acquire 7 --all --render); check "the prioritized issue takes the card and keeps its entry" '[[ "$out" == *"exclusive=all"* ]] && grep -qw 7 "$L/operator-priority"' "$out"
+"$LEASE" release 7 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "$(old 9000) $B $(old 10)" > "$L/slot-wait.5"
+echo "$(old 30) $B $(old 10)" > "$L/slot-wait.8"
+"$LEASE" prioritize 8 >/dev/null
+out=$("$LEASE" acquire 5); check "a prioritized single-slot wait goes before an older one" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
+out=$("$LEASE" status); check "status names the operator priority" '[[ "$out" == *"operator priority: 8"* ]]' "$out"
+out=$("$LEASE" acquire 8); check "the prioritized single-slot issue takes the slot and keeps its entry" '[[ "$out" == "ACQUIRED slot="* ]] && grep -qw 8 "$L/operator-priority"' "$out"
+"$LEASE" release 8 >/dev/null; reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "$(old 30) 999999 $(old 10)" > "$L/all-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "a prioritized issue whose tick is dead does not block" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+out=$("$LEASE" prioritize --clear); check "the operator can clear the override" '[[ "$out" == "CLEARED" ]] && [ ! -e "$L/operator-priority" ]' "$out"
+rm -f "$L"/all-wait.* "$L"/slot-wait.*
+
+# One rendering kit at a time: a second one is refused, a plain kit is not.
+sleep 600 & C=$!
+sleep 600 & D=$!
+reset; rm -f "$L"/slot-wait.*
+echo "4 $C $(ago 30) domain=77 render" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); rc=$?
+check "a rendering acquire waits while another tick's rendering kit is live" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY render"* ]] && [ ! -e "$L/resource.lease.2" ] && grep -q " render$" "$L/slot-wait.3"' "rc=$rc $out"
+rm -f "$L"/slot-wait.*
+out=$("$LEASE" acquire 5); check "a plain kit takes a free slot beside a rendering kit" '[[ "$out" == "ACQUIRED slot=2 "* ]] && ! grep -q " render$" "$L/resource.lease.2"' "$out"
+"$LEASE" release 5 >/dev/null
+reset; echo "5 $D $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); check "a rendering kit takes a free slot beside a plain kit, and its slot is marked" '[[ "$out" == "ACQUIRED slot=2 "* ]] && grep -q "^3 $$ .* render$" "$L/resource.lease.2"' "$out"
+out=$("$LEASE" acquire 3); check "a holder renewing its rendering slot keeps the mark, however it asks" '[[ "$out" == "ACQUIRED slot=2 "* ]] && grep -q " render$" "$L/resource.lease.2"' "$out"
+"$LEASE" release 3 >/dev/null
+reset; rm -f "$L"/slot-wait.*
+echo "4 $C $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 3000) $B $(old 10) render" > "$L/slot-wait.8"
+out=$("$LEASE" acquire 5); check "a render wait that cannot start holds no place ahead of a plain kit" '[[ "$out" == "ACQUIRED slot=2 "* ]]' "$out"
+"$LEASE" release 5 >/dev/null
+reset; rm -f "$L"/slot-wait.*
+echo "$(old 3000) $B $(old 10) render" > "$L/slot-wait.8"
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 5); check "with no rendering kit live, a render wait keeps its place in line" '[[ "$out" == "BUSY queued behind single-slot issue 8"* ]]' "$out"
+# A rendering holder renewing between arms yields to a render wait the operator named.
+reset; rm -f "$L"/slot-wait.* "$L/operator-priority"
+echo "3 $$ $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 60) $D $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); rc=$?
+check "a rendering holder yields between arms to a render wait the operator named" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED render slot=1 to operator-priority issue 9"* ]] && [ ! -e "$L/resource.lease" ] && grep -q " render$" "$L/slot-wait.3"' "rc=$rc $out"
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77 render" > "$L/resource.lease"
+echo "$(old 60) $D $(old 10) render" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "without the operator's priority a rendering holder keeps its slot" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+# Any holder renewing between runs yields to the wait the operator put first
+# while the kits fill the card, unless the operator named it ahead of that wait.
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+echo "$(old 60) $C $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); rc=$?
+check "a plain holder yields between runs to a wait the operator named while the kits fill the card" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to operator-priority issue 9"* ]] && [ ! -e "$L/resource.lease" ] && [ -s "$L/slot-wait.3" ] && ! grep -q " render$" "$L/slot-wait.3" && grep -qx "9" "$L/operator-priority"' "rc=$rc $out"
+out=$("$LEASE" acquire 9 --render); check "the named render wait then takes the freed slot and keeps its entry" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q " render$" "$L/resource.lease" && grep -qw 9 "$L/operator-priority"' "$out"
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+echo "$(old 60) $C $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 3 >/dev/null; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "a holder the operator named ahead of the wait keeps its slot" '[[ "$out" == "ACQUIRED slot=1 "* ]] && [ -s "$L/resource.lease" ]' "$out"
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "$(old 60) $C $(old 10)" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "with room for the named wait on the card a plain holder keeps its slot" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "6 $D $(ago 30) domain=78 render" > "$L/resource.lease.2"
+echo "$(old 60) $C $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "a plain holder keeps its slot from a render wait another rendering kit blocks" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null; "$LEASE" prioritize --clear >/dev/null
+# A plain holder asking to render waits while another tick's rendering kit is live.
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+echo "6 $D $(ago 30) domain=78 render" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3 --render); rc=$?
+check "a plain holder asking to render waits while another rendering kit is live, and keeps its slot" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY render"* ]] && grep -q "^3 $$ " "$L/resource.lease" && ! grep -q " render$" "$L/resource.lease"' "rc=$rc $out"
+out=$("$LEASE" acquire 3); check "the same holder renewing without --render keeps its plain slot" '[[ "$out" == "ACQUIRED slot=1 "* ]] && ! grep -q " render$" "$L/resource.lease"' "$out"
+"$LEASE" release 3 >/dev/null
+# A named holder keeps its place after acquiring, so a wait named after it cannot take its slot.
+reset; rm -f "$L"/slot-wait.*; "$LEASE" prioritize --clear >/dev/null
+"$LEASE" prioritize 3 >/dev/null; "$LEASE" prioritize 9 >/dev/null
+echo "6 $D $(ago 30) domain=78" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 3); check "a named issue acquires and stays in the ranking" '[[ "$out" == "ACQUIRED slot=1 "* ]] && grep -qw 3 "$L/operator-priority"' "$out"
+echo "$(old 60) $C $(old 10)" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "a holder named ahead keeps its slot from a later-named wait across its arms" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
+out=$("$LEASE" prioritize --drop 3); check "the operator drops an entry" '[[ "$out" == "PRIORITIZED 9" ]] && ! grep -qw 3 "$L/operator-priority"' "$out"
+out=$("$LEASE" acquire 3); rc=$?; check "once dropped, the holder yields to the named wait while the kits fill the card" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED slot=1 to operator-priority issue 9"* ]]' "rc=$rc $out"
+"$LEASE" prioritize --clear >/dev/null; rm -f "$L"/slot-wait.*
+kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
+rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
+# A whole-card waiter reserves nothing while a single-slot issue the operator named waits.
+sleep 600 & E=$!
+sleep 600 & F=$!
+reset; echo "1 $F $(ago 30) domain=77" > "$L/resource.lease"
+echo "$(old 60) $E $(old 10)" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 2 --all --render); rc=$?
+check "a whole-card waiter yields to a single-slot wait the operator named and reserves nothing" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDING to operator-priority issue 9"* ]] && ! grep -qs "reserved-for-all" "$L/resource.lease.2" "$L/resource.lease.3" && [ -s "$L/all-wait.2" ]' "rc=$rc $out"
+echo "2 $$ $(ago 30) domain=78 reserved-for-all" > "$L/resource.lease.2"
+out=$("$LEASE" acquire 2 --all --render); rc=$?
+check "its earlier reservations are dropped when it yields" '[ "$rc" -eq 1 ] && [ ! -e "$L/resource.lease.2" ]' "rc=$rc $out"
+"$LEASE" prioritize --clear >/dev/null
+out=$("$LEASE" acquire 2 --all --render); check "without the operator naming a wait, the whole-card waiter reserves as before" '[[ "$out" == "RESERVING held=2/3"* ]]' "$out"
+kill $E $F 2>/dev/null; wait $E $F 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
+
+# A second card on another host takes the single-slot runs the local card cannot.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
+sleep 600 & RA=$!
+sleep 600 & RB=$!
+full_local() { reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5
+  echo "1 $RA $(ago 30) domain=77" > "$L/resource.lease"; echo "2 $RB $(ago 30) domain=78" > "$L/resource.lease.2"; }
+full_local
+out=$("$LEASE" acquire 3); check "without a remote card a full local card is busy" '[[ "$out" == "BUSY kit limit"* ]]' "$out"
+out=$("$LEASE" remote fake@host); check "the operator names the remote card" '[[ "$out" == "REMOTE fake@host slots 4-5" ]]' "$out"
+full_local
+out=$("$LEASE" acquire 3); check "a full local card sends a single-slot run to the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]] && [[ "$out" == *"bin/remote-docker:\$PATH"* ]] && grep -q " domain=80 remote$" "$L/resource.lease.4"' "$out"
+out=$("$LEASE" acquire 3); check "the tick renews its remote slot" '[[ "$out" == *"ACQUIRED slot=4 "* ]]' "$out"
+out=$("$LEASE" status); check "status names the remote card and its slots" '[[ "$out" == *"remote card: fake@host"* ]] && [[ "$out" == *"slot 4 HELD"* ]] && [[ "$out" == *"slot 5 free"* ]]' "$out"
+out=$("$LEASE" release 3); check "release drops the remote slot" '[ ! -e "$L/resource.lease.4" ]' "$out"
+full_local; echo "7 $RA $(ago 30) domain=80 remote render" > "$L/resource.lease.4"
+out=$("$LEASE" acquire 3 --render); check "a render run waits while the remote card's rendering kit is live" '[[ "$out" == BUSY* ]]' "$out"
+out=$("$LEASE" acquire 3); check "a plain run takes the remote card's second slot beside its rendering kit" '[[ "$out" == *"ACQUIRED slot=5 "* ]]' "$out"
+reset; rm -f "$L"/slot-wait.* "$L"/resource.lease.4 "$L"/resource.lease.5; echo "1 $RA $(ago 30) domain=77 render" > "$L/resource.lease"
+out=$("$LEASE" acquire 3 --render); check "a render run goes to the remote card while the local rendering kit is live" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && grep -q " remote render$" "$L/resource.lease.4"' "$out"
+echo "$(old 3000) $RB $(old 10) render" > "$L/slot-wait.9"; "$LEASE" release 3 >/dev/null
+out=$("$LEASE" acquire 3); check "a plain run takes a free local slot beside the local rendering kit, ahead of a render wait that card cannot start" '[[ "$out" == "ACQUIRED slot=2 "* ]]' "$out"
+"$LEASE" release 3 >/dev/null; full_local; echo "$(old 3000) $RB $(old 10) render" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "on the remote card a render wait it can start keeps its place ahead of a plain run" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+rm -f "$L"/slot-wait.*
+"$LEASE" release 3 >/dev/null
+full_local; echo "7 $RA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $RB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "a full remote card is busy too" '[[ "$out" == BUSY* ]]' "$out"
+full_local; echo "$(old 3000) $RB $(old 10)" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 3); check "the remote card keeps the line: a run behind the first in line waits" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+full_local; echo "$(old 2000) $RB $(old 10)" > "$L/all-wait.9"
+out=$("$LEASE" acquire 3); check "a whole-card priority on the local card does not hold the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"remote="* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+full_local; printf '#!/usr/bin/env bash\nexit 255\n' > "$H/fakebin/ssh"
+out=$("$LEASE" acquire 3); check "an unreachable remote card grants nothing" '[[ "$out" == BUSY* ]] && [ ! -e "$L/resource.lease.4" ]' "$out"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"
+out=$("$LEASE" remote --off); full_local; out2=$("$LEASE" acquire 3); check "with the remote card off a full local card is busy again" '[[ "$out" == "REMOTE off" ]] && [[ "$out2" == "BUSY kit limit"* ]]' "$out $out2"
+kill $RA $RB 2>/dev/null; wait $RA $RB 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card"
+
+# With the local card off, every kit, whole-card and device run goes to the remote card.
+printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo 1000;; *memory.total*) echo 16303;; esac\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
+sleep 600 & LA=$!
+sleep 600 & LB=$!
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/local-card-off"
+out=$("$LEASE" local --off); check "the local card cannot be turned off without a remote card" '[[ "$out" != "LOCAL off"* ]]' "$out"
+"$LEASE" remote fake@host >/dev/null
+out=$("$LEASE" local --off); check "the operator turns the local card off" '[[ "$out" == "LOCAL off"* ]] && [ -e "$L/local-card-off" ]' "$out"
+out=$("$LEASE" acquire 3); check "with the local card off a run takes a remote slot while the local slots are free" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+echo "3 $$ $(ago 30) domain=77" > "$L/resource.lease"
+out=$("$LEASE" acquire 3); check "a tick renewing its local slot is moved to the remote card" '[[ "$out" == *"ACQUIRED slot=4 "* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+echo "7 $LA $(ago 30) domain=80 remote" > "$L/resource.lease.4"; echo "8 $LB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "with the local card off and the remote card full a run waits" '[[ "$out" == "BUSY remote card"* ]] && [ ! -e "$L/resource.lease" ]' "$out"
+rm -f "$L"/resource.lease.4 "$L"/resource.lease.5 "$L"/slot-wait.*
+echo "7 $LA $(ago 30) domain=80 remote render" > "$L/resource.lease.4"
+echo "$(old 3000) $LB $(old 10) render" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 3); check "with the local card off, a render wait the remote rendering kit blocks holds no place ahead of a plain run" '[[ "$out" == *"ACQUIRED slot=5 "*"remote=fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null; "$LEASE" prioritize --clear >/dev/null; rm -f "$L"/resource.lease.4 "$L"/slot-wait.*
+echo "6 $LA $(ago 700) domain=80 reserved-for-all" > "$L/resource.lease.4"; echo "8 $LB $(ago 30) domain=81 remote" > "$L/resource.lease.5"
+out=$("$LEASE" acquire 3); check "a remote whole-card reservation lapses after its time, as a local one does" '[[ "$out" == *"ACQUIRED slot=4 "*"remote=fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null; rm -f "$L"/resource.lease.4 "$L"/resource.lease.5
+echo "6 $LA $(ago 30) domain=80 reserved-for-all" > "$L/resource.lease.4"
+out=$("$LEASE" acquire 3); check "a fresh remote reservation keeps its slot and counts as no kit" '[[ "$out" == *"ACQUIRED slot=5 "* ]] && grep -q " reserved-for-all$" "$L/resource.lease.4"' "$out"
+"$LEASE" release 3 >/dev/null; rm -f "$L"/resource.lease.4 "$L"/resource.lease.5 "$L"/slot-wait.*
+out=$("$LEASE" acquire 3 --all --render); check "a whole-card run takes the remote card" '[[ "$out" == *"ACQUIRED slot=4 "*"exclusive=all"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]] && grep -q " held-for-all$" "$L/resource.lease.5" && [ ! -e "$L/resource.lease" ]' "$out"
+"$LEASE" release 3 >/dev/null
+out=$("$LEASE" acquire 3 --device); check "a device run goes to the remote card" '[[ "$out" == *"ACQUIRED device"*"remote=fake@host"* ]] && [[ "$out" == *"DOCKER_HOST=ssh://fake@host"* ]]' "$out"
+"$LEASE" release 3 >/dev/null
+out=$("$LEASE" status); check "status says the local card is off" '[[ "$out" == *"local card: off"* ]]' "$out"
+out=$("$LEASE" local --on); out2=$("$LEASE" acquire 3); check "with the local card on again a run takes a local slot" '[[ "$out" == "LOCAL on" ]] && [[ "$out2" == "ACQUIRED slot=1 "* ]]' "$out $out2"
+"$LEASE" release 3 >/dev/null; "$LEASE" remote --off >/dev/null
+kill $LA $LB 2>/dev/null; wait $LA $LB 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card" "$L/local-card-off"
+
+echo "pass=$pass fail=$fail"
+[ "$fail" -eq 0 ]
