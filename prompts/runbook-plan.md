@@ -399,6 +399,9 @@ overridden below.
 7. **Tick cost (P8, owner decision D4).** Correctness first: a change may slow the tick, but a PR
    that changes runtime code reports its tick-wall cost against the parent (TickWallSplit or the
    profiler, same session, both arms). No perf bar blocks a merge; T09 restores real time.
+   The host runs a kit tick in one of two modes about 100 ms apart on RS6, whatever the commit, and an arm can
+   switch mid-run (#1875). So compare windows matched by a host-only stage both arms share (zone-sync `account`),
+   or alternate the arms several times; one median per arm measures the mode, not the change.
 8. **Void mission-4 rules:** "PHYSICS FIRST" ordering, "LIVE VERDICT SIZE", the perf-drift and
    perf-control rules, "merge on fixture + live verdict", and `design.md`'s plan of record rev 5.
    Priority is the plan's order, encoded in `Depends on:`.
