@@ -89,6 +89,10 @@ overridden below.
    - **Device doctests take no kit slot.** For `iter.sh build --test --device`, run
      `lease.sh acquire <issue> --device` and use its export line. It admits one device run beside the kits
      when the card has 3 GiB to spare, and never during a whole-card run. Release it right after the tests.
+     A device run takes at most 2 shards (`run_doctest_sharded.sh <binary> 2`): the lease reserves 3 GiB
+     for the whole run, and each shard holds its own context and arrays. Four shards beside the kits ran the
+     card out of memory twice on 2026-10-15: #1871's run sent a parent kit to the CPU reference, and
+     #1878's parity read 4 `cuMemAlloc` failures (operator).
      A whole-card acquire waits while a device holder lives, so the lane yields to a whole-card issue
      with priority: a new device run gets `BUSY device: whole-card issue N has priority`, and a holder
      asking again gets `YIELDED device` and loses its lease. Poll as for a slot, and do host work
@@ -188,6 +192,10 @@ overridden below.
      only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
      folder exists without a finished status, another tick is running it: run your change arms
      meanwhile.
+   - **A queue's STOP file stays in its own packet.** A queue that runs a parent arm into the shared folder
+     still writes its STOP, including the self-stop on a CPU-reference fallback, into its own packet. A STOP
+     in `evidence/parent-<base9>/` stops every other tick's queue that writes there (operator, 2026-10-15:
+     #1871's fallback STOP stopped #1845's `RS6-pm-s1323`).
    - **Check the base first.** Each parent arm runs twice (`<scenario>-p` and `<scenario>-p2`), and a proof
      uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
      replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
