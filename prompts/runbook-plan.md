@@ -38,6 +38,10 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   until the operator answers (a `Plan finding:` the step depends on) adds `ai:operator` in the same command
   as the pause comment. A pause a later tick can resume by itself (no slot, the budget, owed runs) never
   adds it. The operator removes it after answering.
+  - **Before that pause, read the issue's comments again.** The operator answers while your tick runs, often within
+    minutes of the finding. If an `Operator` comment newer than your `Plan finding:` answers it, act on it, or name it in a
+    budget pause without `ai:operator`. Never pause waiting for a ruling that is already posted (operator, 2026-10-15:
+    #1889 paused at 10:58Z on a question answered at 10:48Z).
 
 ## Read before you touch code
 
