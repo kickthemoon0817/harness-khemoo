@@ -207,6 +207,8 @@ overridden below.
      still writes its STOP, including the self-stop on a CPU-reference fallback, into its own packet. A STOP
      in `evidence/parent-<base9>/` stops every other tick's queue that writes there (operator, 2026-10-15:
      #1871's fallback STOP stopped #1845's `RS6-pm-s1323`).
+     A STOP meant for the next arm waits for the running arm's `rc=` line: the queue's check also ends the running arm,
+     and its state series and census are written only at its end (#1905's census arm, 2026-10-15).
    - **Check the base first.** Each parent arm runs twice (`<scenario>-p` and `<scenario>-p2`), and a proof
      uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
      replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
