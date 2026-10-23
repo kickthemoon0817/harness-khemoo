@@ -43,10 +43,13 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
     budget pause without `ai:operator`. Never pause waiting for a ruling that is already posted (operator, 2026-10-15:
     #1889 paused at 10:58Z on a question answered at 10:48Z).
 
-- **Read the issue's comments again after the claim, before the first build or lease, and before the merge lock.**
+- **Read the issue's comments again after the claim, before the first build or lease, before each new queue of arms or
+  whole-card session, and before the merge lock.**
   The operator's rulings and lane labels land seconds before or after a claim. A ruling posted after your claim binds
   your tick as one posted before it (operator, 2026-10-15: #1894 claimed at 12:06:26Z, the ruling came at 12:06:41Z,
   and the step landed without it).
+  A queue started on a superseded recipe spends the card twice (operator, 2026-10-23: #1960's skip-identity arms ran
+  after the 12:4xZ ruling dropped the skip, and #1973 reserved the card for a reading the 18:4xZ ruling moved).
 
 ## Read before you touch code
 
