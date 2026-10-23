@@ -101,6 +101,10 @@ overridden below.
    - **Device doctests take no kit slot.** For `iter.sh build --test --device`, run
      `lease.sh acquire <issue> --device` and use its export line. It admits one device run beside the kits
      when the card has 3 GiB to spare, and never during a whole-card run. Release it right after the tests.
+     **The acquire's exit code is the lease.** Never pipe `lease.sh acquire` through `tail`, `head` or `grep`
+     (a pipe returns the last command's status): run it alone, or with `set -o pipefail`, and start nothing on
+     the card unless it exited 0 (operator, 2026-10-23: #1965 ran a device case on a whole-card session after
+     `| tail -1` hid a `BUSY device`).
      A device run takes one shard while any kit holds the card (`run_doctest_sharded.sh <binary> 1`; check
      `nvidia-smi --query-compute-apps=pid --format=csv,noheader`), and at most 2 on a card no kit holds: the
      lease reserves 3 GiB for the whole run, and each shard holds its own context and arrays. Four shards
