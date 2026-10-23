@@ -38,7 +38,9 @@ ends, and nothing scheduled survives it. Therefore:
   suite, kit, render queue or agent, and at least every 15 minutes inside any wait. When it exits
   non-zero (1: a window is within two points of the ceiling; 2: no fresh reading), start nothing
   new, tear down, post the pause with the resume recipe, print the summary and END, as at the
-  budget's end.
+  budget's end. When it prints `OPERATOR: new on #N since ...`, an operator comment landed on
+  your issue after your claim: read the issue's comments and follow them before you start
+  anything, whatever your recipe says.
 
 Before you commit, run ONE review pass over your own change, scoped to this tick's purpose and
 what it touches (the runbook's ONE REVIEW PER TICK rail). One pass, not two.
