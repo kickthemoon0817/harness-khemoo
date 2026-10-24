@@ -3,8 +3,8 @@
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
-sleep 600 & A=$!
-sleep 600 & B=$!
+sleep 600 >/dev/null 2>&1 & A=$!
+sleep 600 >/dev/null 2>&1 & B=$!
 trap 'kill $A $B 2>/dev/null; rm -rf "$H"' EXIT
 mkdir -p "$H/bin" "$H/state/locks" "$H/cache/cache-slot2" "$H/cache/cache-slot3"
 cp "$here/bin/lease.sh" "$H/bin/lease.sh"
@@ -73,7 +73,7 @@ echo "$(old 2000) $B $(old 400)" > "$L/all-wait.2"
 out=$("$LEASE" acquire 3); check "a wait whose tick stopped asking gives no priority" '[[ "$out" == "ACQUIRED slot=1 "* ]]' "$out"
 
 reset; rm -f "$L"/all-wait.*
-sleep 600 & C=$!
+sleep 600 >/dev/null 2>&1 & C=$!
 echo "1 $C $(ago 30) domain=77" > "$L/resource.lease"
 echo "$(old 2000) 1" > "$L/all-wait.5"
 out=$("$LEASE" acquire 5 --all --render); check "the priority issue reserves and keeps its first wait time" '[[ "$out" == "RESERVING held=2/3"* ]] && [ "$(awk "{print \$1}" "$L/all-wait.5")" -le "$(old 1999)" ] && [ "$(awk "{print \$2}" "$L/all-wait.5")" = "$$" ]' "$out"
@@ -92,7 +92,7 @@ check "a script can hold the lease as a named live ancestor" '[[ "$out" == "ACQU
 LEASE_HOLDER_PID=$$ "$LEASE" release 3 >/dev/null
 rm -f "$H/bin/tick-pid.sh"
 
-sleep 600 & D=$!
+sleep 600 >/dev/null 2>&1 & D=$!
 trap 'kill $A $B $D 2>/dev/null; rm -rf "$H"' EXIT
 reset; rm -f "$L"/all-wait.*
 echo "1 $D $(ago 30) domain=77" > "$L/resource.lease"
@@ -222,8 +222,8 @@ out=$("$LEASE" prioritize --clear); check "the operator can clear the override" 
 rm -f "$L"/all-wait.* "$L"/slot-wait.*
 
 # One rendering kit at a time: a second one is refused, a plain kit is not.
-sleep 600 & C=$!
-sleep 600 & D=$!
+sleep 600 >/dev/null 2>&1 & C=$!
+sleep 600 >/dev/null 2>&1 & D=$!
 reset; rm -f "$L"/slot-wait.*
 echo "4 $C $(ago 30) domain=77 render" > "$L/resource.lease"
 out=$("$LEASE" acquire 3 --render); rc=$?
@@ -300,8 +300,8 @@ out=$("$LEASE" acquire 3); rc=$?; check "once dropped, the holder yields to the 
 kill $C $D 2>/dev/null; wait $C $D 2>/dev/null
 rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 # A whole-card waiter reserves nothing while a single-slot issue the operator named waits.
-sleep 600 & E=$!
-sleep 600 & F=$!
+sleep 600 >/dev/null 2>&1 & E=$!
+sleep 600 >/dev/null 2>&1 & F=$!
 reset; echo "1 $F $(ago 30) domain=77" > "$L/resource.lease"
 echo "$(old 60) $E $(old 10)" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
 out=$("$LEASE" acquire 2 --all --render); rc=$?
@@ -339,8 +339,8 @@ reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
 # A second card on another host takes the single-slot runs the local card cannot.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
-sleep 600 & RA=$!
-sleep 600 & RB=$!
+sleep 600 >/dev/null 2>&1 & RA=$!
+sleep 600 >/dev/null 2>&1 & RB=$!
 full_local() { reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5
   echo "1 $RA $(ago 30) domain=77" > "$L/resource.lease"; echo "2 $RB $(ago 30) domain=78" > "$L/resource.lease.2"; }
 full_local
@@ -378,8 +378,8 @@ reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resour
 
 # With the local card off, every kit, whole-card and device run goes to the remote card.
 printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo 1000;; *memory.total*) echo 16303;; esac\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
-sleep 600 & LA=$!
-sleep 600 & LB=$!
+sleep 600 >/dev/null 2>&1 & LA=$!
+sleep 600 >/dev/null 2>&1 & LB=$!
 reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/local-card-off"
 out=$("$LEASE" local --off); check "the local card cannot be turned off without a remote card" '[[ "$out" != "LOCAL off"* ]]' "$out"
 "$LEASE" remote fake@host >/dev/null
