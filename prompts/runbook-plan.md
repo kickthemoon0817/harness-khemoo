@@ -148,6 +148,10 @@ overridden below.
        external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
        side only parts at the pile's build (#1682). Put it in `BASE_EXTS`. `tools/eval/series_compare.py` voids a pair
        whose kits loaded different builds of an extension.
+     - **Every scenario arm mounts `worv.core.utils` from its own tree too, parent arms included,** once #1750 has
+       landed and until the image is rebuilt. RS6's ground is an `omniverse://` URL. The image's 0.2.2 reduces it to its
+       basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. Put it
+       in `BASE_EXTS` beside `worv.core.scene`.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
