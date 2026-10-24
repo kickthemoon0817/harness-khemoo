@@ -28,6 +28,9 @@
 #          An issue that has waited ALL_PRIORITY_AFTER_S (1800 s) for the whole card, across the
 #          ticks that resume it, takes priority: its reservations stop lapsing, single-slot
 #          acquires print BUSY priority ..., and other whole-card waiters print YIELDING (exit 1).
+#          A tick that holds the card and renews it between runs while another issue has priority
+#          (this one, or a wait the operator named) gets YIELDED card (exit 1): every slot it held
+#          is released and it joins the whole-card line.
 #          At most GPU_KITS_MAX (2) single-slot kits run at once; a third acquire prints
 #          BUSY kit limit (exit 1) while a free slot file remains.
 #          A tick re-acquiring the slot it holds while a whole-card issue has priority gets
@@ -298,6 +301,20 @@ seed_cache() {
     "rm -rf /c/$name.seeding && mkdir -p /c/cache/kit /c/cache/ov /c/cache/glcache /c/cache/computecache \
      && cp -a /c/cache /c/$name.seeding && mv /c/$name.seeding /c/$name" >&2
 }
+# Drops this tick's whole-card files: its reservations, and the card itself
+# when it holds one. True when it held the card.
+drop_whole_card() {
+  local s f held=1
+  for s in $(card_slots); do
+    f=$(slot_file $s)
+    [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] || continue
+    case "$(cat "$f")" in
+      *" reserved-for-all") rm -f "$f" ;;
+      *" exclusive"|*" held-for-all") rm -f "$f"; held=0 ;;
+    esac
+  done
+  return $held
+}
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
@@ -346,11 +363,13 @@ case "${1:-}" in
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
       first_issue=$(priority_issue)
       if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
-        # Yield to the issue with priority: drop this tick's reservations, keep the wait on record.
-        for s in $(card_slots); do
-          f=$(slot_file $s)
-          [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
-        done
+        # Yield to the issue with priority and keep the wait on record. A holder
+        # renewing between runs hands the card over, as a slot holder hands its slot,
+        # since the issue with priority cannot start while any slot is held.
+        if drop_whole_card; then
+          note_wait "$issue"
+          echo "YIELDED card to whole-card issue $first_issue, which has waited longest: the lease is released; acquire again once the card is back"; exit 1
+        fi
         note_wait "$issue"
         echo "YIELDING to whole-card issue $first_issue, which has waited longest"; exit 1
       fi
@@ -358,10 +377,10 @@ case "${1:-}" in
       # it frees from that issue until the reservation lapses, so reserve nothing.
       op=$(operator_first slot-wait)
       if [ -n "$op" ] && [ "$op" != "$issue" ] && ! operator_ahead "$issue" "$op"; then
-        for s in $(card_slots); do
-          f=$(slot_file $s)
-          [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" reserved-for-all" ]] && rm -f "$f"
-        done
+        if drop_whole_card; then
+          note_wait "$issue"
+          echo "YIELDED card to operator-priority issue $op: the lease is released; acquire again with --all --render once its session ends"; exit 1
+        fi
         note_wait "$issue"
         echo "YIELDING to operator-priority issue $op"; exit 1
       fi

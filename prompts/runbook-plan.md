@@ -196,7 +196,10 @@ overridden below.
      whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
    - **A tick that holds the whole card for a baseline** runs only the baseline's arms under it, and
      releases before any other arm. A series of arms run under `--all` keeps every sibling off the card for
-     the whole series.
+     the whole series. Between the baseline's runs, renew with `lease.sh acquire <issue> --all --render`. While
+     another issue has priority it prints `YIELDED card` (exit 1): every slot is released and you have joined
+     the whole-card line. Treat it as `YIELDED`: run `tools/dev/iter.sh down` for your container at once, then
+     poll again.
    - A render product is never read on the update it was armed on.
 3a. **Parent arms are shared per base commit.** Every refactor proving §F.3 against the same base runs the
    same parent arms (lockstep, `--no-moments`, same seed), so run them once and share them:

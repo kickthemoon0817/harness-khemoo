@@ -314,6 +314,29 @@ out=$("$LEASE" acquire 2 --all --render); check "without the operator naming a w
 kill $E $F 2>/dev/null; wait $E $F 2>/dev/null
 reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
 
+# A tick that holds the whole card and renews it between runs hands the card to the issue with priority.
+sleep 600 >/dev/null 2>&1 & E=$!
+hold_card() { reset; rm -f "$L"/all-wait.* "$L"/slot-wait.*
+  echo "$1 $$ $(ago 60) domain=77 exclusive" > "$L/resource.lease"
+  echo "$1 $$ $(ago 60) domain=78 held-for-all" > "$L/resource.lease.2"
+  echo "$1 $$ $(ago 60) domain=79 held-for-all" > "$L/resource.lease.3"; }
+hold_card 2; "$LEASE" prioritize --clear >/dev/null
+echo "$(old 60) $E $(old 10)" > "$L/slot-wait.9"; "$LEASE" prioritize 9 >/dev/null
+out=$("$LEASE" acquire 2 --all --render); rc=$?
+check "a whole-card holder renewing between runs hands the card to a wait the operator named" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED card to operator-priority issue 9"* ]] && ! ls "$L"/resource.lease* >/dev/null 2>&1 && [ -s "$L/all-wait.2" ]' "rc=$rc $out"
+hold_card 2; "$LEASE" prioritize --clear >/dev/null; "$LEASE" prioritize 2 >/dev/null; "$LEASE" prioritize 9 >/dev/null
+echo "$(old 60) $E $(old 10)" > "$L/slot-wait.9"
+out=$("$LEASE" acquire 2 --all --render); check "a whole-card holder the operator named ahead keeps the card" '[[ "$out" == "ACQUIRED slot=1 "*"exclusive=all"* ]] && grep -q " held-for-all$" "$L/resource.lease.2" && grep -q " held-for-all$" "$L/resource.lease.3"' "$out"
+hold_card 4; "$LEASE" prioritize --clear >/dev/null
+echo "$(old 2000) $B $(old 10)" > "$L/all-wait.2"
+out=$("$LEASE" acquire 4 --all --render); rc=$?
+check "a whole-card holder renewing between runs hands the card to a whole-card issue with priority" '[ "$rc" -eq 1 ] && [[ "$out" == "YIELDED card to whole-card issue 2"* ]] && ! grep -qs "^4 " "$L"/resource.lease* && [ -s "$L/all-wait.4" ]' "rc=$rc $out"
+hold_card 4
+out=$("$LEASE" acquire 4 --all --render); check "with no other issue waiting, a whole-card holder keeps the card across its runs" '[[ "$out" == "ACQUIRED slot=1 "*"exclusive=all"* ]]' "$out"
+"$LEASE" release 4 >/dev/null
+kill $E 2>/dev/null; wait $E 2>/dev/null
+reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority"
+
 # A second card on another host takes the single-slot runs the local card cannot.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/ssh"; chmod +x "$H/fakebin/ssh"
 sleep 600 & RA=$!
