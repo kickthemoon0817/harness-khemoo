@@ -4,6 +4,8 @@
 # Two modes:
 #   tick.sh                       launcher: decide how many ticks to run, spawn them
 #   tick.sh runner <max> <delay>  internal: hold a slot and run exactly one tick
+#   tick.sh runner <max> <delay> landing
+#                                 internal: one tick that claims only a merge slot's ai:ready issue
 #
 # The launcher is invoked from cron every couple of minutes. It sizes the pool from
 # live API rate-limit headroom AND the number of unclaimed issues, then spawns enough
@@ -112,6 +114,12 @@ fable_lane() {  # true when this tick should run on the fable lane
     [ "$young_f" -lt "$want_f" ]
 }
 
+# A merge slot's landing tick: it may start past the width the usage windows allow, so it
+# claims nothing but an issue waiting for the slot and never chains.
+: "${READY_LABEL:=ai:ready}"
+LANDING_MARK="This tick is the merge slot's landing tick"
+LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
+
 # ---------------------------------------------------------------- runner mode
 # bash parses this whole block when a runner starts, so a running runner keeps
 # chaining ticks on the code it started with. After changing the block, stop the
@@ -121,6 +129,7 @@ fable_lane() {  # true when this tick should run on the fable lane
 if [ "${1:-}" = "runner" ]; then
     slotmax=${2:-1}
     stagger=${3:-0}
+    landing=""; [ "${4:-}" = landing ] && landing=1
     # Stagger keeps concurrent runners from claiming the same issue in the same second.
     [ "$stagger" -gt 0 ] && sleep "$stagger"
     # A pause set while the launcher staggered its runners still stops the ones not yet started.
@@ -149,7 +158,14 @@ if [ "${1:-}" = "runner" ]; then
         # usage limit cools that model and re-runs at once on the next one in the list.
         tried=""; model=""; rc=0
         while :; do
-            if fable_lane && [[ " $tried " != *" $FABLE_MODEL "* ]]; then
+            if [ -n "$landing" ]; then
+                model=$(pick_model "$tried")
+                if [ -z "$model" ]; then
+                    echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
+                    break
+                fi
+                lane="$LANDING_LANE"
+            elif fable_lane && [[ " $tried " != *" $FABLE_MODEL "* ]]; then
                 model="$FABLE_MODEL"
                 lane="This tick runs on $FABLE_MODEL, the fable lane: claim only an issue labelled \`$FABLE_LABEL\`. If none is claimable, print a one-line summary and end."
             else
@@ -189,6 +205,7 @@ $(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
         dur=$(( $(date +%s) - start_s ))
         # A short tick found nothing to claim or failed: leave the retry to cron.
         [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && break
+        [ -n "$landing" ] && break
         [ "$chain" -ge "${MAX_CHAIN:-24}" ] && break
         harness_paused && break
         compute_allowed
@@ -238,6 +255,21 @@ fi
 spawn=$(( allowed - busy ))
 [ "$spawn" -gt "$want" ] && spawn=$want
 [ "$spawn" -lt 0 ] && spawn=0
+# A landing needs no card and little budget, but in a full pool it waits for a slot to free,
+# which can outlast the merge slot. With every allowed slot held and no young tick about to
+# claim, one landing tick starts past the width for an issue waiting for the slot.
+if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
+    && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
+    && ! pgrep -f -- "claude -p $LANDING_MARK" >/dev/null 2>&1; then
+    ready=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$READY_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
+    if [[ "$ready" =~ ^[0-9]+$ ]] && [ "$ready" -gt 0 ]; then
+        slotmax=$(( busy + 1 )); [ "$slotmax" -gt "$MAX_SLOTS" ] && slotmax=$MAX_SLOTS
+        echo "$(date -u +%Y%m%dT%H%M%SZ) five=${five:-?}% week=${week:-?}% allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
+            >>"$LOGS/allocator.log"
+        setsid "$0" runner "$slotmax" 0 landing >/dev/null 2>&1 &
+        exit 0
+    fi
+fi
 [ "$spawn" -eq 0 ] && exit 0   # quiet: no log spam on the frequent no-op firings
 
 ts=$(date -u +%Y%m%dT%H%M%SZ)

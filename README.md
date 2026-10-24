@@ -46,6 +46,11 @@ empty, usage no longer allows its slot, a tick ended in under `CHAIN_MIN_TICK_S`
 nothing claimable or an error), after `MAX_CHAIN` (24) ticks, or when the harness is paused:
 the `bin/tick.sh` line commented out of the crontab, or a `state/paused` file present.
 
+**Landing tick.** While a merge slot is open, an issue labelled `ai:ready` waits for a tick.
+When every slot the usage windows allow is held and no young tick is about to claim, the
+launcher starts one tick past that width, told to claim only an `ai:ready` issue. It never
+chains, and it never starts once a window allows no slot at all.
+
 **Models.** `state/tick-model` (whitespace-separated, best first) or `TICK_MODELS` names the
 model priority. Each tick runs on the first model that is not cooling down. A tick that dies on
 a model's usage limit marks it in `state/model-cooldown/` for `MODEL_COOLDOWN_S` (1800 s) and
