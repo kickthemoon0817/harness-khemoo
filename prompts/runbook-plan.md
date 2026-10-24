@@ -152,6 +152,11 @@ overridden below.
        landed and until the image is rebuilt. RS6's ground is an `omniverse://` URL. The image's 0.2.2 reduces it to its
        basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. Put it
        in `BASE_EXTS` beside `worv.core.scene`.
+     - **A per-point impulse from PhysX's contact report is not evidence where a pair has more than one friction
+       patch** (#1754). The report lists points in narrowphase order, while the solver writes impulses in patch
+       order. Read per-pair totals, and per-point separations and normals. A per-point attribution needs a diagnosis
+       arm with `eMODIFY_CONTACTS` raised on the pair (`evidence/2026-10-24-1754-report-order/checks/report_order.py`),
+       which puts the report in order and can part a drive by millimetres.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
