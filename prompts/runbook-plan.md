@@ -324,7 +324,8 @@ overridden below.
        - **It moved:** release the lock, re-prepare on the new head, and try again inside the slot.
        - **It moved by tests-only commits alone** (3b exempts them, and none touches the change's own files): merge,
          rebuild, and run every case of the test files those commits touched, every test file that includes them, and
-         the change's own touched files, on the new merge result. The prepared fast set and device parity carry,
+         the change's own touched files, on the new merge result. A moved test file whose binary builds from no file
+         the change touches carries the head's own fast-set result instead, once that run is green on the new head. The prepared fast set and device parity carry,
          because no production file and no other test file differs from the prepared merge result. Any other move
          re-prepares in full (operator, 2026-10-24: a tests-only move at 11:16Z sent two prepared landings back
          through the whole fast set, and both missed the 12:00Z slot).
