@@ -19,7 +19,9 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
 
 - Only issues labelled **`ai:plan`** are claimable. An `ai` issue without `ai:plan` is not worked.
 - An `ai:plan` issue whose body starts with `Operator: **take this before any other claimable issue.**`
-  goes first; then resume a released claim (dead claimant), the one whose last pause comment is oldest first, so
+  goes first; then an issue whose landing is still to prepare: an `Operator sign-off: approved` comment and no
+  `ai:ready` yet, so finished work lands before new work and does not chase the head; then resume a released claim
+  (dead claimant), the one whose last pause comment is oldest first, so
   one long issue cannot take every tick while others wait; then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
 - An issue labelled `ai:signoff` is waiting for a sign-off. Never claim it; never merge its PR. The owner
