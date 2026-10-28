@@ -136,6 +136,13 @@ overridden below.
        `DOCKER_HOST=ssh://worv@10.50.2.178 PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
        (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
        a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
+     - **One fast set per host at a time.** The doctest runner shards a suite over min(nproc, 8) processes, so two or
+       more fast sets on one host thrash each other and none finishes inside a tick (three were cut off on
+       2026-10-28 at load1 55–76). Run a fast set or a whole-binary host suite under that host's suite lock,
+       detached to a log: `flock /tmp/worv-fast-set.lock tools/dev/iter.sh build --test --fast …` here, and
+       `flock /tmp/worv-fast-set-remote.lock` with the remote lane's export line on the remote host. Take the lane
+       whose lock is free; if both are held, wait on the one with the shorter holder. A single touched file
+       (`-sf`) needs no lock.
      - Keep every kit-side call of the run under the export line.
      - **The local host is off (owner, 2026-10-01): builds, AOT, tests and kits all run on the remote host.**
        - Every bash a tick starts carries an exported `docker` function (`bin/remote-env.sh`). It sends each `docker`
