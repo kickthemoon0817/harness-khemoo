@@ -130,6 +130,12 @@ overridden below.
        The shims copy the run's bind mounts across and read that card.
      - A remote arm is identical to a local one: RS4 on parent-af846aec8 matched bit for bit, 431/431
        documents and the whole wrench trace. So change and parent arms may run on either card.
+     - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
+       compile only) serves one compile at a time for every tick on this host. When it already has a waiter, or the
+       local load1 is past twice `nproc`, build and run host suites on the remote host instead:
+       `DOCKER_HOST=ssh://worv@10.50.2.178 PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
+       (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
+       a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
      - Keep every kit-side call of the run under the export line.
      - **The local host is off (owner, 2026-10-01): builds, AOT, tests and kits all run on the remote host.**
        - Every bash a tick starts carries an exported `docker` function (`bin/remote-env.sh`). It sends each `docker`
