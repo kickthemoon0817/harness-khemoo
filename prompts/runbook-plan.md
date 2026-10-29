@@ -401,6 +401,10 @@ overridden below.
         - Every run goes in the group's packet.
    - **Class B group** (behaviour changes to the same physics, such as the bucket–steel contact):
      1. **Member evidence.** Each member keeps its own fixtures and fail-on-head evidence in its own packet.
+        A group may be filed while its members are still implementing (operator, 2026-10-29, #2042). Each member
+        then keeps its lane and finishes that evidence without scenario arms. It posts
+        `Member evidence ready: <branch>@<hash>, packet <path>` and holds itself with `ai:operator`. The group issue
+        stays on `ai:operator` until every member has done so, and the operator lifts it.
      2. **Read the combination.** The group branch, built as above, carries every member. Its scenario arms
         (change against parent), V5 and tick cost are read on that combination, the tree that will land.
      3. **Sign-off and landing.** The operator signs off the group on the group's packet.
