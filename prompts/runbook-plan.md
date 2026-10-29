@@ -369,6 +369,11 @@ overridden below.
        head.
      - When a class B change lands in a slot, the next head's chain check (above) is skipped for the
        scenarios that change moves. It is recorded as skipped, with the class B PR named.
+     - Class B batch-mates in one slot do not void each other's carries: each merges the head the batch
+       left and re-runs its touched tests and the fast set there (operator, 2026-10-29, #1998). Because no
+       proof covers the combination, the first tick that records parent render arms on the slot's final
+       head reads V5 against the window base's renders for the scenarios the batch moves. A worse item no
+       batch-mate's own V5 placed is a `Plan finding:` naming the batch, with `ai:operator`.
 3d. **PRs are proven in groups, not one by one (owner, 2026-09-29).** One proof covers a group, and the
    combination that lands is the combination tested.
    - **A group is an issue.**
