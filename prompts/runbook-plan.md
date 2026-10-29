@@ -143,6 +143,14 @@ overridden below.
        `flock /tmp/worv-fast-set-remote.lock` with the remote lane's export line on the remote host. Take the lane
        whose lock is free; if both are held, wait on the one with the shorter holder. A single touched file
        (`-sf`) needs no lock.
+     - **Landings take the suite lanes first while a slot is open** (operator, 2026-10-29). A tick that is not landing
+       in the slot does not start a fast set or a whole-binary suite while both of these hold:
+       - a merge slot is open (UTC hh % 3 == 0, the first 60 minutes);
+       - an `ai:ready` issue is open.
+       It runs `-sf` files, builds and host probes meanwhile, and takes the lane once the slot closes or no
+       `ai:ready` issue is left. One reason: a class B batch-mate re-runs the whole fast set on the head its batch
+       leaves. On 2026-10-29 #1998 and #2006 queued behind member-evidence suites on both lanes and missed the
+       09:00Z slot.
      - Keep every kit-side call of the run under the export line.
      - **The local host is off (owner, 2026-10-01): builds, AOT, tests and kits all run on the remote host.**
        - Every bash a tick starts carries an exported `docker` function (`bin/remote-env.sh`). It sends each `docker`
