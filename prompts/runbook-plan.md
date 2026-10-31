@@ -152,7 +152,17 @@ overridden below.
        leaves. On 2026-10-29 #1998 and #2006 queued behind member-evidence suites on both lanes and missed the
        09:00Z slot.
      - Keep every kit-side call of the run under the export line.
-     - **The local host is off (owner, 2026-10-01): builds, AOT, tests and kits all run on the remote host.**
+     - **Both hosts run work (owner, 2026-10-08: "use both devices, this one and also the remote one together").** The
+       local host has been on since 2026-10-07 23:59Z (`lease.sh local --on`; no `state/locks/local-card-off`).
+       - Leases grant the local card's slots and the remote host's (10.50.2.178) together. A local grant's export line
+         carries no `DOCKER_HOST`, so its run, a `--device` run included, runs here. That is correct: never stop such a
+         run as a breach.
+       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@10.50.2.178
+         PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
+         `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
+         cron slow set runs on the local host every third hour.
+     - **While the local host is off** (`lease.sh local --off`, only on the owner's word), builds, AOT, tests and kits
+       all run on the remote host:
        - Every bash a tick starts carries an exported `docker` function (`bin/remote-env.sh`). It sends each `docker`
          command through `bin/remote-docker` to the remote host, inside or outside an export line.
        - Before a run, the shim copies the paths the run mounts to the remote. After a foreground run it copies the
@@ -165,8 +175,8 @@ overridden below.
          - Put the docker call inside bash: `timeout 600 bash -c 'docker run …'`.
          - Run Python that calls docker under a slot's export line, which sets `DOCKER_HOST` and the shims' `PATH`.
        - `docker compose` goes through the function to the remote daemon but copies no mounts; ticks do not use it.
-       - `lease.sh` grants remote slots only. A whole-card run takes both remote slots, and a device run's export line
-         carries `DOCKER_HOST`.
+       - `lease.sh` then grants remote slots only. A whole-card run takes both remote slots, and a device run's export
+         line carries `DOCKER_HOST`.
      - **Every scenario arm mounts `worv.core.scene` from its own tree, parent arms included,** until the runtime image is
        rebuilt from `ai/manure-mpm` (owner's release step). The image bakes master's 0.5.4, which lacks #1636's
        external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
