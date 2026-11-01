@@ -142,7 +142,9 @@ overridden below.
        detached to a log: `flock /tmp/worv-fast-set.lock tools/dev/iter.sh build --test --fast …` here, and
        `flock /tmp/worv-fast-set-remote.lock` with the remote lane's export line on the remote host. Take the lane
        whose lock is free; if both are held, wait on the one with the shorter holder. A single touched file
-       (`-sf`) needs no lock.
+       (`-sf`) needs no lock. Run it with `tools/test/run_doctest_sharded.sh --file '*<file>.cpp' <binary> [workers]`
+       (repeat `--file` for several files; `--fast` still drops `[slow]`). The runner refuses `-sf=` and any other
+       argument it does not know, so a touched-file run can no longer quietly become a whole-binary run.
      - **Landings take the suite lanes first while a slot is open** (operator, 2026-10-29). A tick that is not landing
        in the slot does not start a fast set or a whole-binary suite while both of these hold:
        - a merge slot is open (UTC hh % 3 == 0, the first 60 minutes);
