@@ -24,7 +24,8 @@ def closed(n):
     if n in open_nums: return False
     out = subprocess.run(["gh", "issue", "view", str(n), "--repo", repo, "--json", "state", "--jq", ".state"],
                          capture_output=True, text=True).stdout.strip()
-    return out == "CLOSED"
+    # A dependency named by a PR number is met once the PR merges (its state reads MERGED).
+    return out in ("CLOSED", "MERGED")
 def claimant_alive(n):
     # Held while any PID that claimed and did not later withdraw is alive; withdrawn or dead
     # claimants make the issue resumable.
