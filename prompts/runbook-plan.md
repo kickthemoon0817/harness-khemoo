@@ -448,6 +448,12 @@ overridden below.
      - a single draw that passes V5 needs no more draws. A single draw's worse frames are the change's only when they
        recur in the change's draws of the same branch and are absent from the parent's draws of that branch;
      - never attribute a deeper or shallower park to a change from one draw per arm.
+   - **RS3's rest is read over three seeds too (operator, 2026-11-02, #2132).** Changes to the pile's settle part the run
+     before the drive, so each tree parks on another draw. The still-body group passed RS3's rest on seed 1322 alone
+     and moved material beside the parked rear wheels on 1323 and 1324. So:
+     - RS3's rest rows (every row within 2 cm of a link within r_rest over the rest window, the group's row probe and
+       `rest_tracks.py`) and V5 at rest are read on seeds 1322, 1323 and 1324 per arm;
+     - a bar is a maximum, so quote the worst track per seed, never a percentile.
      - **A change that picks the branch itself** (operator, 2026-10-02, #1704): when every draw of the change takes one
        branch over at least three seeds, and the parent's branch per seed repeats on the base, the branch move is the
        change's. Read RS6 across branches, and do not count the branch against it. Weigh a change-only V5 item with a
