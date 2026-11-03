@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# The docker CLI for runs on a remote host. When DOCKER_HOST names an ssh://
+# daemon, a bind mount's source is a path on that host, so `docker run` and
+# `docker create` first copy every absolute host path they mount to the same
+# path there. A `docker run` in the foreground then copies its writable mounts
+# back here once the container exits, so a build's or a test's outputs land in
+# the tree the next local step reads. Paths under /tmp stay the remote's own:
+# shader caches and the X socket belong to the host that runs the kit.
+#
+# Containers write as root, so a writable mount is handed back to the remote
+# user after the run; otherwise the next copy could not replace those files.
+# Runs that share a worktree or an evidence packet hold one lock on it while
+# they copy and run: a writable mount excludes every other run of that tree, a
+# read-only one excludes only writers. A detached run holds it while it copies.
+set -u
+# bin/remote-env.sh may have exported a function by this name; calling it from here would loop.
+unset -f docker 2>/dev/null
+self_dir=$(cd "$(dirname "$0")" && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
+[ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
+case "${DOCKER_HOST:-}" in ssh://*) ;; *) exec "$real" "$@" ;; esac
+target=${DOCKER_HOST#ssh://}
+sub=""
+for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
+[ "$sub" = run ] || [ "$sub" = create ] || exec "$real" "$@"
+
+ssh_cmd="ssh -o BatchMode=yes"
+lock_parents="${REMOTE_DOCKER_LOCK_PARENTS:-$HOME/tmp_workspace/ai-worktrees:$HOME/tmp_workspace/artifacts/manure-plan/evidence}"
+chown_image="${REMOTE_DOCKER_CHOWN_IMAGE:-worv-builder:isaac6}"
+
+# The tree a path belongs to: the child of a lock parent it lies under, else itself.
+lock_root() {
+  local p=$1 lp rest
+  local IFS=:
+  for lp in $lock_parents; do
+    case "$p" in "$lp"/*) rest=${p#"$lp"/}; echo "$lp/${rest%%/*}"; return ;; esac
+  done
+  echo "$p"
+}
+
+detached=""; srcs=(); modes=(); prev=""
+for a in "$@"; do
+  spec=""; kind=""
+  case "$prev" in -v|--volume) spec=$a; kind=v ;; --mount) spec=$a; kind=m ;; esac
+  case "$a" in
+    --volume=*) spec=${a#--volume=}; kind=v ;;
+    --mount=*) spec=${a#--mount=}; kind=m ;;
+    -d|--detach|--detach=true) detached=1 ;;
+    -[dit]*) [[ "$a" =~ ^-[dit]+$ && "$a" == *d* ]] && detached=1 ;;
+  esac
+  prev=$a
+  [ -n "$kind" ] || continue
+  if [ "$kind" = v ]; then
+    src=${spec%%:*}; rest=${spec#*:}; opts=""
+    [[ "$rest" == *:* ]] && opts=${rest#*:}
+    mode=rw; [[ ",$opts," == *",ro,"* ]] && mode=ro
+  else
+    src=$(sed -n 's/.*\(source\|src\)=\([^,]*\).*/\2/p' <<<"$spec")
+    mode=rw
+    case ",$spec," in *",readonly,"*|*",readonly=true,"*|*",ro,"*|*",ro=true,"*) mode=ro ;; esac
+  fi
+  case "$src" in /tmp|/tmp/*|"") continue ;; /*) ;; *) continue ;; esac
+  [ -e "$src" ] || continue
+  srcs+=("$src"); modes+=("$mode")
+done
+
+# Locks, taken in a sorted order so two runs never wait on each other.
+lockdir="${XDG_RUNTIME_DIR:-/tmp}/remote-docker-locks"; mkdir -p "$lockdir"
+declare -A want=()
+for i in "${!srcs[@]}"; do
+  r=$(lock_root "${srcs[$i]}")
+  if [ "${modes[$i]}" = rw ]; then want[$r]=x; else : "${want[$r]:=s}"; fi
+done
+while IFS= read -r r; do
+  [ -n "$r" ] || continue
+  exec {fd}>"$lockdir/$(printf '%s' "$r" | md5sum | cut -c1-16).lock"
+  flock -"${want[$r]}" "$fd"
+done < <(printf '%s\n' "${!want[@]}" | sort)
+
+remote_uid=""
+give_back() {  # $1: a path on the remote that a container may have written as root
+  [ -n "$remote_uid" ] || remote_uid=$($ssh_cmd "$target" 'echo "$(id -u):$(id -g)"')
+  "$real" run --rm -v "$1:/w" --entrypoint chown "$chown_image" -R "$remote_uid" /w >/dev/null 2>&1
+}
+push() {  # $1: a local path, copied to the same path on the remote
+  local src=$1 parent
+  parent=$(dirname "$src")
+  $ssh_cmd "$target" "mkdir -p '$parent'" || return 1
+  rsync -a --delete -e "$ssh_cmd" "$src" "$target:$parent/" 2>/dev/null && return 0
+  # A file a container left as root blocks the copy: hand it back and try once more.
+  give_back "$src"
+  rsync -a --delete -e "$ssh_cmd" "$src" "$target:$parent/"
+}
+declare -A pushed=()
+for src in "${srcs[@]}"; do
+  skip=""
+  for p in "${!pushed[@]}"; do case "$src" in "$p"|"$p"/*) skip=1; break ;; esac; done
+  [ -n "$skip" ] && continue
+  push "$src" || { echo "remote-docker: could not copy $src to $target" >&2; exit 1; }
+  pushed[$src]=1
+done
+
+[ "$sub" = create ] || [ -n "$detached" ] && exec "$real" "$@"
+
+pull() {  # $1: a path the run could write, copied back from the remote
+  local src=$1
+  rsync -a --update -e "$ssh_cmd" "$target:$src" "$(dirname "$src")/" 2>/dev/null && return 0
+  # A file a container on this host once left as root blocks the copy back: take it back here and try once more.
+  DOCKER_HOST="" "$real" run --rm -v "$src:/w" --entrypoint chown "$chown_image" -R "$(id -u):$(id -g)" /w >/dev/null 2>&1
+  rsync -a --update -e "$ssh_cmd" "$target:$src" "$(dirname "$src")/"
+}
+"$real" "$@"; rc=$?
+for i in "${!srcs[@]}"; do
+  [ "${modes[$i]}" = rw ] || continue
+  src=${srcs[$i]}
+  give_back "$src"
+  pull "$src" || echo "remote-docker: could not copy $src back from $target" >&2
+done
+exit "$rc"
