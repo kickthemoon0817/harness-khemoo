@@ -6,6 +6,17 @@ apply (mechanics only). Then read the plan's PRINCIPLE.md, DECISIONS.md §1, TOD
 document your issue names, all under /home/khemoo/tmp_workspace/artifacts/manure-plan/, and
 /home/khemoo/tmp_workspace/isaac_sim/CLAUDE.md. Do not read design.md: its plan of record is void.
 
+THE PUBLIC RECORD: everything you post to GitHub — an issue body, a PR body, a comment, a close
+summary — is read by people who have the repository and nothing else, and it is written to
+/home/khemoo/tmp_workspace/claude-issue-harness/prompts/public-record.md, with every project term
+defined on first use in the words of
+/home/khemoo/tmp_workspace/claude-issue-harness/prompts/glossary.md. Write each body to a file and run
+`/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr|issue|comment <file>`
+before `gh` posts it (`--body-file`); a blocking finding means rewrite, never post. No path on this
+host, no host name or address, no slot, lease, PID or worktree in a body; a pause or checkpoint
+comment keeps its resume recipe, host and worktree under its `<details><summary>Harness trace</summary>`
+block, after the state written in plain words.
+
 You are a FINITE BATCH RUN under `claude -p`: the process terminates the moment your turn
 ends, and nothing scheduled survives it. Therefore:
 - NEVER use a scheduling/wakeup tool, and never end your turn to "wait" for a background

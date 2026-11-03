@@ -46,8 +46,10 @@ Example shape:
    edit the user's checkout. Follow the repo's own conventions. Build and run the targeted
    tests.
 5. **Verify** — re-run the measurement slice the issue affects. Record real evidence in the PR
-   body under `## Verification`, and scope claims honestly ("compile-verified only" when no
-   live run backed it).
+   body's `## Evidence` section, written to `prompts/public-record.md` (every reading with its
+   commit and condition, nothing that is only true on this host), and scope claims honestly under
+   `## Scope and limits` ("compile-verified only" when no live run backed it). Lint the body with
+   `bin/public_record_lint.py --kind pr <file>` before `gh` posts it.
 6. **Land or hand off, by base branch** — merging is scoped: a tick may merge its own verified
    PR into the scratch work branch; PRs targeting shared or protected branches stay open for
    human approval. Never merge a PR you did not open, never merge what you cannot verify,
@@ -79,3 +81,7 @@ lease, not just a lock:
 - Ticks are finite `claude -p` batch runs — no scheduled wakeups, no ending a turn to wait.
   Write the tick summary and the teardown plan to the log BEFORE starting anything long.
 - Archive failed evidence honestly. Never weaken a gate to obtain a pass.
+- The public record is written for a reader who has the repository and nothing else
+  (`prompts/public-record.md`, terms in `prompts/glossary.md`): no host paths, hosts, PIDs, slots
+  or leases in a body; the harness's own bookkeeping goes under a comment's `Harness trace` block.
+  `bin/public_record_lint.py` gates every post.

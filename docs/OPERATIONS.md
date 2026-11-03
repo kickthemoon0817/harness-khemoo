@@ -83,6 +83,12 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
 
 - **Read the tick logs.** They are written for a human and contain the honest scope of each
   claim ("compile-verified only", "gate skipped because…"). Skimming PR titles is not the same.
+- **Audit the public record.** `bin/public_record_lint.py --audit prs --last 20 --base <branch>`
+  (and `--audit issues --label <label>`) tables the last bodies with their blocking findings. A
+  body with a blocking finding was posted around the lint, or by a hand that skipped it; the fix
+  is a rewrite of that body, and a runbook line if the cause is a rule that asks for host detail.
+  `--pr N` and `--issue N` lint one body; the issue bodies you write yourself are held to the
+  same contract, because ticks copy their shape.
 - **Keep the runbook current.** When you rule on something — a convention's meaning, a merge
   policy, an excluded approach — write it into the runbook. A correction that lives only in
   chat will be re-litigated by the next tick.

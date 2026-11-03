@@ -10,7 +10,10 @@ including `runbook.md` and `design.md` where they conflict.
 3. **The item document** the issue names (`todo/Tnn-*.md`, `STRATEGY.md` probes), and the
    investigations it cites.
 4. The repository's `CLAUDE.md` hard rules.
-5. `runbook.md` — for the **mechanics only**, as listed below.
+5. **`public-record.md`** — how every issue body, PR body, comment and close summary is written,
+   for a reader who has the repository and nothing else; `bin/public_record_lint.py` gates each post
+   (override 14).
+6. `runbook.md` — for the **mechanics only**, as listed below.
 
 The plan's working copy is `/home/khemoo/tmp_workspace/artifacts/manure-plan/`. The same text is in the
 repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read it there.
@@ -491,7 +494,7 @@ overridden below.
        landing comment, and the operator reviews it after the fact.
      - **The same line.** Where both sides edited the same line, stop and post a `Plan finding:` with
        the proposed resolution.
-6. **Principle checks in every PR body**: P1 (the diff names no body role — grep the diff for
+6. **Principle checks in every PR body, under its `## Principle checks` section**: P1 (the diff names no body role — grep the diff for
    bucket, wheel, cutting_edge, carried, parked, tool box; explain any hit), P4 (ledger drift over the
    run), P9 (every new constant with its class: MATERIAL, DERIVED, SHARED RULE, SETTING — a bare
    number in a law is a defect), P10 (which interface the change sits behind, once A0 exists).
@@ -537,6 +540,48 @@ overridden below.
     `worv.robots.locomotion` and `worv.robots.attachments` builds.** The baked image's locomotion rejects
     `[drive].wheel_odom_hz`, and the robot never boots. That is how #1367's first traces were all invalid.
     A run that fails this check is named as failed in the packet, never used.
+
+14. **The public record is written for a reader with the repository and nothing else**
+    (`public-record.md`; operator, 2026-11-03). The issues and PRs of this branch had become notes
+    between the operator and one machine: packets named by their path on this host, GPU slots,
+    hosts, PIDs, cubin hashes, merge slots and "(mine)" in the bodies, and no packet INDEX.md
+    committed since 2026-09-25 while every PR cited one. So:
+    - **Every body is linted before it is posted.** Write it to a file, run
+      `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr|issue|comment <file>`,
+      and post with `--body-file` only when it exits 0. A blocking finding is rewritten, never
+      posted around. Warnings name shorthand to define on first use (`glossary.md`).
+    - **A PR body has the sections of `public-record.md`**, in its order: Summary (with
+      `Fixes #<issue>`, the class in words, the version), Why, What changed, How to verify (repository
+      commands and what they should read), Evidence, Principle checks (override 6), Scope and limits.
+      `## Verification` is retired. The same sections for a docs-only or tests-only PR, the ones that
+      do not apply saying so in one line.
+    - **The packet is cited by its repository path, and its text is committed in the PR.** The tick
+      still writes the packet under the plan's evidence folder on this host (override 2); before the
+      PR it copies the packet's text — `INDEX.md`, `packet.md`, every `visual-check*.md`, `checks/*`
+      scripts and notes, tables and run summaries under 200 kB — into
+      `docs/manure-plan/evidence/<packet>/` on its branch, and the body names
+      `docs/manure-plan/evidence/<packet>/INDEX.md` at the PR's head. Frames, videos, traces and
+      `.npy` stay out of git; the INDEX.md lists each with its size and says it is kept outside the
+      repository under the packet's name. A packet cited by any other path is a blocking finding.
+    - **Every reading carries its commit and its condition**, in a table when there are more than
+      two: which tree, which scenario and seed, whether another process shared the GPU, the window
+      and the percentile. A comparison is stated only between arms taken in one session, and says so.
+    - **Harness words stay out of bodies**: tick, slot, lease, lane, merge slot, merge lock, whole
+      card, worktree, cubin hash, budget, "(mine)", "the next tick". The measurement condition they
+      imply is stated instead, or nothing. An operator ruling is quoted as what it decided, linking
+      the comment, never as a time of day.
+    - **A comment's first line is the protocol and nothing else**: `harness tick <UTC> pid <PID>
+      claiming|resuming, budget <n> min`, `harness tick pid <PID> checkpoint <n> at <UTC>`,
+      `harness tick pid <PID> pausing|withdrawing|releasing: <one line>`. No `(host …)` on it. Then
+      the state in plain words, each item with its commit, then the host, slot, worktree and resume
+      recipe under `<details><summary>Harness trace</summary>` at the end. The lint reads a comment
+      with that block the way the launcher does.
+    - **A close summary** is one or two sentences: what landed, as which commit and version, and
+      where the evidence is. A landing comment names the merge commit, the version and the suites run
+      on the merge result.
+    - An issue a tick files (one that blocks it, or a red suite) has `## Summary`, `## Observed`,
+      `## Expected`, `## Evidence`, `## Ask`, a `Depends on:` line and `Class:`; `Depends on:` keeps
+      its exact form because the launcher reads it.
 
 ## Done
 

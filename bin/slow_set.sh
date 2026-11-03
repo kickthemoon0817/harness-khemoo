@@ -112,8 +112,12 @@ fi
 [ -z "$failing" ] && failing=$(cat "$out"/*.txt 2>/dev/null | grep -E '^GATE:|^ERROR:|^\[doctest\] test cases:' | head -40)
 [ "$build_rc" -ne 0 ] && failing="build failed:\n$(tail -30 "$log")"
 [ -n "$owned" ] && failing="$failing\nAlso red, and #$fast_open's to repair:\n$owned"
-body=$(printf 'Operator: **take this before any other claimable issue.**\n\nThe %s is red on `%s` at `%s` (`bin/slow_set.sh %s`, host-only; device cases skip).\n\n**Failing:**\n```\n%b\n```\n\n**Merges since the last green head%s:**\n%s\n\nFind which merge turned it red (run the failing case with `-tc=` on each merge in the range), fix it in that area, and prove it with the same case. Full per-binary output is in the harness state, `%s`.\n' \
-    "$set_name" "$WORK_BRANCH" "$short" "$mode" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "$out")
+# The body is written for a reader with the repository and nothing else (prompts/public-record.md):
+# the reading, the range, the repository commands. The log path on this host goes in a comment's
+# Harness trace block, never in the body.
+body=$(printf 'Operator: **take this before any other claimable issue.**\n\n## Summary\nThe %s is red on `%s` at `%s`: the doctest suites of `worv.env.manure`, run on the host with no GPU (device cases skip). The merge that turned it red is to be found and repaired, with the same case as the proof.\n\n## Observed\n```\n%b\n```\n\n## Merges since the last green head%s\n%s\n\n## Ask\n1. Find the merge that turned it red: run the failing case on each merge in the range with `tools/test/run_doctest_sharded.sh --file "*<test file>.cpp" extensions/env/worv.env.manure/bin/tests/<binary>`, or `<binary> -tc=<case name>` for one case.\n2. Fix it in that area, and prove it with the same case: red on the merge that broke it, green on the fix.\n3. One version bump and one CHANGELOG section.\n\nReproduce the reading with `tools/dev/iter.sh build --test%s worv.env.manure` at `%s`.\n\nClass: A\n' \
+    "$set_name" "$WORK_BRANCH" "$short" "$failing" "${green:+ \`${green:0:8}\`}" "${range:-"(no green head recorded yet)"}" "${fast_flag:+ $fast_flag}" "$short")
+trace=$(printf '<details><summary>Harness trace</summary>\n\nper-binary output on the harness host: `%s` (`bin/slow_set.sh %s`)\n</details>\n' "$out" "$mode")
 # A red on a head that has since moved is not filed: a repair may have landed while the set ran,
 # and the next run tests the new head (last_run holds the old one).
 git -C "$TARGET_REPO" fetch -q origin "$WORK_BRANCH" 2>/dev/null
@@ -126,6 +130,9 @@ open=$(gh issue list --repo "$GH_REPO" --state open --search "in:title \"the $se
 if [ -n "$open" ]; then
     gh issue comment "$open" --repo "$GH_REPO" --body "$body" >>"$log" 2>&1
 else
-    gh issue create --repo "$GH_REPO" --label ai --label ai:plan --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" >>"$log" 2>&1
+    # gh prints the new issue's URL; its last path element is the number.
+    open=$(gh issue create --repo "$GH_REPO" --label ai --label ai:plan --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" 2>>"$log" | tail -1 | sed 's|.*/||')
+    echo "filed #$open" >>"$log"
 fi
+[ -n "$open" ] && gh issue comment "$open" --repo "$GH_REPO" --body "$trace" >>"$log" 2>&1
 echo "RED $sha" >>"$log"
