@@ -40,6 +40,15 @@ points at `prompts/runbook.md`. The runbook is where your project's rules live �
 itself knows nothing about your build, your tests, or your targets. A tick handles one issue and
 ends as soon as it lands or pauses it; its budget is a ceiling set in the tick prompt.
 
+**The public record.** Issues, PRs and comments are the harness's output and its only durable
+state, and they are read by people who have the repository and nothing else. `prompts/public-record.md`
+is the contract every body is written to (fixed sections, readings with their commit and condition,
+nothing that is only true on the dev host), `prompts/glossary.md` holds the project's terms a body
+defines on first use, and `bin/public_record_lint.py` blocks a post that cites a host path, a host,
+a PID, a GPU slot or a harness file. The harness's own bookkeeping — the claim protocol line, host,
+worktree, lease, resume recipe — goes under a comment's collapsed `Harness trace` block, where the
+lint and the launcher both know to look; what a reader sees of a comment is the state in plain words.
+
 **Chaining.** A runner keeps its slot after a tick ends and starts the next tick at once, on a
 fresh context, while work is queued. It stops, leaving the retry to cron, when the queue is
 empty, usage no longer allows its slot, a tick ended in under `CHAIN_MIN_TICK_S` (180 s, i.e.
@@ -63,7 +72,8 @@ git clone <this repo> ~/harness && cd ~/harness
 cp config/harness.env.example config/harness.env   # set TARGET_REPO at minimum
 cp prompts/runbook.template.md   prompts/runbook.md
 cp prompts/tick-prompt.template.md prompts/tick-prompt.md
-# fill in the <PLACEHOLDERS> in both prompt files — the runbook is the real work
+cp prompts/glossary.template.md    prompts/glossary.md
+# fill in the <PLACEHOLDERS> in the prompt files — the runbook is the real work
 
 gh label create ai     --description "Queued for the autonomous harness"
 gh label create ai:wip --description "Claimed by a running tick"
@@ -91,6 +101,10 @@ in-flight ticks finish on their own.
 | `config/harness.env` | your paths, labels, and pool sizing (gitignored) |
 | `prompts/runbook.md` | the rules ticks follow — mission, procedure, rails |
 | `prompts/tick-prompt.md` | what a single tick is told to do |
+| `prompts/public-record.md` | how every issue body, PR body and comment is written, for a reader with the repository alone |
+| `prompts/glossary.md` | the project's terms, in the words a body uses to define them on first use |
+| `bin/public_record_lint.py` | blocks a body that cites a host path, a host, a PID, a slot or a harness file; `--audit` tables the last N bodies |
+| `tests/` | the harness's own tests, one script per tool (`bash tests/test_<tool>.sh`, `python3 tests/test_<tool>.py`) |
 | `state/logs/` | one log per tick, plus `allocator.log` |
 | `state/locks/` | slot locks, GPU slot leases (`resource.lease`, `resource.lease.2`, …), heartbeat stamp |
 | `state/tick-model` | model priority list, best first |
@@ -116,6 +130,8 @@ not in the tool layer. The defaults that matter:
 - merging is scoped by base branch — the scratch branch may be landed by a tick, protected and
   shared branches are human-approval-only;
 - no force-push, no reviewer assignment, no touching branches a tick did not create;
-- evidence is archived honestly and gates are never weakened to obtain a pass.
+- evidence is archived honestly and gates are never weakened to obtain a pass;
+- the public record is written for a reader with the repository alone, and linted before each
+  post, so the issues and PRs never depend on one machine's paths, hosts or state.
 
 Keep those in your runbook. They are the difference between an assistant and an incident.

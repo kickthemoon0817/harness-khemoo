@@ -67,8 +67,11 @@ read-only.
    Never run `git checkout`, `git stash`, `git clean` or any edit in TARGET_REPO itself.
 2. **Claim** — first take the local claim: `/home/khemoo/tmp_workspace/claude-issue-harness/bin/claim.sh acquire <N>`.
    `BUSY` means another live tick holds the issue: pick the next claimable one, and post nothing on this one.
-   Only on `ACQUIRED` add `ai:wip` and comment `harness tick <UTC timestamp> pid <PID> claiming
-   (host <hostname>)`. The PID must be the long-lived `claude -p` process, never a tool
+   Only on `ACQUIRED` add `ai:wip` and post the claim comment: one sentence in plain words of what
+   is being started, then a `<details><summary>Harness trace</summary>` block holding the protocol
+   line `harness tick <UTC timestamp> pid <PID> claiming, budget <n> min`, the labels, the host and
+   the worktree (`public-record.md`). The launcher finds the protocol line inside the block; in the
+   open it is a blocking lint finding. The PID must be the long-lived `claude -p` process, never a tool
    shell (those die within seconds and would look orphaned). Get it ONLY with
    `PID=$(/home/khemoo/tmp_workspace/claude-issue-harness/bin/tick-pid.sh)` in the same command
    that posts the comment; never use `$$`, `$PPID` or a PID copied from earlier output,
@@ -78,9 +81,12 @@ read-only.
    LIVE PID claimed it within the last few minutes, withdraw (remove nothing — the label is
    theirs) and pick the next claimable issue. If no issue is claimable (every open one is
    claimed by a live PID or blocked by an unmerged dependency), print a one-line summary.
-   Leaving an issue unfinished with `ai:wip` kept: post `harness tick pid <PID> pausing: <state,
-   PR, worktree, exact resume recipe>` — the launcher counts an issue whose claimants have all
-   withdrawn, paused or died as claimable again, so a successor spawns for it.
+   Leaving an issue unfinished with `ai:wip` kept: post a pause comment, the state in plain words
+   (what is done, running and owed, each with its commit and the PR, and what a successor must do
+   in repository terms), then the comment's `<details><summary>Harness trace</summary>` block
+   holding the line `harness tick pid <PID> pausing`, the worktree and the exact resume recipe —
+   the launcher counts an issue whose claimants have all withdrawn, paused or died as claimable
+   again, so a successor spawns for it and resumes from that block.
    saying so and END THE TICK immediately — do not audit, do not start a kit session.
    PAUSE MEANS END: the pausing comment is the last thing a tick does before its summary. Nothing
    runs after it — no suite, no re-check, no extra probe. If more work is worth doing, it is the
@@ -149,11 +155,16 @@ read-only.
    replayed; mounted ext dirs shadow baked `data/*.cubin` for climate/terrain (expected
    self-disable noise, not a regression); a robot starts at the origin facing +x.
    Archive evidence under `~/tmp_workspace/artifacts/manure-harness/<issue#>/` (logs, JSONL,
-   frames) and quote the decisive lines in the PR body under `## Verification`. Scope
-   honestly: "compile-verified only" when no live run backed a claim.
+   frames) and quote the decisive lines in the PR body's `## Evidence` section, as
+   `public-record.md` says: each reading with its commit and its condition, the packet by its
+   repository path, no path on this host. Scope honestly, under `## Scope and limits`:
+   "compile-verified only" when no live run backed a claim.
 5. **Submit** — push the branch under the stack lock; `gh pr create --base ai/manure-mpm` with a
-   conventional-commit title (no parentheses), body: what changed, `Fixes #<issue>`,
-   `## Verification` with real evidence. Leave reviewers EMPTY.
+   conventional-commit title (no parentheses) and a body written to `public-record.md` (Summary
+   with `Fixes #<issue>`, Why, What changed, How to verify, Evidence, Principle checks, Scope and
+   limits), linted clean with
+   `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr <file>`
+   and posted with `--body-file`. Leave reviewers EMPTY.
 6. **Land, by base branch** — PRs into `ai/manure-mpm` MAY be merged by the tick that opened them
    once M1 is green for the change and the issue's own gate passed (`gh pr merge --merge
    --delete-branch`, under the stack lock, re-checking mergeability immediately before).
