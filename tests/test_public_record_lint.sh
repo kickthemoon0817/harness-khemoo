@@ -57,15 +57,14 @@ check "a host path, a slot, an address and a harness file block" \
     '[ "$rc" -eq 1 ] && grep -q "BLOCK host-path" <<<"$out" && grep -q "BLOCK gpu-slot" <<<"$out" && grep -q "BLOCK host-address" <<<"$out" && grep -q "BLOCK harness-file" <<<"$out"' "$out"
 check "the missing sections are named" 'grep -q "BLOCK section: .## Summary" <<<"$out"' "$out"
 
-printf 'harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min\nState: the walk hold is built at 249643293; the replays are queued.\n\n<details><summary>Harness trace</summary>\n\nhost khemoo, slot 1, worktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137\n</details>\n' >"$T/comment.md"
+printf 'Claimed. The walk hold is built at 249643293; the replays are queued.\n\n<details><summary>Harness trace</summary>\n\nharness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min\nhost khemoo, slot 1, worktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137\n</details>\n' >"$T/comment.md"
 out=$(python3 "$LINT" --kind comment "$T/comment.md" 2>&1); rc=$?
-check "a comment's protocol line and its trace block are exempt" '[ "$rc" -eq 0 ]' "$out"
+check "a comment whose protocol line sits inside its trace block is clean" '[ "$rc" -eq 0 ]' "$out"
 
-printf 'harness tick 2026-11-03T04:30:40Z pid 2421513 claiming (host khemoo)\nWorktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137.\n' >"$T/comment-bad.md"
+printf 'harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget 120 min (labels: ai,ai:plan). Claim time 2026-11-03T09:06:50Z.\nWorktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137.\n' >"$T/comment-bad.md"
 out=$(python3 "$LINT" --kind comment "$T/comment-bad.md" 2>&1); rc=$?
-check "a host name on the protocol line and a path outside the block are blocked" \
-    '[ "$rc" -eq 1 ] && grep -q "L1 BLOCK host-address" <<<"$out" && grep -q "L2 BLOCK host-path" <<<"$out"' "$out"
-check "the protocol line keeps its pid" '! grep -q "process-id" <<<"$out"' "$out"
+check "the old claim line in the open is blocked for its pid, host and budget, and the path after it" \
+    '[ "$rc" -eq 1 ] && grep -q "L1 BLOCK host-address" <<<"$out" && grep -q "L1 BLOCK process-id" <<<"$out" && grep -q "L1 BLOCK tick-aside" <<<"$out" && grep -q "L2 BLOCK host-path" <<<"$out"' "$out"
 
 { cat "$T/good-pr.md"; printf '\n<details><summary>Harness trace</summary>\npid 1\n</details>\n'; } >"$T/trace-in-body.md"
 out=$(python3 "$LINT" --kind pr "$T/trace-in-body.md" 2>&1); rc=$?

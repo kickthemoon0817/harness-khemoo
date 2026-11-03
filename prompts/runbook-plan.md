@@ -570,12 +570,14 @@ overridden below.
       card, worktree, cubin hash, budget, "(mine)", "the next tick". The measurement condition they
       imply is stated instead, or nothing. An operator ruling is quoted as what it decided, linking
       the comment, never as a time of day.
-    - **A comment's first line is the protocol and nothing else**: `harness tick <UTC> pid <PID>
-      claiming|resuming, budget <n> min`, `harness tick pid <PID> checkpoint <n> at <UTC>`,
-      `harness tick pid <PID> pausing|withdrawing|releasing: <one line>`. No `(host …)` on it. Then
-      the state in plain words, each item with its commit, then the host, slot, worktree and resume
-      recipe under `<details><summary>Harness trace</summary>` at the end. The lint reads a comment
-      with that block the way the launcher does.
+    - **A comment's visible text is the state in plain words**, each item with its commit: what
+      is being started, done, running or owed, and what a successor must do. The protocol line the
+      launcher parses — `harness tick <UTC> pid <PID> claiming|resuming, budget <n> min`,
+      `harness tick pid <PID> checkpoint <n> at <UTC>`, `harness tick pid <PID>
+      pausing|withdrawing|releasing` — goes **inside** the `<details><summary>Harness trace</summary>`
+      block at the end, with the labels, the host, the slot, the worktree and the resume recipe. The
+      launcher finds the line anywhere in the comment; in the open, "harness tick … pid … claiming
+      (host …), budget 120 min (labels: …)" is the record of one machine, and the lint blocks it.
     - **A close summary** is one or two sentences: what landed, as which commit and version, and
       where the evidence is. A landing comment names the merge commit, the version and the suites run
       on the merge result.

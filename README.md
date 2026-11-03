@@ -45,9 +45,9 @@ state, and they are read by people who have the repository and nothing else. `pr
 is the contract every body is written to (fixed sections, readings with their commit and condition,
 nothing that is only true on the dev host), `prompts/glossary.md` holds the project's terms a body
 defines on first use, and `bin/public_record_lint.py` blocks a post that cites a host path, a host,
-a PID, a GPU slot or a harness file. The harness's own bookkeeping — host, worktree, lease, resume
-recipe — goes under a comment's collapsed `Harness trace` block, where the lint and the launcher
-both know to look.
+a PID, a GPU slot or a harness file. The harness's own bookkeeping — the claim protocol line, host,
+worktree, lease, resume recipe — goes under a comment's collapsed `Harness trace` block, where the
+lint and the launcher both know to look; what a reader sees of a comment is the state in plain words.
 
 **Chaining.** A runner keeps its slot after a tick ends and starts the next tick at once, on a
 fresh context, while work is queued. It stops, leaving the retry to cron, when the queue is

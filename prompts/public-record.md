@@ -26,18 +26,20 @@ body alone? If a sentence is only true on this host, it does not belong in the b
 | an operator timestamp in place of the decision ("operator 05:31Z") | the reader cannot open the thread by time | the decision in one sentence, linking the comment |
 | a comparison of two readings taken in different sessions | the host drifts between sessions | both arms in one session, or a single reading named as such |
 
-Where those details are still needed (a successor tick resumes from them), they go in a **comment**,
-at its end, under a collapsed block, and nowhere else:
+Where those details are still needed (the launcher reads the claim, a successor tick resumes from
+the recipe), they go in a **comment**, at its end, under a collapsed block, and nowhere else:
 
 ```
 <details><summary>Harness trace</summary>
 
+harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min
 host khemoo, slot 2, worktree ai-worktrees/mpm-2137 at 249643293, lease 2137 held 04:31Z–05:20Z,
 resume: build, then RS1–RS6 identity against parent-8cc9dd2e8
 </details>
 ```
 
-The lint skips that block in a comment and blocks it in an issue or PR body.
+The lint skips that block in a comment and blocks it in an issue or PR body. A `harness tick` or
+`pid N` line anywhere else in a comment is a blocking finding.
 
 ## A PR body
 
@@ -115,17 +117,24 @@ path goes under a Harness trace block in a comment, never in the body.
 
 ## A comment
 
-The first line is the protocol the launcher parses, and nothing else is on it:
+What a reader sees is the state in plain words, as a change log a reviewer can follow: what is
+done, what is running, what is owed, each with its commit. A claim says what is being started
+("Claimed. Starting with the failing case for the label's five keys."); a pause says what a
+successor must do, in repository terms. GitHub shows the time and the author, so the text repeats
+neither.
+
+The protocol the launcher parses is one line **inside the Harness trace block** at the end, with
+the host, slot, worktree and recipe beside it; the launcher finds it anywhere in the comment:
 
 ```
 harness tick <UTC timestamp> pid <PID> claiming|resuming, budget <n> min
 harness tick pid <PID> checkpoint <n> at <UTC timestamp>
-harness tick pid <PID> pausing|withdrawing|releasing: <one line>
+harness tick pid <PID> pausing|withdrawing|releasing
 ```
 
-Then the state in plain words, as a change log a reviewer can follow: what is done, what is
-running, what is owed, each with its commit. A pause names what a successor must do in repository
-terms. The host, slot, worktree and recipe details go in the Harness trace block at the end.
+Never in the open. "harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget
+120 min (labels: ai,ai:plan)" as a comment's visible text is the record written for one machine,
+and the lint blocks it.
 
 A landing comment names the merge commit, the version, and the suites run on the merge result.
 A close summary is one or two sentences: what landed, as which commit and version, and where the

@@ -34,7 +34,9 @@ Example shape:
 1. **Setup** — `cd <TARGET_REPO> && git fetch origin`. Serialize every push and branch
    mutation under `flock <HARNESS_STATE>/locks/stack.lock`; ticks run in parallel.
 2. **Claim** — list open issues labeled `<ISSUE_LABEL>` without `<WIP_LABEL>`. Claim the
-   oldest: add `<WIP_LABEL>` and comment `harness tick <UTC timestamp> pid <PID> claiming`.
+   oldest: add `<WIP_LABEL>` and post a claim comment: one sentence of what is being started, then
+   a `<details><summary>Harness trace</summary>` block holding the protocol line
+   `harness tick <UTC timestamp> pid <PID> claiming` (the launcher finds it inside the block).
    A claim is held only while the claiming PID is alive (`kill -0`); once it exits, any tick
    may resume the issue from its recorded state (open PR, posted evidence, pending
    verification) rather than restarting. Prefer resuming a released claim over claiming fresh

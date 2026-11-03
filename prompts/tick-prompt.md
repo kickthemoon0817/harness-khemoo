@@ -13,9 +13,11 @@ defined on first use in the words of
 /home/khemoo/tmp_workspace/claude-issue-harness/prompts/glossary.md. Write each body to a file and run
 `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr|issue|comment <file>`
 before `gh` posts it (`--body-file`); a blocking finding means rewrite, never post. No path on this
-host, no host name or address, no slot, lease, PID or worktree in a body; a pause or checkpoint
-comment keeps its resume recipe, host and worktree under its `<details><summary>Harness trace</summary>`
-block, after the state written in plain words.
+host, no host name or address, no slot, lease, PID or worktree in a body. A comment's visible text
+is the state in plain words; its protocol line (`harness tick <UTC> pid <PID> claiming`, the
+checkpoint line, the pausing line), the budget, the labels, the host, the worktree and the resume
+recipe all go under its `<details><summary>Harness trace</summary>` block at the end, where the
+launcher reads them. Never put that line in the open.
 
 You are a FINITE BATCH RUN under `claude -p`: the process terminates the moment your turn
 ends, and nothing scheduled survives it. Therefore:
@@ -26,7 +28,8 @@ ends, and nothing scheduled survives it. Therefore:
   stopped (`tools/dev/iter.sh down`), the resource lease deleted, background tasks reaped.
 - TICK BUDGET: 120 minutes of wall time from claim to summary, or 240 minutes when the claimed
   issue carries the `ai:long` label. Read the issue's labels in the same command that posts the
-  claim, and state the budget in the claim comment ("budget 120 min" / "budget 240 min, ai:long").
+  claim, and state the budget on the claim comment's protocol line, inside its Harness trace block
+  ("budget 120 min" / "budget 240 min, ai:long").
   `ai:long` is the operator's to set: a tick never adds or removes it on any issue. Record the
   claim time with `date -u` in that same command, and read the clock again with `date -u` before
   you ever say the budget is short — never estimate elapsed time from how much you have done. A
@@ -40,10 +43,10 @@ ends, and nothing scheduled survives it. Therefore:
   once. The runner starts the next tick immediately on a fresh context, so never pad a tick and
   never claim a second issue in the same tick.
 - LONG TICKS (`ai:long`): every 30 minutes of elapsed time post one checkpoint comment on the
-  issue whose first line is `harness tick pid <pid> checkpoint <n> at <date -u>`, then what is
-  done, what is running, and the resume recipe so far, so a tick that dies leaves a recipe.
-  The first line must not use the words withdrawing, pausing or releasing, because the claim
-  check reads those as the end of the claim.
+  issue: what is done and what is running, in plain words, then a Harness trace block holding
+  the line `harness tick pid <pid> checkpoint <n> at <date -u>` and the resume recipe so far, so
+  a tick that dies leaves a recipe. The checkpoint must not use the words withdrawing, pausing or
+  releasing after `pid <pid>`, because the claim check reads those as the end of the claim.
 - USAGE CEILING: the harness never takes the 5-hour or the weekly usage window past 90 %. Run
   `/home/khemoo/tmp_workspace/claude-issue-harness/bin/usage_ok.sh` before you start any build,
   suite, kit, render queue or agent, and at least every 15 minutes inside any wait. When it exits

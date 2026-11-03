@@ -4,9 +4,9 @@
 The public record (issue bodies, PR bodies, comments) is read by people who have the repository and
 nothing else. The lint blocks what such a reader cannot use: paths on this host, host names and
 addresses, process ids, GPU slots and leases, harness file names, tick-to-tick asides. It warns on
-shorthand a body may leave undefined. A comment's first line (the claim protocol) keeps its pid, and a
-`<details><summary>Harness trace</summary>` block in a comment is exempt: that is where the harness's own
-bookkeeping goes.
+shorthand a body may leave undefined. A `<details><summary>Harness trace</summary>` block in a comment is
+exempt: that is where the harness's own bookkeeping goes, the claim protocol line (`harness tick … pid N
+claiming`) included, because the launcher finds that line anywhere in a comment.
 
     public_record_lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
     public_record_lint.py --kind comment -           lint a comment from stdin
@@ -73,8 +73,6 @@ class PublicRecordLint:
     DEFAULT_ISSUE_SECTIONS: tuple[str, ...] = ("Summary", "Ask")
     TRACE_BLOCK: re.Pattern[str] = re.compile(
         r"<details>\s*<summary>[^<]*harness trace[^<]*</summary>.*?</details>", re.IGNORECASE | re.DOTALL)
-    PROTOCOL_LINE: re.Pattern[str] = re.compile(r"^harness tick\b")
-    PROTOCOL_EXEMPT_RULES: frozenset[str] = frozenset({"process-id", "tick-aside"})
     HEADING: re.Pattern[str] = re.compile(r"^#{1,3}\s+(.+?)\s*$", re.MULTILINE)
 
     BLOCKING_RULES: tuple[Rule, ...] = (
@@ -162,10 +160,7 @@ class PublicRecordLint:
         lines: list[str] = text.split("\n")
         seen_warnings: set[tuple[str, str]] = set()
         for line_index, line in enumerate(lines):
-            protocol_line: bool = kind == "comment" and line_index == 0 and bool(self.PROTOCOL_LINE.match(line))
             for rule in self.BLOCKING_RULES:
-                if protocol_line and rule.rule_id in self.PROTOCOL_EXEMPT_RULES:
-                    continue
                 for match in rule.pattern.finditer(line):
                     findings.append(Finding(rule.rule_id, line_index + 1, match.group(0), rule.hint, True))
             for rule in self.WARNING_RULES:
@@ -276,12 +271,14 @@ class PublicRecordLint:
             "## Scope and limits", "Compile-verified on the second GPU host only.",
         ])
         good_comment: str = "\n".join([
+            "Claimed. Starting with the walk stage's split on 994809f4b, then the hold.",
+            "", "<details><summary>Harness trace</summary>", "",
             "harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min",
-            "State: the walk hold is built; the identity runs are queued.",
-            "<details><summary>Harness trace</summary>", "",
             "host khemoo, slot 1, worktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137",
             "</details>",
         ])
+        old_style_comment: str = ("harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget 120 min "
+                                  "(labels: ai,ai:plan). Claim time 2026-11-03T09:06:50Z.")
         passed: bool = True
 
         def check(name: str, condition: bool, detail: str) -> None:
@@ -300,8 +297,12 @@ class PublicRecordLint:
         check("the PR body's shorthand is warned, not blocked",
               any(finding.rule_id == "shorthand-scenario" for finding in good_findings), self.format(good_findings, "pr"))
         comment_findings: tuple[Finding, ...] = self.lint(good_comment, "comment")
-        check("a comment's protocol line and trace block are exempt",
+        check("a comment with its protocol line inside the trace block is clean",
               not any(finding.blocking for finding in comment_findings), self.format(comment_findings, "comment"))
+        old_style_findings: tuple[Finding, ...] = self.lint(old_style_comment, "comment")
+        check("the old claim line in the open is blocked for its pid, host and budget",
+              {"process-id", "host-address", "tick-aside"} <= {f.rule_id for f in old_style_findings if f.blocking},
+              self.format(old_style_findings, "comment"))
         trace_in_body: tuple[Finding, ...] = self.lint(good_pr + "\n<details><summary>Harness trace</summary>x</details>",
                                                       "pr")
         check("a trace block in a body is blocked", any(finding.rule_id == "trace-in-body" for finding in trace_in_body),
