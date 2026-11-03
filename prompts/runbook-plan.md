@@ -333,6 +333,9 @@ overridden below.
      identity kits mount, the scenario runner, the render companion or a scenario file. Docs, tests,
      analysis tools, unmounted extensions and investigations merge when ready, as before; 3b exempts them.
    - **Ready.** When the proof holds against the current head and the packet is written:
+     - a perf step, whose issue asks for a gain, is ready only once its gain read has posted, card alone,
+       against the same base. Identity alone does not make it ready: a cut that does not pay is dropped,
+       not landed (operator, 2026-11-03, #2148; P7);
      - add `ai:ready` to the issue and the PR;
      - post `harness tick pid <PID> pausing: ready for the merge slot, proven on <base9>, packet <path>`;
      - END without merging.
