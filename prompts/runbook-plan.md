@@ -471,6 +471,13 @@ overridden below.
      `python3 tools/test/p1_role_ratchet.py` and `tools/test/extension_version_gate.py`. A word above its
      baseline lands only on an operator grant named in the landing comment; otherwise stop with a
      `Plan finding:`.
+   - **Every landing also reads the device record on its merge result:**
+     `python3 tools/test/device_record.py check --root .` (no GPU). A red check means the merge result changed a
+     file of the device suite's hash set. Then run the device suite on the merge result
+     (`tools/dev/iter.sh build --test --device --suite test_mpm_gpu_parity worv.env.manure`, holding the device
+     lease), commit the `tests/device_record.toml` that run writes as its own commit, and read `check` green
+     before the merge. Never write the record by hand and never land on a red check: the image build fails on
+     such a head.
    - **A class B landing also runs the whole fast set on its merge result** (`bin/slow_set.sh fast`, host), not only its
      touched files. A case green on the head and red on the merge blocks the landing. #1464 turned two cases in files
      it did not touch red (#1524).
