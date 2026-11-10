@@ -13,6 +13,9 @@
 : "${USAGE_CEILING_PCT:=90}"
 # A running tick stands down this far under the ceiling, so its wind-down stays under it too.
 : "${USAGE_TICK_STOP_PCT:=$(( USAGE_CEILING_PCT - 2 ))}"
+# The weekly window fills many times slower than the 5-hour one, so it may stand down closer to
+# the ceiling than a 5-hour point that is set well under it.
+: "${USAGE_TICK_STOP_WEEK_PCT:=$USAGE_TICK_STOP_PCT}"
 : "${FIVE_HALF_AT:=60}" "${FIVE_ONE_AT:=70}" "${FIVE_NONE_AT:=80}"
 : "${WEEK_HALF_AT:=80}" "${WEEK_ONE_AT:=85}" "${WEEK_NONE_AT:=88}"
 
@@ -46,10 +49,12 @@ window_slots() {
     fi
 }
 
-# True while both windows are under $1 percent (default: the ceiling).
+# True while the 5-hour window is under $1 percent (default: the ceiling) and the weekly one
+# under $2 (default: $1).
 under_ceiling() {
-    local at=${1:-$USAGE_CEILING_PCT}
-    [ -n "$five" ] && [ -n "$week" ] && [ "$five" -lt "$at" ] && [ "$week" -lt "$at" ]
+    local at5=${1:-$USAGE_CEILING_PCT}
+    local atw=${2:-$at5}
+    [ -n "$five" ] && [ -n "$week" ] && [ "$five" -lt "$at5" ] && [ "$week" -lt "$atw" ]
 }
 
 # Sets five, week, pct and allowed: the slot cap both rate-limit windows permit (MAX_SLOTS wide).
