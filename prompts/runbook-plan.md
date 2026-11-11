@@ -133,7 +133,7 @@ overridden below.
      - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
        compile only) serves one compile at a time for every tick on this host. When it already has a waiter, or the
        local load1 is past twice `nproc`, build and run host suites on the remote host instead:
-       `DOCKER_HOST=ssh://worv@10.50.2.178 PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
+       `DOCKER_HOST=ssh://worv@worv-worker-03.local PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
        (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
        a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
      - **One fast set per host at a time.** The doctest runner shards a suite over min(nproc, 8) processes, so two or
@@ -156,10 +156,13 @@ overridden below.
      - Keep every kit-side call of the run under the export line.
      - **Both hosts run work (owner, 2026-10-08: "use both devices, this one and also the remote one together").** The
        local host has been on since 2026-10-07 23:59Z (`lease.sh local --on`; no `state/locks/local-card-off`).
-       - Leases grant the local card's slots and the remote host's (10.50.2.178) together. A local grant's export line
+       - Leases grant the local card's slots and the remote host's (worv-worker-03.local) together. A local grant's export line
          carries no `DOCKER_HOST`, so its run, a `--device` run included, runs here. That is correct: never stop such a
          run as a breach.
-       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@10.50.2.178
+       - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run
+         `bin/remote_room.sh` (`--render` for a rendering kit). Use the remote lane only when it prints `ok`; on `busy`
+         run the work locally. A lease grants a remote slot under the same check.
+       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@worv-worker-03.local
          PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
          `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
          cron slow set runs on the local host every third hour.

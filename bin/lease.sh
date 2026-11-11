@@ -281,7 +281,9 @@ remote_grant() {
     [ -n "$first" ] && [ "$first" != "$issue" ] && return 1
     take=$free_r
   fi
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_CARD_HOST" true >/dev/null 2>&1 || return 1
+  # The remote host is shared: a slot is granted only while the host has
+  # the memory for it beside whatever else runs there.
+  REMOTE_CARD_HOST="$REMOTE_CARD_HOST" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || return 1
   f=$(slot_file $take)
   local c="worv-iter-$take" d=$(( 76 + take )) cr="$CACHE_BASE/cache-slot$take"
   echo "$issue $pid $(date -u +%FT%TZ) domain=$d remote${render:+ render}" > "$f"
