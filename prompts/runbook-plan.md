@@ -481,6 +481,13 @@ overridden below.
      lease), commit the `tests/device_record.toml` that run writes as its own commit, and read `check` green
      before the merge. Never write the record by hand and never land on a red check: the image build fails on
      such a head.
+   - **One run per tree (operator, 2026-11-11).** A suite's green log belongs to the tree it ran on
+     (`git rev-parse HEAD^{tree}`). Never run the fast set, a whole-binary suite or the device suite twice on one
+     tree: cite the log. Before its merge result exists, a branch runs only the cases of its touched test files;
+     the fast set and the device suite run on the merge result, once. A re-merge that brings no file the change or
+     its tests touch carries the earlier logs by the file check of 3b.
+   - **Mutations (operator, 2026-11-11).** At most three per change, one for each rule the change adds, unless the
+     issue names more.
    - **A class B landing also runs the whole fast set on its merge result** (`bin/slow_set.sh fast`, host), not only its
      touched files. A case green on the head and red on the merge blocks the landing. #1464 turned two cases in files
      it did not touch red (#1524).
