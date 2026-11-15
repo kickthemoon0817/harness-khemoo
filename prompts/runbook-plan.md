@@ -84,6 +84,13 @@ overridden below.
    reference value wherever the step names one (T05 and T06 list them, for example FC1, FC3, EX1, EX4 and
    SL2). A pinned document, string, counter or hash is a guard, never the fixture. A test that pins a known
    wrong result (a negative convergence order, an out-of-band ratio) reports the value, not a pass.
+   **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
+   only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
+   readers and queue scripts (`.py`, `.sh`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
+   artifacts packet and are never committed: suite and build logs, boot checks, comparison dumps, status files, state
+   series (`.log`, `.txt`, `.jsonl`, `.out`, `.pid`, `status`). The main repository's `info/exclude` skips them; never
+   `git add -f` one. `INDEX.md` gives every number the sign-off or the landing reads, so nothing it cites must be opened.
+   Before a PR is marked ready, `git rm --cached` any such file it already carries.
 3. **Capture runs and the card.** Three render products at 1280×720 do not fit beside two sibling
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
    arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
