@@ -347,8 +347,10 @@ overridden below.
    - **Change arms.** Read the new base's `chain.txt` before arming anything. If it is not written yet, run the new
      base's `-p` arms (3a) and write it; never re-run the six change arms ahead of it. A scenario whose chain line is
      identical carries by the rules below; only a scenario that parts, or that a class B landing moved, is re-run.
-   - **Touched test files.** Re-run them on the merge result when the move changed one of them, a header they
-     include, or a production file the change also edits. Otherwise the earlier log carries.
+   - **Touched test files.** The change's own touched test files, never the ones the move touched. Re-run them
+     on the merge result when the move changed one of them, a header they include, or a production file the
+     change also edits. Otherwise the earlier log carries. A move's own test files are read by the fast set on the
+     merge result and by the scheduled whole set, not by the landing.
    - **The fast set.** It runs once, on the merge result that lands (override 5, one run per tree). A prepared run
      carries across a move that brings no production file and no test file of the extensions the change touches.
    - **The device suite.** Re-run it only when the move or the change touches device code (override 5).
