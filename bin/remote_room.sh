@@ -9,7 +9,7 @@
 # The host is shared: other sessions' memory is theirs, so a job goes there
 # only while the free memory covers it with a margin.
 H="$(cd "$(dirname "$0")/.." && pwd)"
-host="${REMOTE_CARD_HOST:-$(cat "$H/state/locks/remote-card" 2>/dev/null)}"
+host="${REMOTE_CARD_HOST:-$(grep -v '^[[:space:]]*$' "$H/state/locks/remote-card" 2>/dev/null | head -1)}"
 [ -n "$host" ] || { echo "busy no remote card is named"; exit 1; }
 : "${REMOTE_MIN_RAM_MIB:=16384}"
 : "${REMOTE_MIN_VRAM_MIB:=6144}"

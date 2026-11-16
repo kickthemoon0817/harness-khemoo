@@ -67,9 +67,10 @@ H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # the robot's cameras needs 5-7 GB of the 16 GB card. GPU_SLOTS still names
 # every slot file, so a whole-card acquire sees every holder.
 : "${GPU_KITS_MAX:=2}"
-# A second card on another host adds REMOTE_KITS_MAX single-slot kits
-# (`lease.sh remote <user@host>`, reached by ssh with a key). Its slots follow the
-# local ones. A run there reaches that host's docker daemon through DOCKER_HOST,
+# Each card on another host adds REMOTE_KITS_MAX single-slot kits
+# (`lease.sh remote <user@host>`, `remote --add <user@host>`, reached by ssh with
+# a key). Their slots follow the local ones, host after host, in the order the
+# hosts were named. A run there reaches that host's docker daemon through DOCKER_HOST,
 # and the shims in bin/remote-docker copy the run's bind mounts across and read
 # that card's memory. The whole card and device runs stay on the local card.
 : "${REMOTE_KITS_MAX:=2}"
@@ -102,15 +103,23 @@ else
 fi
 slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/resource.lease.$1"; }
 REMOTE_FILE="$LOCKS/remote-card"
-REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(cat "$REMOTE_FILE" 2>/dev/null)}"
-remote_slots() { [ -n "$REMOTE_CARD_HOST" ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX )); }
+# One remote host a line. The first is the one a run takes with the local card off.
+REMOTE_CARD_HOSTS="${REMOTE_CARD_HOSTS:-$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)}"
+[ -z "$REMOTE_CARD_HOSTS" ] && [ -n "${REMOTE_CARD_HOST:-}" ] && REMOTE_CARD_HOSTS=$REMOTE_CARD_HOST
+REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(printf '%s\n' "$REMOTE_CARD_HOSTS" | head -1)}"
+remote_count() { if [ -n "$REMOTE_CARD_HOSTS" ]; then printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -c .; else echo 0; fi; }
+remote_host() { printf '%s\n' "$REMOTE_CARD_HOSTS" | sed -n "${1}p"; }
+host_slots() { seq $(( GPU_SLOTS + 1 + ($1 - 1) * REMOTE_KITS_MAX )) $(( GPU_SLOTS + $1 * REMOTE_KITS_MAX )); }
+remote_slots() { local n; n=$(remote_count); [ "$n" -gt 0 ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX * n )); }
+# The remote host a slot belongs to.
+slot_host() { remote_host $(( ($1 - GPU_SLOTS - 1) / REMOTE_KITS_MAX + 1 )); }
 # With the local host off (`lease.sh local --off`), every kit, whole-card and
 # device run goes to the remote card, and the local card is left to its owner.
 # Builds and tests go to the remote host too (bin/remote-env.sh).
 LOCAL_OFF_FILE="$LOCKS/local-card-off"
 local_off() { [ -n "$REMOTE_CARD_HOST" ] && [ -e "$LOCAL_OFF_FILE" ]; }
 # The slots a whole-card or device run looks at: the card that runs it.
-card_slots() { if local_off; then remote_slots; else seq 1 "$GPU_SLOTS"; fi; }
+card_slots() { if local_off; then host_slots 1; else seq 1 "$GPU_SLOTS"; fi; }
 remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
@@ -252,44 +261,53 @@ slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
 # rendering kit allow it and no one else is first in line. Prints the grant and
 # exits 0, or returns 1. A remote slot's cache stays under /tmp on that host.
 remote_grant() {
-  [ -n "$REMOTE_CARD_HOST" ] || return 1
-  local s f hp own_r="" free_r="" stale_r="" kits_r=0 render_r=0 take first
-  local render_busy=0
-  slots_render_live $(remote_slots) && render_busy=1
+  [ -n "$REMOTE_CARD_HOSTS" ] || return 1
+  local s f hp take="" host="" first i n free_r stale_r kits_r render_r
+  # This tick's own remote slot first, on whichever host holds it.
   for s in $(remote_slots); do
-    f=$(slot_file $s); hp=""
-    [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
-    if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
-      if [ "$hp" = "$pid" ]; then own_r=$s; continue; fi
-      # A whole-card reservation runs no kit, and it lapses as a local one does.
-      if [[ "$(cat "$f")" == *" reserved-for-all" ]]; then
-        [ -z "$stale_r" ] && lapsed "$f" && stale_r=$s
-        continue
-      fi
-      kits_r=$(( kits_r + 1 ))
-      [[ "$(cat "$f")" == *" render" ]] && render_r=1
-    elif [ -z "$free_r" ]; then
-      free_r=$s
-    fi
+    f=$(slot_file $s); [ -s "$f" ] || continue
+    hp=$(awk '{print $2}' "$f")
+    if [ "$hp" = "$pid" ] && kill -0 "$hp" 2>/dev/null; then take=$s; host=$(slot_host $s); break; fi
   done
-  take=$own_r
   if [ -z "$take" ]; then
-    free_r=${free_r:-$stale_r}
-    [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ] || return 1
-    [ -n "$render" ] && [ "$render_r" = 1 ] && return 1
     first=$(slot_first_issue)
     [ -n "$first" ] && [ "$first" != "$issue" ] && return 1
-    take=$free_r
+    n=$(remote_count)
+    for i in $(seq 1 "$n"); do
+      free_r=""; stale_r=""; kits_r=0; render_r=0
+      for s in $(host_slots $i); do
+        f=$(slot_file $s); hp=""
+        [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+        if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+          # A whole-card reservation runs no kit, and it lapses as a local one does.
+          if [[ "$(cat "$f")" == *" reserved-for-all" ]]; then
+            [ -z "$stale_r" ] && lapsed "$f" && stale_r=$s
+            continue
+          fi
+          kits_r=$(( kits_r + 1 ))
+          [[ "$(cat "$f")" == *" render" ]] && render_r=1
+        elif [ -z "$free_r" ]; then
+          free_r=$s
+        fi
+      done
+      free_r=${free_r:-$stale_r}
+      [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ] || continue
+      [ -n "$render" ] && [ "$render_r" = 1 ] && continue
+      # A remote host may be shared: a slot is granted only while the host has
+      # the memory for it beside whatever else runs there.
+      REMOTE_CARD_HOST="$(remote_host $i)" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || continue
+      take=$free_r; host=$(remote_host $i); break
+    done
+    [ -n "$take" ] || return 1
+  else
+    REMOTE_CARD_HOST="$host" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || return 1
   fi
-  # The remote host is shared: a slot is granted only while the host has
-  # the memory for it beside whatever else runs there.
-  REMOTE_CARD_HOST="$REMOTE_CARD_HOST" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || return 1
   f=$(slot_file $take)
   local c="worv-iter-$take" d=$(( 76 + take )) cr="$CACHE_BASE/cache-slot$take"
   echo "$issue $pid $(date -u +%FT%TZ) domain=$d remote${render:+ render}" > "$f"
   rm -f "$LOCKS/slot-wait.$issue"
-  echo "ACQUIRED slot=$take file=$f container=$c domain=$d cache=$cr remote=$REMOTE_CARD_HOST"
-  echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d WORV_ITER_CACHE_ROOT=$cr DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"
+  echo "ACQUIRED slot=$take file=$f container=$c domain=$d cache=$cr remote=$host"
+  echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d WORV_ITER_CACHE_ROOT=$cr DOCKER_HOST=ssh://$host PATH=$H/bin/remote-docker:\$PATH"
   exit 0
 }
 # The caches are root-owned (docker creates the bind sources), so the copy runs
@@ -571,12 +589,23 @@ case "${1:-}" in
     exec 8>"$K"; flock 8
     case "${2:?user@host or --off}" in
       --off) rm -f "$REMOTE_FILE"; echo "REMOTE off" ;;
+      --add)
+        h="${3:?user@host}"; [[ "$h" == *@* ]] || { echo "usage: lease.sh remote --add <user@host>" >&2; exit 2; }
+        grep -qxF "$h" "$REMOTE_FILE" 2>/dev/null || echo "$h" >> "$REMOTE_FILE"
+        echo "REMOTE hosts: $(grep -v '^[[:space:]]*$' "$REMOTE_FILE" | paste -sd' ' -)" ;;
+      --drop)
+        h="${3:?user@host}"
+        if [ -s "$REMOTE_FILE" ]; then grep -vxF "$h" "$REMOTE_FILE" > "$REMOTE_FILE.new"; mv "$REMOTE_FILE.new" "$REMOTE_FILE"; fi
+        [ -s "$REMOTE_FILE" ] || rm -f "$REMOTE_FILE"
+        echo "REMOTE hosts: $(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null | paste -sd' ' -)" ;;
       *@*) echo "$2" > "$REMOTE_FILE"; echo "REMOTE $2 slots $(( GPU_SLOTS + 1 ))-$(( GPU_SLOTS + REMOTE_KITS_MAX ))" ;;
-      *) echo "usage: lease.sh remote <user@host> | remote --off" >&2; exit 2 ;;
+      *) echo "usage: lease.sh remote <user@host> | remote --add <user@host> | remote --drop <user@host> | remote --off" >&2; exit 2 ;;
     esac
     ;;
   status)
-    [ -n "$REMOTE_CARD_HOST" ] && echo "remote card: $REMOTE_CARD_HOST"
+    for i in $(seq 1 "$(remote_count)"); do
+      echo "remote card: $(remote_host $i) (slots $(host_slots $i | head -1)-$(host_slots $i | tail -1))"
+    done
     local_off && echo "local card: off (every run goes to the remote card)" \
       && echo "local host: off (builds and tests go to the remote host)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do

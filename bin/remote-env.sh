@@ -13,7 +13,7 @@
 remote_host_env() {
   local h
   [ -e "$HARNESS_STATE/locks/local-card-off" ] || return 0
-  h=$(cat "$HARNESS_STATE/locks/remote-card" 2>/dev/null) && [ -n "$h" ] || return 0
+  h=$(grep -v '^[[:space:]]*$' "$HARNESS_STATE/locks/remote-card" 2>/dev/null | head -1) && [ -n "$h" ] || return 0
   export WORV_REMOTE_DOCKER_HOST="ssh://$h" WORV_REMOTE_DOCKER_SHIM="$HARNESS_HOME/bin/remote-docker/docker"
   export WORV_LOCAL_OFF_DOCKER_HOST="unix:///run/local-host-off/use-the-docker-function-or-bash-c.sock"
   export DOCKER_HOST="$WORV_LOCAL_OFF_DOCKER_HOST"

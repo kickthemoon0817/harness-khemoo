@@ -163,7 +163,7 @@ overridden below.
      - Keep every kit-side call of the run under the export line.
      - **Both hosts run work (owner, 2026-10-08: "use both devices, this one and also the remote one together").** The
        local host has been on since 2026-10-07 23:59Z (`lease.sh local --on`; no `state/locks/local-card-off`).
-       - Leases grant the local card's slots and the remote host's (worv-worker-03.local) together. A local grant's export line
+       - Leases grant the local card's slots and each remote host's together (`lease.sh status` lists the hosts and their slots). A local grant's export line
          carries no `DOCKER_HOST`, so its run, a `--device` run included, runs here. That is correct: never stop such a
          run as a breach.
        - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run

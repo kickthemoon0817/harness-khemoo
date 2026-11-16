@@ -27,16 +27,16 @@ git -C "$REPO" fetch -q origin ai/manure-mpm 2>/dev/null
 recent=$( { git -C "$REPO" rev-list --first-parent --since="$KEEP_HOURS hours ago" origin/ai/manure-mpm
             git -C "$REPO" rev-list --first-parent -n 1 --until="$KEEP_HOURS hours ago" origin/ai/manure-mpm
             git -C "$REPO" rev-list --first-parent -n "$KEEP_HEADS" origin/ai/manure-mpm; } | cut -c1-8 | sort -u)
-# The remote host holds a copy of every worktree a run there mounted; its containers count too.
-remote=$(cat "$H/state/locks/remote-card" 2>/dev/null)
-rdocker() { DOCKER_HOST="ssh://$remote" command docker "$@"; }
+# Each remote host holds a copy of every worktree a run there mounted; its containers count too.
+remotes=$(grep -v '^[[:space:]]*$' "$H/state/locks/remote-card" 2>/dev/null)
+rdocker() { local host=$1; shift; DOCKER_HOST="ssh://$host" command docker "$@"; }
 # This host's own daemon, whatever DOCKER_HOST the caller carries (bin/remote-env.sh points it at a missing socket).
 ldocker() { DOCKER_HOST= command docker "$@"; }
 busy=$( { for p in /proc/[0-9]*; do readlink "$p/cwd" 2>/dev/null; done
           for c in $(ldocker ps -q 2>/dev/null); do ldocker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
-          if [ -n "$remote" ]; then
-            for c in $(rdocker ps -q 2>/dev/null); do rdocker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
-          fi
+          for r in $remotes; do
+            for c in $(rdocker "$r" ps -q 2>/dev/null); do rdocker "$r" inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
+          done
         } | grep "^$WT/" | sed "s|^$WT/||; s|/.*||" | sort -u)
 removed=()
 for path in "$WT"/*; do
@@ -59,9 +59,9 @@ done
 for d in "${removed[@]}"; do git -C "$REPO" worktree remove --force "$WT/$d" >/dev/null 2>&1; done
 left=(); for d in "${removed[@]}"; do [ -e "$WT/$d" ] && left+=("/w/$d"); done
 [ "${#left[@]}" -gt 0 ] && ldocker run --rm --runtime=runc -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${left[*]}"
-if [ -n "$remote" ]; then
-  gone=(); for d in "${removed[@]}"; do gone+=("/w/$d"); done
-  rdocker run --rm -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${gone[*]}" >/dev/null 2>&1
-fi
+gone=(); for d in "${removed[@]}"; do gone+=("/w/$d"); done
+for r in $remotes; do
+  rdocker "$r" run --rm -v "$WT":/w --entrypoint bash "${WORV_BUILDER_IMAGE:-worv-builder:isaac6}" -lc "rm -rf ${gone[*]}" >/dev/null 2>&1
+done
 git -C "$REPO" worktree prune
 echo "$(date -u +%FT%TZ) removed ${#removed[@]}: ${removed[*]}; /home $(df -h /home | awk 'NR==2{print $4}') free" >> "$LOG"
