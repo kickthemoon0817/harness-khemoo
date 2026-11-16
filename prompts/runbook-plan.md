@@ -153,9 +153,12 @@ overridden below.
      - A remote arm is identical to a local one: RS4 on parent-af846aec8 matched bit for bit, 431/431
        documents and the whole wrench trace. So change and parent arms may run on either card.
      - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
-       compile only) serves one compile at a time for every tick on this host. When it already has a waiter, or the
-       local load1 is past twice `nproc`, build and run host suites on the remote host instead:
-       `DOCKER_HOST=ssh://worv@worv-worker-03.local PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
+       compile only) serves one compile at a time for every tick on this host. When it is held at all (operator,
+       2026-11-16: a first waiter sat 40 minutes behind two compiles and missed its merge slot), or the local load1 is
+       past twice `nproc`, build and run host suites on a remote host instead: the first of `worv@10.50.1.6` and
+       `worv@worv-worker-03.local` whose `REMOTE_CARD_HOST=<host> bin/remote_room.sh` prints `ok` and whose card no
+       cost read holds (`lease.sh status`: no live `remote-all` on its slots):
+       `DOCKER_HOST=ssh://<host> PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
        (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
        a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
      - **One fast set per host at a time.** The doctest runner shards a suite over min(nproc, 8) processes, so two or
