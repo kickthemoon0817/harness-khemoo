@@ -84,6 +84,12 @@ overridden below.
    reference value wherever the step names one (T05 and T06 list them, for example FC1, FC3, EX1, EX4 and
    SL2). A pinned document, string, counter or hash is a guard, never the fixture. A test that pins a known
    wrong result (a negative convergence order, an out-of-band ratio) reports the value, not a pass.
+   **A cost read may take a whole remote card (operator, 2026-11-16).** A per-change gain read (parent and change
+   alternated) needs a card with no other process on it and a quiet host, not the local card in particular.
+   `lease.sh acquire <issue> --all-remote` grants every slot of one remote host whose card runs nothing else and whose
+   load1 is under 6 (`bin/remote_room.sh --alone`); ask again between arms to keep it. Run every arm of the read on
+   that one card, and name the card and the host load in the report. Take it before waiting for the local card's whole-card
+   grant. The first version's speed item (the engine against PhysX particles) is still read on the local card.
    **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
    only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
    readers and queue scripts (`.py`, `.sh`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the

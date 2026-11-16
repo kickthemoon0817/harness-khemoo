@@ -373,6 +373,49 @@ case "${1:-}" in
       echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(remote_env)"
       exit 0
     fi
+    if [ "$stated" = "--all-remote" ]; then
+      # A cost read may take a whole remote card: every slot of one remote host,
+      # granted only while no other run holds one of them, the card runs no other
+      # process and the host is quiet (bin/remote_room.sh --alone). Every arm of
+      # one read runs on that one card.
+      exec 8>"$K"; flock 8
+      [ -n "$REMOTE_CARD_HOSTS" ] || { echo "BUSY no remote card is named"; exit 1; }
+      n=$(remote_count)
+      grant_remote_all() {
+        local i=$1 h=$2 s0 s f
+        s0=$(host_slots "$i" | head -1)
+        for s in $(host_slots "$i"); do
+          f=$(slot_file "$s")
+          echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all render" > "$f"
+        done
+        rm -f "$LOCKS/slot-wait.$issue"
+        f=$(slot_file "$s0")
+        echo "ACQUIRED slot=$s0 file=$f container=worv-iter-$s0 domain=$(( 76 + s0 )) cache=$CACHE_BASE/cache-slot$s0 remote=$h exclusive=all-remote"
+        echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=worv-iter-$s0 ROS_DOMAIN_ID=$(( 76 + s0 )) WORV_ITER_CACHE_ROOT=$CACHE_BASE/cache-slot$s0 DOCKER_HOST=ssh://$h PATH=$H/bin/remote-docker:\$PATH"
+        exit 0
+      }
+      # This holder's own whole remote card first, so a read keeps its card between arms.
+      for i in $(seq 1 "$n"); do
+        own=1
+        for s in $(host_slots "$i"); do
+          f=$(slot_file "$s")
+          if ! { [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" remote-all"* ]]; }; then own=0; break; fi
+        done
+        [ "$own" = 1 ] && grant_remote_all "$i" "$(remote_host "$i")"
+      done
+      for i in $(seq 1 "$n"); do
+        free=1
+        for s in $(host_slots "$i"); do
+          f=$(slot_file "$s"); hp=""
+          [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+          if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then free=0; break; fi
+        done
+        [ "$free" = 1 ] || continue
+        REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" --alone >/dev/null 2>&1 || continue
+        grant_remote_all "$i" "$(remote_host "$i")"
+      done
+      echo "BUSY no remote card is free, alone and quiet"; exit 1
+    fi
     if [ "$stated" = "--all" ]; then
       # The whole card is for runs that render: an identity or measurement run
       # renders nothing and takes one slot, so a whole-card acquire says it renders.
@@ -631,5 +674,5 @@ case "${1:-}" in
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | local --off|--on | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | local --off|--on | status" >&2; exit 2;;
 esac

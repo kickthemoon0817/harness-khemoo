@@ -5,6 +5,7 @@
 #
 #   remote_room.sh            a kit without rendering, a build or a test suite
 #   remote_room.sh --render   a rendering kit
+#   remote_room.sh --alone    a whole card for a cost read: no other process on it, host quiet
 #
 # The host is shared: other sessions' memory is theirs, so a job goes there
 # only while the free memory covers it with a margin.
@@ -16,6 +17,15 @@ host="${REMOTE_CARD_HOST:-$(grep -v '^[[:space:]]*$' "$H/state/locks/remote-card
 : "${REMOTE_MIN_VRAM_RENDER_MIB:=9216}"
 need_vram=$REMOTE_MIN_VRAM_MIB
 [ "${1:-}" = --render ] && need_vram=$REMOTE_MIN_VRAM_RENDER_MIB
+# --alone: the card runs no compute process and the host's load is low, as a cost read needs.
+if [ "${1:-}" = --alone ]; then
+  need_vram=$REMOTE_MIN_VRAM_RENDER_MIB
+  read -r apps load < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    'printf "%s " "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"; cut -d" " -f1 /proc/loadavg' 2>/dev/null)
+  [[ "$apps" =~ ^[0-9]+$ ]] || { echo "busy $host does not answer"; exit 1; }
+  if [ "$apps" -gt 0 ]; then echo "busy $apps compute process(es) on the card"; exit 1; fi
+  if ! awk -v l="$load" -v m="${REMOTE_ALONE_MAX_LOAD:-6}" 'BEGIN { exit !(l + 0 < m + 0) }'; then echo "busy load1=$load"; exit 1; fi
+fi
 read -r ram vram < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
   'awk "/MemAvailable/ {printf \"%d \", \$2 / 1024}" /proc/meminfo; nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1' \
   2>/dev/null)
