@@ -20,12 +20,38 @@ if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set
 mkdir -p "$S/logs" "$HARNESS_STATE/locks"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
-# A host named in SLOW_SET_REMOTE_HOST runs the scheduled suites, so the local
-# host stays quiet for cost reads. A host without room leaves them local.
-if [ -n "${SLOW_SET_REMOTE_HOST:-}" ] && [ ! -e "$HARNESS_STATE/locks/local-card-off" ] \
-   && REMOTE_CARD_HOST="$SLOW_SET_REMOTE_HOST" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1; then
-    export DOCKER_HOST="ssh://$SLOW_SET_REMOTE_HOST" PATH="$HARNESS_HOME/bin/remote-docker:$PATH" \
+# The scheduled suites run on a host no cost read holds, so they never load the
+# host a cost read is timing: SLOW_SET_REMOTE_HOST first, then the other remote
+# hosts, then the local one. With every host held, the run is deferred to the
+# next schedule.
+lease_status=$("$HARNESS_HOME/bin/lease.sh" status < /dev/null 2>/dev/null)
+# held_by_cost_read <host|local>: a live whole-card lease on that host's slots.
+held_by_cost_read() {
+    printf '%s\n' "$lease_status" | awk -v h="$1" '
+        /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
+        /^slot [0-9]+ HELD / && /\(alive\)$/ { held[$2] = $0 }
+        END {
+            for (s in held) {
+                if (h == "local") { remote = 0; for (x in lo) if (s + 0 >= lo[x] && s + 0 <= hi[x]) remote = 1
+                                    if (!remote && held[s] ~ / exclusive /) exit 0 }
+                else if (s + 0 >= lo[h] && s + 0 <= hi[h] && held[s] ~ / remote-all /) exit 0
+            }
+            exit 1
+        }'
+}
+run_on=""
+for h in ${SLOW_SET_REMOTE_HOST:-} $(grep -v '^[[:space:]]*$' "$HARNESS_STATE/locks/remote-card" 2>/dev/null); do
+    [ -e "$HARNESS_STATE/locks/local-card-off" ] && break
+    held_by_cost_read "$h" && continue
+    REMOTE_CARD_HOST="$h" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1 || continue
+    run_on="$h"; break
+done
+if [ -n "$run_on" ]; then
+    export DOCKER_HOST="ssh://$run_on" PATH="$HARNESS_HOME/bin/remote-docker:$PATH" \
         WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock
+elif held_by_cost_read local; then
+    echo "$(date -u +%FT%TZ) $set_name deferred: every host is held by a cost read" >> "$S/deferred.log"
+    exit 0
 fi
 exec 7>"$HARNESS_STATE/locks/$lock.lock"; flock -n 7 || exit 0
 [ -e "$HARNESS_STATE/paused" ] && exit 0

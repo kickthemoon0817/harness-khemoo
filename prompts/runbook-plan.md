@@ -90,6 +90,11 @@ overridden below.
    load1 is under 6 (`bin/remote_room.sh --alone`); ask again between arms to keep it. Run every arm of the read on
    that one card, and name the card and the host load in the report. Take it before waiting for the local card's whole-card
    grant. The first version's speed item (the engine against PhysX particles) is still read on the local card.
+   **A cost read times the engine's own spans, not an nsys capture (operator, 2026-11-16).** The gain read takes the
+   tick, the GPU step and the named phase rows from the kit's tick-wall and profiler spans. `nsys start` has hung the
+   kit in three arms (#2233 twice, #2235 once). Capture nsys only when the Ask names a kernel row, and as its own
+   arm after the span arms. A hung capture voids that arm only. The scheduled suites now skip a host whose card a
+   cost read holds (`bin/slow_set.sh`), so check `lease.sh status` rather than the suite logs before an arm.
    **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
    only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
    readers and queue scripts (`.py`, `.sh`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
