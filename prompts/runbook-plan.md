@@ -297,10 +297,15 @@ overridden below.
      #1871's fallback STOP stopped #1845's `RS6-pm-s1323`).
      A STOP meant for the next arm waits for the running arm's `rc=` line: the queue's check also ends the running arm,
      and its state series and census are written only at its end (#1905's census arm, 2026-10-15).
-   - **Check the base first.** Each parent arm runs twice (`<scenario>-p` and `<scenario>-p2`), and a proof
-     uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
-     replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
-     single parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
+   - **Check the base first.** A proof uses a base only once each scenario replays on it (§F.3's precondition).
+     Two readings show that, and a scenario needs one of them:
+     - **The chain line** (3c). The base's `<scenario>-p` identical to the window base's `-p` in `chain.txt` is two
+       runs of the same physics that agree. Run no `-p2` for that scenario.
+     - **A second parent arm.** Where the chain line is missing, was skipped for a class B landing, or parts, run
+       `<scenario>-p2` and use the base once `-p` and `-p2` are identical.
+
+     If neither holds, the base does not replay itself. Post a `Plan finding:` before proving against it, as with
+     #1436. A single unchecked parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
    - **Every scenario of the set.** A §F.3 proof covers RS1–RS6. RS4 joined on bases from 8ec107ad3 (#1417,
      D16a), and runs under `lockstep_sync --no-moments` like the rest. A missing parent arm is a reason to claim and run it, never a reason to leave its scenario
      out. A class A merge with a scenario left out is not proven: pause instead, and say which arms are owed.
@@ -316,6 +321,21 @@ overridden below.
    runs in an identity arm, stop arming the old base. The arms already recorded stay as evidence. Merge the
    head, rebuild, and arm the new base's parents and your change there, because a proof on a base the slot
    no longer has cannot land.
+   **A head move re-runs only what its overlap touches (operator, 2026-11-16).** Merge the head and rebuild, then
+   read `git diff --name-only <old base> <new base>` against the change's own files:
+   - **Change arms.** Read the new base's `chain.txt` before arming anything. If it is not written yet, run the new
+     base's `-p` arms (3a) and write it; never re-run the six change arms ahead of it. A scenario whose chain line is
+     identical carries by the rules below; only a scenario that parts, or that a class B landing moved, is re-run.
+   - **Touched test files.** Re-run them on the merge result when the move changed one of them, a header they
+     include, or a production file the change also edits. Otherwise the earlier log carries.
+   - **The fast set.** It runs once, on the merge result that lands (override 5, one run per tree). A prepared run
+     carries across a move that brings no production file and no test file of the extensions the change touches.
+   - **The device suite.** Re-run it only when the move or the change touches device code (override 5).
+   - **Never re-run for a head move:** the fail-on-head output, a mutation, a class B render pair on a scenario
+     that carries, or a cost read. A mutation is re-run only when the merge changed the lines it mutates. A cost
+     read is a difference of arms on one base and stands unless the move changes a file under the phase rows it
+     reports; say so in the packet.
+
    **A proof carries across a base move, scenario by scenario, where the chain check allows it.**
    - **The check.** Compare the new base's `<scenario>-p` against the old base's `-p` (`chain.py`, as 3c's batch check does).
    - **The condition.** They may part only in state keys the landings in between added or changed, with the particle
@@ -381,7 +401,7 @@ overridden below.
      3. Check what the merge brought: every commit between the proof base and the head must be a
         batch-mate that landed in this slot or a move 3b exempts. Otherwise, as after an owner-signed
         class B landing, release, remove `ai:ready` and re-prove on the new head.
-     4. Rebuild and run every case of the touched test files on the merge result. A landing that changes code in
+     4. Rebuild and run the touched test files (override 5's definition) on the merge result. A landing that changes code in
         an extension the identity kits mount also runs the whole fast set there, class A included (operator,
         2026-10-09, #1822). A change to a shared quantity can red a test it never touched: #1812's audit change
         to the thin-plate split reddened `test_added_mass_exchange.cpp`'s contact-energy check, and only the
@@ -496,28 +516,66 @@ overridden below.
        census of the particles there: support root, asleep or awake, the holding rule, speed. Supported debris of the
        branch does not block; material the change itself holds up does.
 5. **Merge rule by class** (the issue states the class):
+   - **What each kind of change owes (operator, 2026-11-16).** A change runs its row and nothing more, unless the
+     issue's Ask names another run. A check outside the row is read by the scheduled suites (`bin/slow_set.sh`:
+     the fast set hourly, the whole set every third hour) or at the release, not by the tick.
+
+     | kind | owes | does not run |
+     |---|---|---|
+     | **Evidence or harness only** (packets, readings, investigations, analysis and comparison tools that never run inside an arm) | the tool's own unittest, if it has one | builds, suites, arms, gates |
+     | **Tests or docs only** (no file an identity arm runs) | build; the touched test files; the fast set only when a shared test header changed; the image gates | arms, cost, mutations; the device suite unless a device test file changed |
+     | **Class A, identity holds** | build; the fixture failing on head, or one mutation where no fixture can fail on head; the touched test files; RS1–RS6 change arms against the shared parents, once; on the merge result the fast set once and the image gates; the device suite only for device code; tick cost from the identity arms' own spans | a second set of arms on a head move that carries; the device suite for host code; a cost arm, unless the issue asks for a gain |
+     | **Class B, behaviour change** | all of class A's row with the fixture checking the law (override 2); with the setting off, RS1–RS6 identical to the parent where the change has a setting; change against parent on each scenario the change moves (RS3 and RS6 on three seeds when they are among them); one render pair and V5 on those scenarios only; on the merge result the fast set and the device suite once | pairs, seeds or renders on a scenario the off arm or the chain line shows unmoved |
+
+     - **Touched test files** means the cases outside `[slow]` of each test file the diff changes, plus the `[slow]`
+       cases the diff adds or edits, run by name. The file's other `[slow]` cases run too when the diff changes
+       code outside a case body in that file, a test header the file includes, or the fixture those cases call.
+       Otherwise the whole set reads them on the head.
+     - **Device code** is `kernels/`, `MpmGpuSolver.h`, `GpuBoundary.h`, `GpuHostTraffic.h`,
+       `worv.core.warp_compat` and the device project's own test files and stubs. A change to another file of the
+       record's hash set runs only the device cases that read it, by file
+       (`tools/test/run_doctest_sharded.sh --file '*test_zone_hold.cpp' <binary> 1` under the device lease), and
+       writes no record.
+     - **A perf step** (the Ask names a gain) adds one gain read: the one scenario and phase rows the Ask names,
+       parent and change alternated twice (p c p c), card alone. A second scenario or an nsys capture only when the
+       Ask names it.
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
-     merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and every case in
-     every touched test file pass, and the packet is written.
+     merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and the touched test
+     files (as defined above) pass, and the packet is written.
    - **Every landing, class A or B, runs the image gates on its merge result:**
      `python3 tools/test/p1_role_ratchet.py` and `tools/test/extension_version_gate.py`. A word above its
      baseline lands only on an operator grant named in the landing comment; otherwise stop with a
      `Plan finding:`.
    - **Every landing also reads the device record on its merge result:**
      `python3 tools/test/device_record.py check --root .` (no GPU). A red check means the merge result changed a
-     file of the device suite's hash set. Then run the device suite on the merge result
-     (`tools/dev/iter.sh build --test --device --suite test_mpm_gpu_parity worv.env.manure`, holding the device
-     lease), commit the `tests/device_record.toml` that run writes as its own commit, and read `check` green
-     before the merge. Never write the record by hand and never land on a red check: the image build fails on
-     such a head.
+     file of the device suite's hash set. What the landing then owes depends on the files (operator, 2026-11-16):
+     - **Device code, or any class B change in the hash set.** Run the device suite on the merge result, once
+       (`tools/dev/iter.sh build --test --device --suite test_mpm_gpu_parity worv.env.manure`, holding the device
+       lease), commit the `tests/device_record.toml` that run writes as its own commit, and read `check` green
+       before the merge.
+     - **A class A change to host code only.** Its identity arms ran the device path on RS1–RS6 and came back
+       identical. Land with the record as the head has it, name the changed hash-set files in the landing comment
+       under `Device record: stale, <files>`, and leave `tests/device_record.toml` untouched, so two such landings
+       in one slot never conflict on it.
+     - **The refresh.** A stale record is repaired by one device run on the head, not one per landing. The tick
+       that lands a stale record opens `test: refresh the device record` (tests only, labels `ai` and `ai:plan`) unless
+       one is open, and the next device-code landing closes it if it comes first. The release-readiness issue requires
+       `check` green: the image build fails on a red one.
+
+     Never write the record by hand. A device run that fails only in `cuMemAlloc: out of memory` is a card reading,
+     not a verdict: re-run those cases alone by name once the card has room, and never the whole suite twice.
    - **One run per tree (operator, 2026-11-11).** A suite's green log belongs to the tree it ran on
      (`git rev-parse HEAD^{tree}`). Never run the fast set, a whole-binary suite or the device suite twice on one
      tree: cite the log. Before its merge result exists, a branch runs only the cases of its touched test files;
      the fast set and the device suite run on the merge result, once. A re-merge that brings no file the change or
      its tests touch carries the earlier logs by the file check of 3b.
-   - **Mutations (operator, 2026-11-11).** At most three per change, one for each rule the change adds, unless the
-     issue names more.
+   - **Mutations (operator, 2026-11-11; narrowed 2026-11-16).** A mutation shows that a new case can go red. A
+     fixture that fails on head already shows it, so such a case needs none. Where no fixture can fail on head (the
+     change adds the API its case reads, or the behaviour is unchanged by design), run one mutation for each rule
+     the change adds, at most three, unless the issue names more. Build the mutant in the change's own worktree
+     (dev build, one file), run the one case by name (`-tc=`), revert, and quote the red lines. No suite, no arm
+     and no device run on a mutant.
    - **A class B landing also runs the whole fast set on its merge result** (`bin/slow_set.sh fast`, host), not only its
      touched files. A case green on the head and red on the merge blocks the landing. #1464 turned two cases in files
      it did not touch red (#1524).
@@ -546,8 +604,10 @@ overridden below.
    run), P9 (every new constant with its class: MATERIAL, DERIVED, SHARED RULE, SETTING — a bare
    number in a law is a defect), P10 (which interface the change sits behind, once A0 exists).
 7. **Tick cost (P8, owner decision D4).** Correctness first: a change may slow the tick, but a PR
-   that changes runtime code reports its tick-wall cost against the parent (TickWallSplit or the
-   profiler, same session, both arms). No perf bar blocks a merge; T09 restores real time.
+   that changes runtime code reports its tick-wall cost against the parent. It is read from arms the proof
+   already ran: the tick-wall spans of one identity change arm against the shared parent arm of the same scenario,
+   marked `shared card`. No arm is run for it. Only a perf step runs a gain read (override 5's table). No perf
+   bar blocks a merge; T09 restores real time.
    The host runs a kit tick in one of two modes about 100 ms apart on RS6, whatever the commit, and an arm can
    switch mid-run (#1875). So compare windows matched by a host-only stage both arms share (zone-sync `account`),
    or alternate the arms several times; one median per arm measures the mode, not the change.
