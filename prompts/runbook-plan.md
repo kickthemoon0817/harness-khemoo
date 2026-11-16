@@ -142,6 +142,10 @@ overridden below.
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
      you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
+   - **RS6 heads a queue of its own (operator, 2026-11-16).** RS6's zone never freezes (its crate is a free body), so
+     its arm runs about 430 s while the others run 130–210 s, and the proof's wall is RS6's queue. Order the arms
+     RS6, RS1, RS3, RS4, RS5, RS2; with three slots run {RS6}, {RS1, RS4}, {RS3, RS5, RS2}. With two, {RS6, RS2},
+     {RS1, RS3, RS4, RS5}.
    - **A single-slot grant may be on the remote card** (slots 4–5, domains 80–81, `remote=` in the ACQUIRED line).
      - Its export line sets `DOCKER_HOST` and puts `bin/remote-docker` first on `PATH`. So every `docker` and
        `nvidia-smi` call made under it, from `iter.sh`, `scenario_run.py` and the queue, runs on that host.
@@ -278,6 +282,11 @@ overridden below.
    - **Reuse a finished one.** Before running a parent arm, look there. If `<scenario>-p rc=0 end`
      is in its `status` and the run passed override 13's boot check, compare your change arm against
      it and cite it in your packet.
+   - **A landed change's arms are the new base's first parent arms (operator, 2026-11-16).** Before running
+     `parent-<new9>/<scenario>-p`, compare `git rev-parse <new head>^{tree}` with the tree of the `commit` in a
+     finished `<scenario>-c/run.json` from the landing's packet. If they are equal, and the flags, seed, kit settings
+     and mount set match, link that arm in as `<scenario>-p` with a `status` line naming its source, and run only
+     `-p2` if the proof asks for a second parent arm. A slot that landed two changes has no such arm: run them.
    - **Otherwise claim and run it there.** `mkdir evidence/parent-<base9>/<scenario>-p` claims the arm:
      only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
      folder exists without a finished status, another tick is running it: run your change arms
