@@ -169,6 +169,9 @@ overridden below.
        - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run
          `bin/remote_room.sh` (`--render` for a rendering kit). Use the remote lane only when it prints `ok`; on `busy`
          run the work locally. A lease grants a remote slot under the same check.
+       - Two remote hosts take explicit runs: `worv@worv-worker-03.local` (16 GB card, shared) and `worv@10.50.1.6`
+         (24 GB card, the faster CPU, usually free). Check a host with `REMOTE_CARD_HOST=<host> bin/remote_room.sh` and
+         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `worv@10.50.1.6` when both print `ok`.
        - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@worv-worker-03.local
          PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
          `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
