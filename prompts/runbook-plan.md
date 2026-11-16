@@ -142,10 +142,10 @@ overridden below.
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
      you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
-   - **RS6 heads a queue of its own (operator, 2026-11-16).** RS6's zone never freezes (its crate is a free body), so
-     its arm runs about 430 s while the others run 130–210 s, and the proof's wall is RS6's queue. Order the arms
-     RS6, RS1, RS3, RS4, RS5, RS2; with three slots run {RS6}, {RS1, RS4}, {RS3, RS5, RS2}. With two, {RS6, RS2},
-     {RS1, RS3, RS4, RS5}.
+   - **Balance the identity queues (operator, 2026-11-16).** Since 9595097a1 (#2227) RS6's zone freezes 9 s after
+     its push (stamp 34.0 s on seed 1322), and its arm runs 175–186 s on a quiet host, like RS1's. With three slots
+     run {RS6, RS2}, {RS1, RS4}, {RS3, RS5}; with two, {RS6, RS1, RS2}, {RS3, RS4, RS5}. A tree without 9595097a1
+     does not freeze on RS6 and runs about 430 s: merge the head first.
    - **A single-slot grant may be on the remote card** (slots 4–5, domains 80–81, `remote=` in the ACQUIRED line).
      - Its export line sets `DOCKER_HOST` and puts `bin/remote-docker` first on `PATH`. So every `docker` and
        `nvidia-smi` call made under it, from `iter.sh`, `scenario_run.py` and the queue, runs on that host.
