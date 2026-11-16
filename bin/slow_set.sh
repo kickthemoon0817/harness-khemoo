@@ -20,6 +20,13 @@ if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set
 mkdir -p "$S/logs" "$HARNESS_STATE/locks"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
+# A host named in SLOW_SET_REMOTE_HOST runs the scheduled suites, so the local
+# host stays quiet for cost reads. A host without room leaves them local.
+if [ -n "${SLOW_SET_REMOTE_HOST:-}" ] && [ ! -e "$HARNESS_STATE/locks/local-card-off" ] \
+   && REMOTE_CARD_HOST="$SLOW_SET_REMOTE_HOST" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1; then
+    export DOCKER_HOST="ssh://$SLOW_SET_REMOTE_HOST" PATH="$HARNESS_HOME/bin/remote-docker:$PATH" \
+        WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock
+fi
 exec 7>"$HARNESS_STATE/locks/$lock.lock"; flock -n 7 || exit 0
 [ -e "$HARNESS_STATE/paused" ] && exit 0
 
