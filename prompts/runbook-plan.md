@@ -95,6 +95,12 @@ overridden below.
    kit in three arms (#2233 twice, #2235 once). Capture nsys only when the Ask names a kernel row, and as its own
    arm after the span arms. A hung capture voids that arm only. The scheduled suites now skip a host whose card a
    cost read holds (`bin/slow_set.sh`), so check `lease.sh status` rather than the suite logs before an arm.
+   **A cost arm ends after the step it reads (operator, 2026-11-16, e7c69b8d4).** Run each arm of a gain read with
+   `--through-sim-s` at the end of the step or window it reads: RS6's push 13, RS3's drive and its windows 2–3 20.
+   A rest-tick read is a separate, unclipped arm. A clipped arm is never an identity arm (`series_compare` voids it).
+   **Bring a container up with `iter.sh up <exts> && iter.sh sidecar`.** The sidecar starts from a toolset image
+   built once per host, so no queue backgrounds `iter.sh topics`, greps its log or kills it mid-replacement any more;
+   the runner kills the kit at collect, so no queue waits on a kit stop either.
    **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
    only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
    readers and queue scripts (`.py`, `.sh`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
@@ -146,6 +152,18 @@ overridden below.
      its push (stamp 34.0 s on seed 1322), and its arm runs 175–186 s on a quiet host, like RS1's. With three slots
      run {RS6, RS2}, {RS1, RS4}, {RS3, RS5}; with two, {RS6, RS1, RS2}, {RS3, RS4, RS5}. A tree without 9595097a1
      does not freeze on RS6 and runs about 430 s: merge the head first.
+   - **RS6's identity arm ends after the freeze (operator, 2026-11-16, e7c69b8d4).** A class A change arm runs RS6 as
+     `--variant identity` (the push, then 12 simulated s of rest) and is compared with the shared parent's whole
+     `RS6-p`; `series_compare` pairs the marks and wrench lines both hold.
+     - The variant arm must end frozen: its last document reads `zone_frozen: true`, `frozen_steps` of at least 480
+       and every `freeze_wakes` cause 0. An arm that ends unfrozen is void for identity: run RS6 whole.
+     - The parent arm stays whole. It also serves class B pairs and the chain check, which never run the variant.
+     - Run RS6 whole, never the variant, when the change touches `mpm/ZoneFreeze.h`, `model/BodySleepGate.h`,
+       `mpm/ZoneSurface.h`, `mpm/LodExchange.h`, `model/LegacyExchange.h`, `mpm/FieldSupport.h`, `HeapField.h`,
+       `model/PhysxBackend.h`, `model/IPhysicsBackend.h`, a hunk of `mpm/ManureZone.h` that names freeze, sleep,
+       wake, rest or quiet, or `rest_freeze_after_s`. Four changes have parted RS6 first inside its rest (#1744,
+       #2026, #2227, #1858), the last at 83.75 s, and all four touch that list.
+     - A class B review, a release reading and every reading of M2→M3 run RS6 whole.
    - **A single-slot grant may be on the remote card** (slots 4–5, domains 80–81, `remote=` in the ACQUIRED line).
      - Its export line sets `DOCKER_HOST` and puts `bin/remote-docker` first on `PATH`. So every `docker` and
        `nvidia-smi` call made under it, from `iter.sh`, `scenario_run.py` and the queue, runs on that host.
