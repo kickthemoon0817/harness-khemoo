@@ -450,6 +450,21 @@ overridden below.
        Take it only once the merge result's suites are green. A preparation still running when the slot closes
        waits for the next slot; taking the lock to keep the slot while a suite runs is the case this rule forbids
        (operator, 2026-10-10, #1835: lock at 09:57Z, fast set under it until 10:06Z, merged 10:07Z).
+   - **A train for PRs that share a file (operator, 2026-11-17).** Two ready PRs that edit the same production file
+     conflict when the first lands, and the second then re-proves on the new head. On 11-16 #2242 and #2244 were
+     each proven three times this way. So, before a PR proves for a slot:
+     - **Find the PR ahead.** List the open `ai:ready` PRs (and any PR whose tick posted `ready` earlier) that share a
+       production file with yours (`gh pr view <n> --json files`). Ignore version, CHANGELOG and device-record files.
+     - **None:** prove against the window base as now; PRs that share no file land as one batch.
+     - **One or more:** take the earliest-ready one as your base. Merge its branch into yours, resolving the shared hunks
+       as unions, and prove on that merge result. Say `rides on #<pr>` in your ready line and in the PR body.
+     - **Landing a rider.** Land it in the same slot right after the PR it rides on. Step 3 accepts the commits
+       that PR's landing brought as a batch-mate's, and step 2 then meets no conflict outside version and
+       CHANGELOG, because the rider already holds them.
+     - **If the PR ahead is dropped or re-proves,** the rider re-merges onto whatever is ahead of it then, and
+       proves once more. That is one re-proof, where without the train it pays one per slot until it lands first.
+     - **Proofs still run in parallel.** Only the base a rider proves on changes. Its cost read carries, unless the
+       PR ahead changes a file under the rows the rider reports.
    - **The batch is checked as a whole.** Each batch-mate was proven against the window base, not against
      the others.
      - **Who checks.** The first tick that records a parent arm on a head a slot produced also compares it
