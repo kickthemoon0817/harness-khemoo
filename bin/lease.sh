@@ -90,7 +90,7 @@ if [[ -n "$holder" ]]; then
   [[ "$ancestor" == "$pid" ]] || {
     echo "ERROR: task wrapper PID is not an ancestor" >&2; exit 2;
   }
-elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ] && [ "${1:-}" != remote ] && [ "${1:-}" != local ]; then
+elif [ -x "$H/bin/tick-pid.sh" ] && [ "${1:-}" != status ] && [ "${1:-}" != prioritize ] && [ "${1:-}" != remote ] && [ "${1:-}" != local ] && [ "${1:-}" != harness-only ]; then
   # A lease belongs to the tick. From a loop detached from the tick's tree the
   # walk finds no tick, and recording the loop's own PID would leave a lease
   # that reads as dead the moment the loop ends, handing the slot to a sibling.
@@ -105,6 +105,15 @@ slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/res
 REMOTE_FILE="$LOCKS/remote-card"
 # One remote host a line. The first is the one a run takes with the local card off.
 REMOTE_CARD_HOSTS="${REMOTE_CARD_HOSTS:-$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)}"
+# Harness ticks can be kept to the first remote card alone (`lease.sh harness-only --on`):
+# an acquire by an issue-number holder then sees that card as its only card, with the
+# local card off. A named holder keeps every card.
+HARNESS_ONLY_FILE="$LOCKS/harness-first-remote-only"
+HARNESS_ONLY_SCOPE=""
+if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+  REMOTE_CARD_HOSTS=$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null | head -1)
+  [ -n "$REMOTE_CARD_HOSTS" ] && HARNESS_ONLY_SCOPE=1
+fi
 [ -z "$REMOTE_CARD_HOSTS" ] && [ -n "${REMOTE_CARD_HOST:-}" ] && REMOTE_CARD_HOSTS=$REMOTE_CARD_HOST
 REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(printf '%s\n' "$REMOTE_CARD_HOSTS" | head -1)}"
 remote_count() { if [ -n "$REMOTE_CARD_HOSTS" ]; then printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -c .; else echo 0; fi; }
@@ -117,7 +126,7 @@ slot_host() { remote_host $(( ($1 - GPU_SLOTS - 1) / REMOTE_KITS_MAX + 1 )); }
 # device run goes to the remote card, and the local card is left to its owner.
 # Builds and tests go to the remote host too (bin/remote-env.sh).
 LOCAL_OFF_FILE="$LOCKS/local-card-off"
-local_off() { [ -n "$REMOTE_CARD_HOST" ] && [ -e "$LOCAL_OFF_FILE" ]; }
+local_off() { [ -n "$REMOTE_CARD_HOST" ] && { [ -e "$LOCAL_OFF_FILE" ] || [ -n "$HARNESS_ONLY_SCOPE" ]; }; }
 # The slots a whole-card or device run looks at: the card that runs it.
 card_slots() { if local_off; then host_slots 1; else seq 1 "$GPU_SLOTS"; fi; }
 remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
@@ -628,6 +637,16 @@ case "${1:-}" in
       *) echo "usage: lease.sh local --off | --on" >&2; exit 2 ;;
     esac
     ;;
+  harness-only)
+    exec 8>"$K"; flock 8
+    case "${2:?--on or --off}" in
+      --on)
+        [ -n "$REMOTE_CARD_HOST" ] || { echo "REFUSED: no remote card is named" >&2; exit 2; }
+        touch "$HARNESS_ONLY_FILE"; echo "HARNESS-ONLY on: harness ticks use $REMOTE_CARD_HOST alone; named holders keep every card" ;;
+      --off) rm -f "$HARNESS_ONLY_FILE"; echo "HARNESS-ONLY off" ;;
+      *) echo "usage: lease.sh harness-only --on | --off" >&2; exit 2 ;;
+    esac
+    ;;
   remote)
     exec 8>"$K"; flock 8
     case "${2:?user@host or --off}" in
@@ -649,6 +668,7 @@ case "${1:-}" in
     for i in $(seq 1 "$(remote_count)"); do
       echo "remote card: $(remote_host $i) (slots $(host_slots $i | head -1)-$(host_slots $i | tail -1))"
     done
+    [ -e "$HARNESS_ONLY_FILE" ] && echo "harness ticks: $REMOTE_CARD_HOST only (local card and other remote cards left to named holders)"
     local_off && echo "local card: off (every run goes to the remote card)" \
       && echo "local host: off (builds and tests go to the remote host)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do

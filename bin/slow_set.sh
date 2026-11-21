@@ -41,7 +41,7 @@ held_by_cost_read() {
 }
 run_on=""
 for h in ${SLOW_SET_REMOTE_HOST:-} $(grep -v '^[[:space:]]*$' "$HARNESS_STATE/locks/remote-card" 2>/dev/null); do
-    [ -e "$HARNESS_STATE/locks/local-card-off" ] && break
+    [ -e "$HARNESS_STATE/locks/local-card-off" ] || [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ] && break
     held_by_cost_read "$h" && continue
     REMOTE_CARD_HOST="$h" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1 || continue
     run_on="$h"; break
