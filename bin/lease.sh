@@ -105,14 +105,24 @@ slot_file() { [ "$1" -eq 1 ] && echo "$LOCKS/resource.lease" || echo "$LOCKS/res
 REMOTE_FILE="$LOCKS/remote-card"
 # One remote host a line. The first is the one a run takes with the local card off.
 REMOTE_CARD_HOSTS="${REMOTE_CARD_HOSTS:-$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)}"
-# Harness ticks can be kept to the first remote card alone (`lease.sh harness-only --on`):
-# an acquire by an issue-number holder then sees that card as its only card, with the
-# local card off. A named holder keeps every card.
+# Harness ticks can be kept to named remote cards (`lease.sh harness-only --on [user@host ...]`):
+# an acquire by an issue-number holder then sees only those cards, in that order of preference,
+# with the local card off; the first is its card for builds, device and whole-card runs. With
+# no host named, the first remote card alone. Slot numbers keep the global host order, so a
+# named holder keeps every card and sees the same slots.
 HARNESS_ONLY_FILE="$LOCKS/harness-first-remote-only"
 HARNESS_ONLY_SCOPE=""
+HARNESS_HOSTS=""
 if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
-  REMOTE_CARD_HOSTS=$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null | head -1)
-  [ -n "$REMOTE_CARD_HOSTS" ] && HARNESS_ONLY_SCOPE=1
+  REMOTE_CARD_HOSTS=$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)
+  while IFS= read -r hh; do
+    [ -n "$hh" ] && printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -qxF "$hh" && HARNESS_HOSTS+="$hh"$'\n'
+  done < <(grep -v '^[[:space:]]*$' "$HARNESS_ONLY_FILE" 2>/dev/null)
+  [ -z "$HARNESS_HOSTS" ] && HARNESS_HOSTS="$(printf '%s\n' "$REMOTE_CARD_HOSTS" | head -1)"$'\n'
+  if [ -n "$REMOTE_CARD_HOSTS" ]; then
+    HARNESS_ONLY_SCOPE=1
+    REMOTE_CARD_HOST=$(printf '%s' "$HARNESS_HOSTS" | head -1)
+  fi
 fi
 [ -z "$REMOTE_CARD_HOSTS" ] && [ -n "${REMOTE_CARD_HOST:-}" ] && REMOTE_CARD_HOSTS=$REMOTE_CARD_HOST
 REMOTE_CARD_HOST="${REMOTE_CARD_HOST:-$(printf '%s\n' "$REMOTE_CARD_HOSTS" | head -1)}"
@@ -120,6 +130,13 @@ remote_count() { if [ -n "$REMOTE_CARD_HOSTS" ]; then printf '%s\n' "$REMOTE_CAR
 remote_host() { printf '%s\n' "$REMOTE_CARD_HOSTS" | sed -n "${1}p"; }
 host_slots() { seq $(( GPU_SLOTS + 1 + ($1 - 1) * REMOTE_KITS_MAX )) $(( GPU_SLOTS + $1 * REMOTE_KITS_MAX )); }
 remote_slots() { local n; n=$(remote_count); [ "$n" -gt 0 ] && seq $(( GPU_SLOTS + 1 )) $(( GPU_SLOTS + REMOTE_KITS_MAX * n )); }
+# A host's place in the global list, and the order a holder tries the remote hosts in.
+host_index() { printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -nxF "$1" | head -1 | cut -d: -f1; }
+host_order() {
+  if [ -n "$HARNESS_ONLY_SCOPE" ]; then
+    local h; while IFS= read -r h; do [ -n "$h" ] && host_index "$h"; done <<< "$HARNESS_HOSTS"
+  else seq 1 "$(remote_count)"; fi
+}
 # The remote host a slot belongs to.
 slot_host() { remote_host $(( ($1 - GPU_SLOTS - 1) / REMOTE_KITS_MAX + 1 )); }
 # With the local host off (`lease.sh local --off`), every kit, whole-card and
@@ -128,7 +145,7 @@ slot_host() { remote_host $(( ($1 - GPU_SLOTS - 1) / REMOTE_KITS_MAX + 1 )); }
 LOCAL_OFF_FILE="$LOCKS/local-card-off"
 local_off() { [ -n "$REMOTE_CARD_HOST" ] && { [ -e "$LOCAL_OFF_FILE" ] || [ -n "$HARNESS_ONLY_SCOPE" ]; }; }
 # The slots a whole-card or device run looks at: the card that runs it.
-card_slots() { if local_off; then host_slots 1; else seq 1 "$GPU_SLOTS"; fi; }
+card_slots() { if local_off; then host_slots "$(host_index "$REMOTE_CARD_HOST")"; else seq 1 "$GPU_SLOTS"; fi; }
 remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
@@ -281,8 +298,7 @@ remote_grant() {
   if [ -z "$take" ]; then
     first=$(slot_first_issue)
     [ -n "$first" ] && [ "$first" != "$issue" ] && return 1
-    n=$(remote_count)
-    for i in $(seq 1 "$n"); do
+    for i in $(host_order); do
       free_r=""; stale_r=""; kits_r=0; render_r=0
       for s in $(host_slots $i); do
         f=$(slot_file $s); hp=""
@@ -404,7 +420,7 @@ case "${1:-}" in
         exit 0
       }
       # This holder's own whole remote card first, so a read keeps its card between arms.
-      for i in $(seq 1 "$n"); do
+      for i in $(host_order); do
         own=1
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s")
@@ -412,7 +428,7 @@ case "${1:-}" in
         done
         [ "$own" = 1 ] && grant_remote_all "$i" "$(remote_host "$i")"
       done
-      for i in $(seq 1 "$n"); do
+      for i in $(host_order); do
         free=1
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s"); hp=""
@@ -642,7 +658,10 @@ case "${1:-}" in
     case "${2:?--on or --off}" in
       --on)
         [ -n "$REMOTE_CARD_HOST" ] || { echo "REFUSED: no remote card is named" >&2; exit 2; }
-        touch "$HARNESS_ONLY_FILE"; echo "HARNESS-ONLY on: harness ticks use $REMOTE_CARD_HOST alone; named holders keep every card" ;;
+        shift 2
+        for hh in "$@"; do printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -qxF "$hh" || { echo "REFUSED: $hh is not a remote card (lease.sh remote --add it first)" >&2; exit 2; }; done
+        printf '%s\n' "$@" | grep -v '^$' > "$HARNESS_ONLY_FILE" || true
+        echo "HARNESS-ONLY on: harness ticks use $( [ -s "$HARNESS_ONLY_FILE" ] && paste -sd' ' "$HARNESS_ONLY_FILE" || echo "$REMOTE_CARD_HOST") (first preferred); named holders keep every card" ;;
       --off) rm -f "$HARNESS_ONLY_FILE"; echo "HARNESS-ONLY off" ;;
       *) echo "usage: lease.sh harness-only --on | --off" >&2; exit 2 ;;
     esac
@@ -668,7 +687,7 @@ case "${1:-}" in
     for i in $(seq 1 "$(remote_count)"); do
       echo "remote card: $(remote_host $i) (slots $(host_slots $i | head -1)-$(host_slots $i | tail -1))"
     done
-    [ -e "$HARNESS_ONLY_FILE" ] && echo "harness ticks: $REMOTE_CARD_HOST only (local card and other remote cards left to named holders)"
+    [ -e "$HARNESS_ONLY_FILE" ] && echo "harness ticks: $( [ -s "$HARNESS_ONLY_FILE" ] && paste -sd' ' "$HARNESS_ONLY_FILE" || echo "$REMOTE_CARD_HOST") only, first preferred (the local card and any other card left to named holders)"
     local_off && echo "local card: off (every run goes to the remote card)" \
       && echo "local host: off (builds and tests go to the remote host)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do

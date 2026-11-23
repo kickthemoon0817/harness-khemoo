@@ -3,9 +3,9 @@
 The harness implements the owner-approved manure plan. The plan binds over everything else,
 including `runbook.md` and `design.md` where they conflict.
 
-## Hosts (owner, 2026-11-21)
+## Hosts (owner, 2026-11-21, 2026-11-23)
 
-Harness work runs on `worv@worv-worker-03.local` alone: kits, builds, tests, AOT, device suites and cost reads. Never ssh to, build on, run on or copy to any other host, `worv@10.50.1.6` and this host's own card included, even where a packet script, a resume recipe or an earlier tick names one. A recipe that names another host is run on worker-03 instead. `lease.sh harness-only` is on: an issue-number acquire sees worker-03 as its only card, and `remote-env.sh` routes a tick's docker there.
+Harness work runs on the remote cards alone: `worv@10.50.1.6` (RTX 5090, 24 GB) first, `worv@worv-worker-03.local` second. Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the 5090 first, a device or whole-card run takes the 5090, and `remote-env.sh` routes a tick's docker to the 5090. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
 ## What binds, in this order
 
@@ -177,7 +177,7 @@ overridden below.
      - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
        compile only) serves one compile at a time for every tick on this host. When it is held at all (operator,
        2026-11-16: a first waiter sat 40 minutes behind two compiles and missed its merge slot), or the local load1 is
-       past twice `nproc`, build and run host suites on a remote host instead: the first of `worv@10.50.1.6` and  (Superseded by "Hosts (owner, 2026-11-21)" above: worker-03 only.)
+       past twice `nproc`, build and run host suites on a remote host instead: the first of `worv@10.50.1.6` and  (See "Hosts" above.)
        `worv@worv-worker-03.local` whose `REMOTE_CARD_HOST=<host> bin/remote_room.sh` prints `ok` and whose card no
        cost read holds (`lease.sh status`: no live `remote-all` on its slots):
        `DOCKER_HOST=ssh://<host> PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
@@ -209,9 +209,9 @@ overridden below.
        - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run
          `bin/remote_room.sh` (`--render` for a rendering kit). Use the remote lane only when it prints `ok`; on `busy`
          run the work locally. A lease grants a remote slot under the same check.
-       - Two remote hosts take explicit runs: `worv@worv-worker-03.local` (16 GB card, shared) and `worv@10.50.1.6`  (Superseded by "Hosts (owner, 2026-11-21)" above: worker-03 only.)
+       - Two remote hosts take explicit runs: `worv@worv-worker-03.local` (16 GB card, shared) and `worv@10.50.1.6`  (See "Hosts" above.)
          (24 GB card, the faster CPU, usually free). Check a host with `REMOTE_CARD_HOST=<host> bin/remote_room.sh` and
-         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `worv@10.50.1.6` when both print `ok`.  (Superseded by "Hosts (owner, 2026-11-21)" above: worker-03 only.)
+         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `worv@10.50.1.6` when both print `ok`.  (See "Hosts" above.)
        - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@worv-worker-03.local
          PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
          `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
