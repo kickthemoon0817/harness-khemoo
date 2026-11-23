@@ -3,6 +3,10 @@
 The harness implements the owner-approved manure plan. The plan binds over everything else,
 including `runbook.md` and `design.md` where they conflict.
 
+## Hosts (owner, 2026-11-21)
+
+Harness work runs on `worv@worv-worker-03.local` alone: kits, builds, tests, AOT, device suites and cost reads. Never ssh to, build on, run on or copy to any other host, `worv@10.50.1.6` and this host's own card included, even where a packet script, a resume recipe or an earlier tick names one. A recipe that names another host is run on worker-03 instead. `lease.sh harness-only` is on: an issue-number acquire sees worker-03 as its only card, and `remote-env.sh` routes a tick's docker there.
+
 ## What binds, in this order
 
 1. **`PRINCIPLE.md`** of the plan — engine rules P1–P10, validation rules V1–V5 and V2a.
