@@ -7,6 +7,18 @@ including `runbook.md` and `design.md` where they conflict.
 
 Harness work runs on the remote cards alone: `worv@10.50.1.6` (RTX 5090, 24 GB) first, `worv@worv-worker-03.local` second. Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the 5090 first, a device or whole-card run takes the 5090, and `remote-env.sh` routes a tick's docker to the 5090. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
+Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
+
+| host | compile lock (`WORV_DEV_BUILD_LOCK=`) | suite lock (`flock`) |
+|---|---|---|
+| `worv@10.50.1.6` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
+| `worv@worv-worker-03.local` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
+
+- **Choosing a lane for a build or a suite.** Take the host whose lock is free. If both are free, take the one with the lower load1 per core (`ssh <host> cat /proc/loadavg; nproc`). If both are held, wait on the one with the shorter holder. Put that host in `DOCKER_HOST=ssh://<host>`.
+- `remote-env.sh`'s default route sends a bare `docker` to the 5090. A build or a suite on worker-03 names it explicitly.
+- The binaries and logs come back to the worktree from either host, so a build on one host and its kits on the other are fine.
+- A recipe in an older pause comment that names the single remote lock, or one host for a build, may use either lane. A kit still runs where its lease's export line points.
+
 ## What binds, in this order
 
 1. **`PRINCIPLE.md`** of the plan — engine rules P1–P10, validation rules V1–V5 and V2a.
