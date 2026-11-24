@@ -19,6 +19,28 @@ Each remote host is its own lane, with its own locks. The single remote lock nam
 - The binaries and logs come back to the worktree from either host, so a build on one host and its kits on the other are fine.
 - A recipe in an older pause comment that names the single remote lock, or one host for a build, may use either lane. A kit still runs where its lease's export line points.
 
+## Testing (owner, 2026-11-24): implement, then check only what changed
+
+The owner: "each job takes excessive testing time, just implement and only check the modified part". This section overrides every passage below, every issue's Acceptance and every operator comment that asks a change to prove more.
+
+**What a change runs before it lands:**
+- Build the touched extensions.
+- Run the test files the change touches or adds: `tools/test/run_doctest_sharded.sh --file '*<file>.cpp' <binary>`, and the touched Python unittests. A new or changed behaviour gets its own case. Where the Ask names a case that fails on the parent, show it red there once.
+- If device code changed (`kernels/`, `mpm/MpmGpuSolver.h`, or a device test file), rebuild the cubin. Run only the device cases of the touched test files, by name, under the device lease.
+- Run a scenario arm only when the change exists to move that scenario, such as a cost cut or a law change. Use the one targeted scenario, seed 1322, one parent arm and one change arm.
+  - A cost cut reads that pair's mean tick.
+  - A law change reads the numbers its Ask names on that pair. If the resting surface can change, add one render pair of that scenario.
+- The image gates that run in seconds: `p1_role_ratchet.py` and `extension_version_gate.py`.
+
+**What a change does not run:** the whole fast set, the whole device suite, RS1–RS6 identity arms, extra seeds, repeated cost sequences, kernel captures, or V5 beyond that one pair. `device_record.py check` may read stale on a change, and the full regression below rewrites the record.
+
+**Landing:**
+- Merge the head, rebuild, re-run the touched files, then push and merge.
+- If the head moved since the proof, re-run only the touched files. Nothing else is re-proven, unless the move changed one of the same files, in which case re-run that file's tests too.
+- A class B change still waits for the operator's sign-off, read on the evidence above.
+
+**The full regression** runs as its own issue, which the operator files about once a day: the whole fast set, the whole device suite and its record, and RS1–RS6 against the last full run's parent arms. A red there is filed against the landing that caused it.
+
 ## What binds, in this order
 
 1. **`PRINCIPLE.md`** of the plan — engine rules P1–P10, validation rules V1–V5 and V2a.
