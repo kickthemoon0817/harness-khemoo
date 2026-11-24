@@ -57,14 +57,15 @@ under_ceiling() {
     [ -n "$five" ] && [ -n "$week" ] && [ "$five" -lt "$at5" ] && [ "$week" -lt "$atw" ]
 }
 
-# Sets five, week, pct and allowed: the slot cap both rate-limit windows permit (MAX_SLOTS wide).
+# Sets five, week, pct and allowed: the slot cap both rate-limit windows permit, TICK_WIDTH wide
+# (default MAX_SLOTS). Slots past TICK_WIDTH and up to MAX_SLOTS are left for the landing tick.
 compute_allowed() {
     local a5 aw
     read_usage
     if [ -n "$five" ] && [ -n "$week" ]; then
         pct=$(( five > week ? five : week ))
-        a5=$(window_slots "$five" "$FIVE_HALF_AT" "$FIVE_ONE_AT" "$FIVE_NONE_AT" "$MAX_SLOTS")
-        aw=$(window_slots "$week" "$WEEK_HALF_AT" "$WEEK_ONE_AT" "$WEEK_NONE_AT" "$MAX_SLOTS")
+        a5=$(window_slots "$five" "$FIVE_HALF_AT" "$FIVE_ONE_AT" "$FIVE_NONE_AT" "${TICK_WIDTH:-$MAX_SLOTS}")
+        aw=$(window_slots "$week" "$WEEK_HALF_AT" "$WEEK_ONE_AT" "$WEEK_NONE_AT" "${TICK_WIDTH:-$MAX_SLOTS}")
         allowed=$(( a5 < aw ? a5 : aw ))
         under_ceiling || allowed=0
     else
