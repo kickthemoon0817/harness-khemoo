@@ -20,11 +20,14 @@ need_vram=$REMOTE_MIN_VRAM_MIB
 # --alone: the card runs no compute process and the host's load is low, as a cost read needs.
 if [ "${1:-}" = --alone ]; then
   need_vram=$REMOTE_MIN_VRAM_RENDER_MIB
-  read -r apps load < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    'printf "%s " "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"; cut -d" " -f1 /proc/loadavg' 2>/dev/null)
+  read -r apps load cores < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    'printf "%s " "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"; printf "%s " "$(cut -d" " -f1 /proc/loadavg)"; nproc' 2>/dev/null)
   [[ "$apps" =~ ^[0-9]+$ ]] || { echo "busy $host does not answer"; exit 1; }
   if [ "$apps" -gt 0 ]; then echo "busy $apps compute process(es) on the card"; exit 1; fi
-  if ! awk -v l="$load" -v m="${REMOTE_ALONE_MAX_LOAD:-6}" 'BEGIN { exit !(l + 0 < m + 0) }'; then echo "busy load1=$load"; exit 1; fi
+  # Quiet means load1 under half the host's cores, and never under REMOTE_ALONE_MAX_LOAD (6): the kit's
+  # main thread is what a cost read times, and a build on the other half of a wide host leaves it a core.
+  max_load=$(awk -v c="${cores:-0}" -v m="${REMOTE_ALONE_MAX_LOAD:-6}" 'BEGIN { h = c / 2; print (h > m ? h : m) }')
+  if ! awk -v l="$load" -v m="$max_load" 'BEGIN { exit !(l + 0 < m + 0) }'; then echo "busy load1=$load (quiet under $max_load)"; exit 1; fi
 fi
 read -r ram vram < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
   'awk "/MemAvailable/ {printf \"%d \", \$2 / 1024}" /proc/meminfo; nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1' \
