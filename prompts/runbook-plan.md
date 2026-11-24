@@ -39,6 +39,7 @@ The owner: "each job takes excessive testing time, just implement and only check
 - Merge the head, rebuild, re-run the touched files, then push and merge.
 - If the head moved since the proof, re-run only the touched files. Nothing else is re-proven, unless the move changed one of the same files, in which case re-run that file's tests too.
 - A class B change still waits for the operator's sign-off, read on the evidence above.
+- **This holds for class B landings and for the device record too.** A landing, of any class, never runs the whole fast set or the whole device suite, and never writes the device record. Older passages below that ask a class B landing or a batch-mate for them are overridden. If device code changed, run only the device cases of the touched device test files, by name.
 
 **The full regression** runs as its own issue, which the operator files about once a day: the whole fast set, the whole device suite and its record, and RS1–RS6 against the last full run's parent arms. A red there is filed against the landing that caused it.
 
