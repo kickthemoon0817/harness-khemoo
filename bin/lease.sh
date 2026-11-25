@@ -429,6 +429,8 @@ case "${1:-}" in
         [ "$own" = 1 ] && grant_remote_all "$i" "$(remote_host "$i")"
       done
       for i in $(host_order); do
+        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
+        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
         free=1
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s"); hp=""
