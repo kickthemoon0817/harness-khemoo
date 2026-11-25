@@ -56,6 +56,30 @@ model priority. Each tick runs on the first model that is not cooling down. A ti
 a model's usage limit marks it in `state/model-cooldown/` for `MODEL_COOLDOWN_S` (1800 s) and
 re-runs at once on the next model; the launcher spawns nothing while every model is cooling.
 
+**Remote hosts.** `bin/host_health.sh` (cron, every 3 minutes) probes each host in
+`state/locks/remote-card`: ssh connect time, upload rate (1 MB to `cat > /dev/null`), load,
+cores, and the card's utilisation and memory, one row a host in `state/host_health.tsv`. A
+host is degraded when it does not answer or uploads under `HOST_MIN_UPLOAD_MB_S` (5); it is
+demoted after 2 bad probes in a row and promoted after 3 good ones. With `lease.sh
+harness-only` on, the probe keeps the harness hosts to the operator's preference,
+`state/locks/harness-host-preference` (one host a line, seeded once from the harness-only
+list), with demoted hosts moved last, never dropped. It applies a changed order through `lease.sh
+harness-only --on` and logs it to `state/host_health.log`; a running tick keeps its host.
+To change the preferred order, edit the preference file: an order set with `lease.sh
+harness-only --on` alone is replaced on the next probe.
+
+**Stall alarm.** `bin/stall_watch.sh` (cron, every 5 minutes) appends `<UTC> STALL <kind>
+<key> <detail>` lines to `state/stalls.log`: `lock_wait`, a process waiting `STALL_LOCK_MIN`
+(15) minutes on a remote build or suite lock in `/tmp`, with what the holder is running;
+`gpu_idle`, a card at 0 % on every probe of `STALL_GPU_IDLE_MIN` (30) minutes while a lock
+has a waiter or the allocator's last line counts claimable work; `host_degraded`, once per
+demotion. A kind and key repeats at most every 30 minutes. It reads local state only.
+
+```
+*/3 * * * * /home/you/harness/bin/host_health.sh
+*/5 * * * * /home/you/harness/bin/stall_watch.sh
+```
+
 ## Quickstart
 
 ```bash
@@ -97,6 +121,8 @@ in-flight ticks finish on their own.
 | `state/model-cooldown/` | one stamp per model that hit its usage limit |
 | `bin/slow_set.sh` | cron every 3 h: the whole doctest set, `[slow]` included, once per branch head; a red head files one issue naming the merge range |
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
+| `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
+| `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
 
 ## Documentation
 

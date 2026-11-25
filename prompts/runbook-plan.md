@@ -5,7 +5,7 @@ including `runbook.md` and `design.md` where they conflict.
 
 ## Hosts (owner, 2026-11-21, 2026-11-23)
 
-Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) first, `worv@10.50.1.6` (RTX 5090, 24 GB) second (operator, 2026-11-25: the 5090's link carries about 0.1 MB/s, so a build or arm that copies a tree there waits on the copy; send it only work that copies little, such as a device case on a staged copy, until `lease.sh harness-only` names it first again). Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
+Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) and `worv@10.50.1.6` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; a build or arm that copies a tree goes to the first host. Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
 Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
 
@@ -16,7 +16,7 @@ Each remote host is its own lane, with its own locks. The single remote lock nam
 
 - **Never build or run a suite on a host whose card a cost read holds** (`lease.sh status`: a live `remote-all` on its slots). Use the other host's lane, so the read times the engine and not a compile.
 - **Choosing a lane for a build or a suite.** Take the host whose lock is free. If both are free, take the one with the lower load1 per core (`ssh <host> cat /proc/loadavg; nproc`). If both are held, wait on the one with the shorter holder. Put that host in `DOCKER_HOST=ssh://<host>`.
-- `remote-env.sh`'s default route sends a bare `docker` to the 5090. A build or a suite on worker-03 names it explicitly.
+- `remote-env.sh`'s default route sends a bare `docker` to the first host as the order stood when the tick started. A build or a suite on the other host names it explicitly.
 - The binaries and logs come back to the worktree from either host, so a build on one host and its kits on the other are fine.
 - A recipe in an older pause comment that names the single remote lock, or one host for a build, may use either lane. A kit still runs where its lease's export line points.
 
