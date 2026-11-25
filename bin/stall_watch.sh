@@ -5,7 +5,9 @@
 #       suite lock (STALL_LOCK_GLOBS); the detail names the waiters and what the holder runs,
 #       and when the holder waits on a remote-docker tree lock, that lock's holder and its copy
 #   <UTC ISO> STALL gpu_idle <host> <detail>
-#       a card read 0 % on every bin/host_health.sh probe of the last STALL_GPU_IDLE_MIN (30)
+#       a host idle on every bin/host_health.sh probe of the last STALL_GPU_IDLE_MIN (30)
+#       minutes, its card at 0 % and its load under a quarter of its cores (a host compiling
+#       is busy, though its card idles),
 #       minutes while a process waits on one of those locks, or while the allocator's last
 #       line in state/logs/allocator.log counts claimable work; not for a host
 #       bin/host_health.sh has moved last, whose host_degraded alert already says why it idles
@@ -174,13 +176,14 @@ claimable=$(sed -n 's/.*claimable=\([0-9][0-9]*\).*/\1/p' <<< "$alloc")
 if [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable:-0}" -gt 0 ]; }; then
   cutoff=$(date -u -d "@$(( now - STALL_GPU_IDLE_MIN * 60 ))" +%FT%TZ)
   half=$(date -u -d "@$(( now - STALL_GPU_IDLE_MIN * 30 ))" +%FT%TZ)
-  # A host counts when every row in the window reads 0 % and the rows reach back over half of it.
+  # A host counts when every row in the window reads its card at 0 % and its load under a
+  # quarter of its cores, and the rows reach back over half of the window.
   while read -r h n mem; do
     [ -n "${demoted[$h]:-}" ] && continue
-    alert gpu_idle "$h" "0 % on all $n probes of the last $STALL_GPU_IDLE_MIN min (memory used ${mem} MiB) while $waiters_total lock waiter(s) and allocator line '${alloc:-none}'"
+    alert gpu_idle "$h" "card 0 % and load under a quarter of the cores on all $n probes of the last $STALL_GPU_IDLE_MIN min (memory used ${mem} MiB) while $waiters_total lock waiter(s) and allocator line '${alloc:-none}'"
   done < <(awk -F'\t' -v c="$cutoff" -v half="$half" '
       $1 == "time" || $1 < c { next }
-      { n[$2]++; mem[$2] = $8; if (!($2 in first) || $1 < first[$2]) first[$2] = $1; if ($7 != "0") busy[$2] = 1 }
+      { n[$2]++; mem[$2] = $8; if (!($2 in first) || $1 < first[$2]) first[$2] = $1; if ($7 != "0" || ($6 + 0 > 0 && $5 + 0 >= $6 / 4)) busy[$2] = 1 }
       END { for (h in n) if (!(h in busy) && first[h] <= half) print h, n[h], mem[h] }' "$S/host_health.tsv")
 fi
 
