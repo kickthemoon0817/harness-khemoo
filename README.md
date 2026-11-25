@@ -123,6 +123,32 @@ in-flight ticks finish on their own.
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
+| `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
+
+## Scenario arm queues
+
+A tick runs simulator arms through `bin/arm_queue.sh`, launched detached and polled, never through a
+copy of a runner. The packet holds the queue file, the inputs and the outputs:
+
+```bash
+setsid nohup bin/arm_queue.sh --issue <N> --packet "$PKT" --queue "$PKT/arms.queue" \
+    --deadline <epoch> --acquire-args "--all-remote" --collect /tmp/census.csv >/dev/null 2>&1 &
+```
+
+Each queue line is `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags`, with commas
+inside a field (`--no-moments,--through-sim-s,13`). The script holds the lease as its own PID
+(`LEASE_HOLDER_PID=$$`), polls `lease.sh acquire` until granted or the deadline, brings each tree up
+with `iter.sh up` and `iter.sh sidecar`, renews the lease between arms and polls again after a
+`YIELDED`, and on every exit, a `TERM` included, stops its container and releases. It writes
+`<packet>/runs/status` in the arm queues' format (`<arm> start`, `<arm> rc=<n> end`, `skipped`,
+`void<n>`, `STOP before`, `DEADLINE before`, `ALLDONE`), whose last line is always
+`RELEASED <queue> <time>`, beside `lease.log`, `queue.log` and each arm's `.out` and card-memory log.
+A STOP file in the packet ends the queue before its next arm. A kit crash or GPU out-of-memory
+voids an arm and runs it once more. A parent arm names `evidence/parent-<base9>` as its outdir:
+an empty folder there is the tick's mkdir claim, a missing one is claimed, a full one is skipped.
+`bin/arm_queue.sh --help` lists the options: the whole-card host (`--want-host`), the margins,
+the baseline runner, files to collect, host load sampling and the head check.
+`tests/test_arm_queue.sh` runs it against fake lease, iter, docker, card and host commands.
 
 ## Documentation
 
