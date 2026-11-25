@@ -19,7 +19,7 @@ export T CTR CALLS HARNESS_HOME=$H
 #   local         a local slot (no DOCKER_HOST); busy / yield  a refusal (exit 1)
 cat > "$H/bin/lease.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "lease $* holder=${LEASE_HOLDER_PID:-}" >> "$CALLS"
+echo "lease $* want=${LEASE_WANT_HOST:-} holder=${LEASE_HOLDER_PID:-}" >> "$CALLS"
 case "$1" in
   acquire)
     reply=$(head -1 "$T/lease.seq" 2>/dev/null)
@@ -252,6 +252,8 @@ new_case "$A|RS1-c|RS1|||||"
 printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host worv@hostA; rc=$?
 check "--want-host releases a grant on another host and keeps polling" \
   '[ "$rc" -eq 0 ] && grep -q "grant on worv@hostB, not worv@hostA: released" "$P/runs/lease.log" && [ "$(at "lease release")" -lt "$(at "lease acquire" 2)" ] && grep -q "container=iter-hostA" "$CALLS" && [ "$(n_calls "iter-hostB")" -eq 0 ]' "rc=$rc $(calls)"
+check "--want-host asks the lease for that host alone" \
+  'grep -q "lease acquire 2464 .*want=worv@hostA" "$CALLS" && ! grep "lease acquire" "$CALLS" | tail -1 | grep -q "want= "' "$(calls)"
 
 new_case "$A|RS1-c|RS1|||||"
 run_q --runner baseline --host-load; rc=$?

@@ -28,7 +28,8 @@
 #   --runs SUBDIR          the packet's runs folder (default runs)
 #   --collect P1,P2        container paths removed before each arm and copied to <arm>/ after it
 #                          (files or folders: /tmp/census.csv,/tmp/worv_support_probe)
-#   --want-host HOST       keep only a grant on this remote host (user@host, or local); a grant
+#   --want-host HOST       keep only a grant on this remote host (user@host, or local), and ask a
+#                          whole-card grant for that host alone (LEASE_WANT_HOST); a grant
 #                          elsewhere is released and the poll goes on (default any)
 #   --lease-margin S       stop polling for a lease S seconds before the deadline (default 600)
 #   --arm-seconds S        an arm's seconds when its line leaves them empty (default 540)
@@ -200,7 +201,8 @@ poll_lease() {
   local out rc host
   while :; do
     if stopped; then echo "STOP while waiting$1 $(ts)" >> "$ST"; return 1; fi
-    out=$("$L" acquire "$issue" "${acq[@]}" 2>&1); rc=$?
+    if [ "$want" = any ] || [ "$want" = local ]; then out=$("$L" acquire "$issue" "${acq[@]}" 2>&1); rc=$?
+    else out=$(LEASE_WANT_HOST=$want "$L" acquire "$issue" "${acq[@]}" 2>&1); rc=$?; fi
     echo "$(ts) $out" >> "$LEASE_LOG"
     if [ $rc -eq 0 ] && [[ "$out" == *ACQUIRED* ]] && printf '%s\n' "$out" | grep -q '^export '; then
       host=$(printf '%s\n' "$out" | grep -o 'remote=[^ ]*' | head -1); host=${host#remote=}
