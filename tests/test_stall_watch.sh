@@ -50,6 +50,23 @@ awk -v t="$(( $(date +%s) - 31 * 60 ))" -v b="$B" '$1 == "lock_wait" && $2 == b 
 STALL_LOCK_MIN=0 "$W"
 check "a lock still waited on is raised again once the window has passed" '[ "$(count "lock_wait $B ")" -eq 2 ] && [ "$(count "lock_wait $F ")" -eq 1 ]' "$(stalls)"
 
+# A build holds its compile lock while its remote-docker shim waits on a tree lock that
+# another shim holds for a copy to a slow host: the alarm follows the tree lock one step.
+mkdir -p "$H/lk2" "$H/run/remote-docker-locks"
+C="$H/lk2/worv-dev-build-remote-w03.lock"; T="$H/run/remote-docker-locks/0123456789abcdef.lock"
+bash -c 'exec 7>"$1"; flock 7; "$2" -a --delete -e "ssh -o BatchMode=yes" /w/tree worv@slow.host:/w/; :' _ "$T" "$H/fake/rsync" > /dev/null 2>&1 & tree_holder=$!; pids+=("$tree_holder")
+sleep 0.3
+bash -c 'exec 8>"$1"; flock 8; exec 7>"$2"; flock -x 7; :' _ "$C" "$T" > /dev/null 2>&1 & build=$!; pids+=("$build")
+sleep 0.3
+flock "$C" true & pids+=($!)
+sleep 0.5
+STALL_LOCK_MIN=0 STALL_LOCK_GLOBS="$H/lk2/*.lock" "$W"
+line=$(stalls | grep " STALL lock_wait $C ")
+check "a holder blocked on a tree lock names that lock and its holder" '[[ "$line" == *"holder pid $build, up 0 min"* ]] && [[ "$line" == *"; blocked: pid "*" waits on tree lock $T, held by pid $tree_holder, up 0 min ("* ]]' "$line"
+check "the tree lock holder's copy is named with its target host and age" '[[ "$line" == *"it is doing: "*"rsync -a --delete -e ssh -o BatchMode=yes /w/tree worv@slow.host:/w/ (0 min)"* ]]' "$line"
+STALL_LOCK_MIN=0 STALL_LOCK_GLOBS="$H/lk/*.lock" "$W"
+check "a holder that waits on no tree lock names no block" '! stalls | grep " STALL lock_wait $H/lk/" | grep -q "blocked:"' "$(stalls)"
+
 # gpu_idle reads the probe table and the allocator log.
 iso() { date -u -d "-$1 min" +%FT%TZ; }
 {

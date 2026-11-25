@@ -2,7 +2,8 @@
 # Appends a line to state/stalls.log for each stall no GitHub event shows:
 #   <UTC ISO> STALL lock_wait <lock> <detail>
 #       a process has waited STALL_LOCK_MIN (15) minutes or more on a remote build or
-#       suite lock (STALL_LOCK_GLOBS); the detail names the waiters and what the holder runs
+#       suite lock (STALL_LOCK_GLOBS); the detail names the waiters and what the holder runs,
+#       and when the holder waits on a remote-docker tree lock, that lock's holder and its copy
 #   <UTC ISO> STALL gpu_idle <host> <detail>
 #       a card read 0 % on every bin/host_health.sh probe of the last STALL_GPU_IDLE_MIN (30)
 #       minutes while a process waits on one of those locks, or while the allocator's last
@@ -51,7 +52,11 @@ alert() {  # <kind> <key> <detail> [token]
   echo "$iso STALL $1 $2 $3" >> "$OUT"
   last[$id]=$now; token[$id]=$tok; alerted=1
 }
-clip() { local s=${1//$'\n'/ }; [ "${#s}" -gt 160 ] && s="${s:0:157}..."; printf '%s' "$s"; }
+clip() {  # <text> [width]
+  local s=${1//$'\n'/ } w=${2:-160}
+  [ "${#s}" -gt "$w" ] && s="${s:0:$(( w - 3 ))}..."
+  printf '%s' "$s"
+}
 
 # Every process once: parent, age and command line.
 declare -A ppid=() age=() args=() kids=()
@@ -64,6 +69,55 @@ done < <(timeout 20 ps -e -ww -o pid=,ppid=,etimes=,args= 2>/dev/null)
 # holds it; the processes holding it are the ones whose descriptor on the file
 # carries a lock line in /proc/<pid>/fdinfo.
 locks=$(timeout 20 lslocks -r -n -o PID,INODE,MAJ:MIN,BLOCKER 2>/dev/null)
+declare -A wait_on=()
+while read -r p i d b; do [ -n "${b:-}" ] && wait_on[$p]="$i $d"; done <<< "$locks"
+
+# root_holder <file>: the holder of the file's lock whose parent does not hold it, if one is found.
+root_holder() {
+  local p fd
+  local -A holds=()
+  for p in $(timeout 20 fuser "$1" 2>/dev/null | tr -cs '0-9' ' '); do
+    for fd in /proc/"$p"/fd/*; do
+      [ "$(readlink "$fd" 2>/dev/null)" = "$1" ] && grep -q '^lock:' "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null && holds[$p]=1
+    done
+  done
+  for p in "${!holds[@]}"; do
+    [ -n "${holds[${ppid[$p]:-0}]:-}" ] || { echo "$p"; return; }
+  done
+}
+# descendants <pid>: deepest first, so the leaves, what it is doing now, lead.
+descendants() {
+  local level=$1 depth=0 found="" next q
+  while [ -n "${level// /}" ] && [ "$depth" -lt 12 ]; do
+    next=""
+    for q in $level; do next+="${kids[$q]:-}"; done
+    found="$next $found"; level=$next; depth=$(( depth + 1 ))
+  done
+  printf '%s' "$found"
+}
+# doing <pid> [width ages]: up to four of its descendants' command lines, with their ages when asked.
+doing() {
+  local out="" n=0 q c
+  for q in $(descendants "$1"); do
+    [[ "${args[$q]:-}" =~ ^(/usr/bin/)?sleep\ [0-9.]+$ ]] && continue
+    c=$(clip "${args[$q]:-?}" "${2:-160}")
+    [ -n "${3:-}" ] && c+=" ($(( ${age[$q]:-0} / 60 )) min)"
+    [[ " | $out | " == *" | $c | "* ]] && continue
+    out+="${out:+ | }$c"; n=$(( n + 1 ))
+    [ "$n" -ge 4 ] && break
+  done
+  printf '%s' "$out"
+}
+# waited_lock <pid>: the file a waiting process waits on, found among its own descriptors.
+waited_lock() {
+  local want=${wait_on[$1]:-} fd f
+  [ -n "$want" ] || return 0
+  for fd in /proc/"$1"/fd/*; do
+    f=$(readlink "$fd" 2>/dev/null) || continue
+    [ -f "$f" ] && [ "$(stat -c '%i %Hd:%Ld' "$f" 2>/dev/null)" = "$want" ] && { printf '%s' "$f"; return 0; }
+  done
+}
+
 waiters_total=0
 for pattern in $STALL_LOCK_GLOBS; do
   for f in $pattern; do
@@ -84,37 +138,28 @@ for pattern in $STALL_LOCK_GLOBS; do
       [ "$a" -ge $(( STALL_LOCK_MIN * 60 )) ] && over=$(( over + 1 ))
     done
     [ "$over" -gt 0 ] || continue
-    declare -A holds=()
-    for p in $(timeout 20 fuser "$f" 2>/dev/null | tr -cs '0-9' ' '); do
-      for fd in /proc/"$p"/fd/*; do
-        [ "$(readlink "$fd" 2>/dev/null)" = "$f" ] && grep -q '^lock:' "/proc/$p/fdinfo/${fd##*/}" 2>/dev/null && holds[$p]=1
-      done
-    done
-    holder="holder not found"
-    doing=""
-    for p in "${!holds[@]}"; do
-      [ -n "${holds[${ppid[$p]:-0}]:-}" ] && continue
+    holder="holder not found"; acts=""; blocked=""
+    p=$(root_holder "$f")
+    if [ -n "$p" ]; then
       holder="holder pid $p, up $(( ${age[$p]:-0} / 60 )) min ($(clip "${args[$p]:-?}"))"
-      # The holder's descendants, deepest first: the leaves show what it is doing now.
-      level=$p; depth=0; found=""
-      while [ -n "${level// /}" ] && [ "$depth" -lt 12 ]; do
-        next=""
-        for q in $level; do next+="${kids[$q]:-}"; done
-        found="$next $found"; level=$next; depth=$(( depth + 1 ))
+      acts=$(doing "$p")
+      # A holder whose remote-docker shim waits on a tree lock (bin/remote-docker/docker) is
+      # blocked by that lock's holder, usually a copy to a remote host: name it and its age.
+      for q in $(descendants "$p"); do
+        t=$(waited_lock "$q")
+        [[ "$t" == */remote-docker-locks/*.lock ]] || continue
+        th=$(root_holder "$t")
+        if [ -n "$th" ]; then
+          ta=$(doing "$th" 240 ages)
+          blocked="; blocked: pid $q waits on tree lock $t, held by pid $th, up $(( ${age[$th]:-0} / 60 )) min ($(clip "${args[$th]:-?}"))${ta:+; it is doing: $ta}"
+        else
+          blocked="; blocked: pid $q waits on tree lock $t, holder not found"
+        fi
+        break
       done
-      n=0
-      for q in $found; do
-        [[ "${args[$q]:-}" =~ ^(/usr/bin/)?sleep\ [0-9.]+$ ]] && continue
-        c=$(clip "${args[$q]:-?}")
-        [[ " | $doing | " == *" | $c | "* ]] && continue
-        doing+="${doing:+ | }$c"; n=$(( n + 1 ))
-        [ "$n" -ge 4 ] && break
-      done
-      break
-    done
-    unset holds
+    fi
     [ -n "$locker" ] && [ ! -e "/proc/$locker" ] && holder+=", lslocks names locker pid $locker (dead)"
-    alert lock_wait "$f" "${#waiters[@]} waiting (pids ${waiters[*]}), $over of them ${STALL_LOCK_MIN}+ min, longest $(( longest / 60 )) min; $holder${doing:+; doing: $doing}"
+    alert lock_wait "$f" "${#waiters[@]} waiting (pids ${waiters[*]}), $over of them ${STALL_LOCK_MIN}+ min, longest $(( longest / 60 )) min; $holder${acts:+; doing: $acts}$blocked"
   done
 done
 
