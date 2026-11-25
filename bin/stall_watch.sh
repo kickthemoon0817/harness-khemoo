@@ -7,7 +7,8 @@
 #   <UTC ISO> STALL gpu_idle <host> <detail>
 #       a card read 0 % on every bin/host_health.sh probe of the last STALL_GPU_IDLE_MIN (30)
 #       minutes while a process waits on one of those locks, or while the allocator's last
-#       line in state/logs/allocator.log counts claimable work
+#       line in state/logs/allocator.log counts claimable work; not for a host
+#       bin/host_health.sh has moved last, whose host_degraded alert already says why it idles
 #   <UTC ISO> STALL host_degraded <host> <detail>
 #       bin/host_health.sh has moved the host last; once per demotion
 # A kind and key is alerted again at most every STALL_REALERT_MIN (30) minutes.
@@ -164,6 +165,10 @@ for pattern in $STALL_LOCK_GLOBS; do
 done
 
 # gpu_idle: the work waiting is a lock waiter or the allocator's last claimable count.
+declare -A demoted=()
+if [ -r "$S/host_health.streaks" ]; then
+  while read -r h st _; do [ "$st" = demoted ] && demoted[$h]=1; done < "$S/host_health.streaks"
+fi
 alloc=$(grep 'claimable=' "$S/logs/allocator.log" 2>/dev/null | tail -1)
 claimable=$(sed -n 's/.*claimable=\([0-9][0-9]*\).*/\1/p' <<< "$alloc")
 if [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable:-0}" -gt 0 ]; }; then
@@ -171,6 +176,7 @@ if [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable
   half=$(date -u -d "@$(( now - STALL_GPU_IDLE_MIN * 30 ))" +%FT%TZ)
   # A host counts when every row in the window reads 0 % and the rows reach back over half of it.
   while read -r h n mem; do
+    [ -n "${demoted[$h]:-}" ] && continue
     alert gpu_idle "$h" "0 % on all $n probes of the last $STALL_GPU_IDLE_MIN min (memory used ${mem} MiB) while $waiters_total lock waiter(s) and allocator line '${alloc:-none}'"
   done < <(awk -F'\t' -v c="$cutoff" -v half="$half" '
       $1 == "time" || $1 < c { next }

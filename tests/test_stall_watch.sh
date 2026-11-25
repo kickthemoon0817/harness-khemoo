@@ -91,6 +91,11 @@ echo "20261125T111000Z five=0% week=28% allowed=10 busy=4 claimable=0 -> spawnin
 rm -f "$S/stall_watch.seen"
 STALL_LOCK_MIN=15 "$W"
 check "a lock waiter counts as work waiting for an idle card" '[ "$(count "STALL gpu_idle idle@a ")" -eq 2 ] && stalls | tail -1 | grep -q "while 3 lock waiter(s)"' "$(stalls)"
+printf 'idle@a demoted 2 0 1764000000\n' > "$S/host_health.streaks"
+rm -f "$S/stall_watch.seen"
+STALL_LOCK_MIN=15 "$W"
+check "a card on a host the probe moved last raises no gpu_idle" '[ "$(count "STALL gpu_idle idle@a ")" -eq 2 ]' "$(stalls)"
+rm -f "$S/host_health.streaks"
 
 # host_degraded reads bin/host_health.sh's streaks.
 rm -f "$S/stalls.log" "$S/stall_watch.seen"
