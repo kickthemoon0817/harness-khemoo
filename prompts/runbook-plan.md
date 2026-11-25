@@ -5,7 +5,7 @@ including `runbook.md` and `design.md` where they conflict.
 
 ## Hosts (owner, 2026-11-21, 2026-11-23)
 
-Harness work runs on the remote cards alone: `worv@10.50.1.6` (RTX 5090, 24 GB) first, `worv@worv-worker-03.local` second. Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the 5090 first, a device or whole-card run takes the 5090, and `remote-env.sh` routes a tick's docker to the 5090. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
+Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) first, `worv@10.50.1.6` (RTX 5090, 24 GB) second (operator, 2026-11-25: the 5090's link carries about 0.1 MB/s, so a build or arm that copies a tree there waits on the copy; send it only work that copies little, such as a device case on a staged copy, until `lease.sh harness-only` names it first again). Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
 Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
 
