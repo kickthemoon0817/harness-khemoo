@@ -64,7 +64,7 @@ demoted after 2 bad probes in a row and promoted after 3 good ones. With `lease.
 harness-only` on, the probe keeps the harness hosts to the operator's preference,
 `state/locks/harness-host-preference` (one host a line, seeded once from the harness-only
 list), with demoted hosts moved last, never dropped. It applies a changed order through `lease.sh
-harness-only --on` and logs it to `state/logs/host_health.log`; a running tick keeps its host.
+harness-only --on` and logs it to `state/host_health.log`; a running tick keeps its host.
 To change the preferred order, edit the preference file: an order set with `lease.sh
 harness-only --on` alone is replaced on the next probe.
 

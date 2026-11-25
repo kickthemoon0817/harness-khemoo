@@ -79,7 +79,7 @@ calls() { cat "$H/lease.calls" 2>/dev/null | grep -c harness-only; }
 only() { paste -sd' ' "$L/harness-first-remote-only"; }
 
 "$HH"
-check "the preference is seeded from the harness-only list when absent" '[ "$(paste -sd" " "$L/harness-host-preference")" = "slow@two fast@one" ] && grep -q "preference seeded" "$S/logs/host_health.log"' "$(cat "$L/harness-host-preference" "$S/logs/host_health.log" 2>&1)"
+check "the preference is seeded from the harness-only list when absent" '[ "$(paste -sd" " "$L/harness-host-preference")" = "slow@two fast@one" ] && grep -q "preference seeded" "$S/host_health.log"' "$(cat "$L/harness-host-preference" "$S/host_health.log" 2>&1)"
 check "a row a host is appended under a header, nine columns each" '[ "$(wc -l < "$S/host_health.tsv")" -eq 3 ] && [ "$(head -1 "$S/host_health.tsv" | cut -f1)" = time ] && awk -F"\t" "NF != 9 { exit 1 }" "$S/host_health.tsv"' "$(cat "$S/host_health.tsv")"
 check "a healthy host reads ok with its load, cores and card" 'awk -F"\t" "\$2 == \"fast@one\" && \$5 == \"1.50\" && \$6 == 16 && \$7 == 0 && \$8 == 1234 && \$9 == \"ok\" && \$4 + 0 >= 1 { f = 1 } END { exit !f }" "$S/host_health.tsv"' "$(cat "$S/host_health.tsv")"
 check "with every host healthy and the order as preferred nothing is applied" '[ "$(calls)" -eq 0 ]' "$(cat "$H/lease.calls" 2>/dev/null)"
@@ -89,21 +89,21 @@ check "one slow probe leaves the order alone" '[ "$(calls)" -eq 0 ] && [ "$(only
 check "a slow upload is recorded as slow with its rate" 'tail -2 "$S/host_health.tsv" | awk -F"\t" "\$2 == \"slow@two\" && \$9 == \"slow\" && \$4 + 0 < 1 { f = 1 } END { exit !f }"' "$(tail -2 "$S/host_health.tsv")"
 FAKE_SLOW=slow@two "$HH"
 check "the second slow probe applies the new order through lease.sh" '[ "$(calls)" -eq 1 ] && grep -qx "harness-only --on fast@one slow@two" "$H/lease.calls" && [ "$(only)" = "fast@one slow@two" ]' "$(cat "$H/lease.calls" 2>/dev/null) / $(only)"
-check "the change is logged once with its reason" '[ "$(grep -c " order " "$S/logs/host_health.log")" -eq 1 ] && grep -q "order slow@two fast@one -> fast@one slow@two; slow@two degraded after 2 bad probes (slow, upload" "$S/logs/host_health.log"' "$(cat "$S/logs/host_health.log")"
+check "the change is logged once with its reason" '[ "$(grep -c " order " "$S/host_health.log")" -eq 1 ] && grep -q "order slow@two fast@one -> fast@one slow@two; slow@two degraded after 2 bad probes (slow, upload" "$S/host_health.log"' "$(cat "$S/host_health.log")"
 check "the preference is left as the operator's" '[ "$(paste -sd" " "$L/harness-host-preference")" = "slow@two fast@one" ]' "$(cat "$L/harness-host-preference")"
 FAKE_SLOW=slow@two HOST_UPLOAD_TIMEOUT_S=1 "$HH"
 check "an upload past its timeout reads timeout and keeps the host last, applying nothing" '[ "$(calls)" -eq 1 ] && tail -2 "$S/host_health.tsv" | grep -q "slow@two.*timeout.*slow$"' "$(tail -2 "$S/host_health.tsv")"
 "$HH"; "$HH"
 check "two good probes do not bring the host back" '[ "$(calls)" -eq 1 ] && [ "$(only)" = "fast@one slow@two" ]' "$(only)"
 "$HH"
-check "the third good probe restores the preference" '[ "$(calls)" -eq 2 ] && [ "$(only)" = "slow@two fast@one" ] && grep -q "slow@two healthy after 3 good probes" "$S/logs/host_health.log"' "$(cat "$S/logs/host_health.log")"
+check "the third good probe restores the preference" '[ "$(calls)" -eq 2 ] && [ "$(only)" = "slow@two fast@one" ] && grep -q "slow@two healthy after 3 good probes" "$S/host_health.log"' "$(cat "$S/host_health.log")"
 
 FAKE_DOWN=fast@one "$HH"
 check "a host that does not answer reads down with no measurements" 'tail -2 "$S/host_health.tsv" | grep -qP "^\S+\tfast@one\t-\t-\t-\t-\t-\t-\tdown$"' "$(tail -2 "$S/host_health.tsv")"
 
 printf 'fast@one\nslow@two\n' > "$L/harness-host-preference"; rm -f "$S/host_health.streaks"
 "$HH"
-check "an operator's new preference is applied on the next probe" '[ "$(calls)" -eq 3 ] && [ "$(only)" = "fast@one slow@two" ] && grep -q "the harness-only list was not the preference" "$S/logs/host_health.log"' "$(cat "$S/logs/host_health.log")"
+check "an operator's new preference is applied on the next probe" '[ "$(calls)" -eq 3 ] && [ "$(only)" = "fast@one slow@two" ] && grep -q "the harness-only list was not the preference" "$S/host_health.log"' "$(cat "$S/host_health.log")"
 
 rm -f "$L/harness-first-remote-only" "$S/host_health.streaks" "$L/harness-host-preference"
 FAKE_SLOW=fast@one "$HH"; FAKE_SLOW=fast@one "$HH"

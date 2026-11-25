@@ -16,7 +16,8 @@
 # takes work that copies little. Absent, the preference is seeded once from the
 # current harness-only list. bin/host_order.sh holds the policy and
 # state/host_health.streaks the per-host streaks. A changed order is applied
-# through `lease.sh harness-only --on` and logged to state/logs/host_health.log;
+# through `lease.sh harness-only --on` and logged to state/host_health.log, outside
+# state/logs so tick.sh's newest-files pruning never drops it;
 # the slots and leases are never touched, and a running tick keeps the host it
 # started on. With harness-only off the probe still records its rows and streaks.
 set -u
@@ -36,7 +37,7 @@ TSV="$HARNESS_STATE/host_health.tsv"
 STREAKS="$HARNESS_STATE/host_health.streaks"
 PREF="$LOCKS/harness-host-preference"
 ONLY="$LOCKS/harness-first-remote-only"
-LOG="$HARNESS_STATE/logs/host_health.log"
+LOG="$HARNESS_STATE/host_health.log"
 mkdir -p "$LOCKS" "$HARNESS_STATE/logs"
 exec 9>"$LOCKS/host_health.lock"; flock -n 9 || exit 0
 
