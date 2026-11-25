@@ -36,6 +36,7 @@ The owner: "each job takes excessive testing time, just implement and only check
   - A cost cut reads that pair's mean tick.
   - A law change reads the numbers its Ask names on that pair. If the resting surface can change, add one render pair of that scenario.
 - The image gates that run in seconds: `p1_role_ratchet.py` and `extension_version_gate.py`.
+- **A law change on by default is the exception (operator, 2026-11-25).** A change that is on by default and edits the material law (`mpm/MpmMaterial.h`, the constitutive return and its strength knots) or the contact law (`CouplingBoundary.h`, the guard, the exchange's convert and return) moves every behaviour case, so its touched part is the whole host `test_manure_spec` set, `[slow]` included, host only, before it lands. A change behind a setting that is off by default keeps the touched-file rule; the full host set runs when the default is turned on.
 
 **What a change does not run:** the whole fast set, the whole device suite, RS1–RS6 identity arms, extra seeds, repeated cost sequences, kernel captures, or V5 beyond that one pair. `device_record.py check` may read stale on a change, and the full regression below rewrites the record.
 
