@@ -151,7 +151,7 @@ overridden below.
    the runner kills the kit at collect, so no queue waits on a kit stop either.
    **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
    only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
-   readers and queue scripts (`.py`, `.sh`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
+   readers and scripts (`.py`, `.sh`), queue files (`.queue`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
    artifacts packet and are never committed: suite and build logs, boot checks, comparison dumps, status files, state
    series (`.log`, `.txt`, `.jsonl`, `.out`, `.pid`, `status`). The main repository's `info/exclude` skips them; never
    `git add -f` one. `INDEX.md` gives every number the sign-off or the landing reads, so nothing it cites must be opened.
@@ -279,12 +279,12 @@ overridden below.
      - **Every scenario arm mounts `worv.core.scene` from its own tree, parent arms included,** until the runtime image is
        rebuilt from `ai/manure-mpm` (owner's release step). The image bakes master's 0.5.4, which lacks #1636's
        external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
-       side only parts at the pile's build (#1682). Put it in `BASE_EXTS`. `tools/eval/series_compare.py` voids a pair
+       side only parts at the pile's build (#1682). `bin/arm_queue.sh`'s default `--base-exts` mounts it. `tools/eval/series_compare.py` voids a pair
        whose kits loaded different builds of an extension.
      - **Every scenario arm mounts `worv.core.utils` from its own tree too, parent arms included,** once #1750 has
        landed and until the image is rebuilt. RS6's ground is an `omniverse://` URL. The image's 0.2.2 reduces it to its
-       basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. Put it
-       in `BASE_EXTS` beside `worv.core.scene`.
+       basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. The
+       default `--base-exts` mounts it beside `worv.core.scene`.
      - **A per-point impulse from PhysX's contact report is not evidence where a pair has more than one friction
        patch** (#1754). The report lists points in narrowphase order, while the solver writes impulses in patch
        order. Read per-pair totals, and per-point separations and normals. A per-point attribution needs a diagnosis
@@ -293,10 +293,16 @@ overridden below.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
-     - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
-       `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
-       - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
-         kills `topics` mid-replacement, and every arm dies without a kit. Docker over ssh widens that window.
+     - **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
+       (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
+       and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
+       `setsid nohup <harness>/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue
+       --deadline <epoch> [--acquire-args "--all-remote"] [--collect /tmp/<file>,…] >/dev/null 2>&1 &`.
+       - Poll `<packet>/runs/status` until its last line is `RELEASED`. Exit 4 is no lease by the deadline, 3 an early
+         end (STOP, the deadline, a lost lease).
+       - `--help` lists the rest: a wanted host for a whole remote card, the margins, the baseline runner
+         (`--runner baseline`), host load sampling and the head check.
+       - A second queue of the issue runs as its own process with its own queue file, and takes its own slot.
    - **A class B render session takes one slot, with `lease.sh acquire <issue> --render`.** Change against
      parent, lockstep with moments, frames for V5, run on that one slot.
      - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
@@ -335,7 +341,8 @@ overridden below.
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
      loop ended, and a sibling would take the card mid-capture. A script that holds the lease for its
-     whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
+     whole run sets `LEASE_HOLDER_PID=$$`, as `bin/arm_queue.sh` does. Never edit `state/locks/`, including the
+     `all-wait.*` records.
    - **A tick that holds the whole card for a baseline** runs only the baseline's arms under it, and
      releases before any other arm. A series of arms run under `--all` keeps every sibling off the card for
      the whole series. Between the baseline's runs, renew with `lease.sh acquire <issue> --all --render`. While
@@ -359,13 +366,13 @@ overridden below.
    - **Otherwise claim and run it there.** `mkdir evidence/parent-<base9>/<scenario>-p` claims the arm:
      only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
      folder exists without a finished status, another tick is running it: run your change arms
-     meanwhile.
-   - **A queue's STOP file stays in its own packet.** A queue that runs a parent arm into the shared folder
-     still writes its STOP, including the self-stop on a CPU-reference fallback, into its own packet. A STOP
-     in `evidence/parent-<base9>/` stops every other tick's queue that writes there (operator, 2026-10-15:
-     #1871's fallback STOP stopped #1845's `RS6-pm-s1323`).
-     A STOP meant for the next arm waits for the running arm's `rc=` line: the queue's check also ends the running arm,
-     and its state series and census are written only at its end (#1905's census arm, 2026-10-15).
+     meanwhile. The arm's queue line names `evidence/parent-<base9>` as its outdir: `bin/arm_queue.sh` runs into
+     the empty folder your `mkdir` made, and its `start` and `rc=` lines go to that folder's `status` too.
+   - **A queue's STOP file stays in its own packet.** `bin/arm_queue.sh` reads `<packet>/STOP` and
+     `<packet>/runs/STOP`, and writes its self-stop on a CPU-reference fallback to `<packet>/runs/STOP`, also while it
+     runs a parent arm into the shared folder. Never put a STOP in `evidence/parent-<base9>/` (operator, 2026-10-15:
+     #1871's fallback STOP there stopped #1845's `RS6-pm-s1323`).
+     It reads STOP before each arm, so the running arm finishes and writes its state series and census.
    - **Check the base first.** A proof uses a base only once each scenario replays on it (§F.3's precondition).
      Two readings show that, and a scenario needs one of them:
      - **The chain line** (3c). The base's `<scenario>-p` identical to the window base's `-p` in `chain.txt` is two
