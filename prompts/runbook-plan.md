@@ -20,6 +20,10 @@ Each remote host is its own lane, with its own locks. The single remote lock nam
 - The binaries and logs come back to the worktree from either host, so a build on one host and its kits on the other are fine.
 - A recipe in an older pause comment that names the single remote lock, or one host for a build, may use either lane. A kit still runs where its lease's export line points.
 
+## Merge slots (owner, 2026-11-25): every hour is a slot
+
+The owner asked for the piled work to run and land in parallel. Every hour is now a merge slot: a slot is open at any time. This overrides every passage below that names `hh % 3 == 0`. Landings still go one at a time through `bin/merge-lock.sh`, and a class B landing still waits while a class A `ai:ready` issue is left to land. A ready landing is claimed before new work.
+
 ## Testing (owner, 2026-11-24): implement, then check only what changed
 
 The owner: "each job takes excessive testing time, just implement and only check the modified part". This section overrides every passage below, every issue's Acceptance and every operator comment that asks a change to prove more.

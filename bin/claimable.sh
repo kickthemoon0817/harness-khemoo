@@ -18,7 +18,7 @@ issues = json.load(open(sys.argv[1])); wip = sys.argv[2]; repo = sys.argv[3]; si
 operator = sys.argv[5]; ready = sys.argv[6]; claim_locks = sys.argv[7]
 import datetime
 # Merge slots (runbook-plan override 3c): the first hour of every third UTC hour.
-slot_open = datetime.datetime.now(datetime.timezone.utc).hour % 3 == 0
+slot_open = True  # every hour is a merge slot (owner, 2026-11-25)
 open_nums = {i["number"] for i in issues}
 def closed(n):
     if n in open_nums: return False
