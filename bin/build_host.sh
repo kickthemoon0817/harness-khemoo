@@ -26,7 +26,8 @@ mapfile -t hosts < <(grep -v '^[[:space:]]*$' "$S/locks/harness-first-remote-onl
 [ "${#hosts[@]}" -gt 0 ] || { echo "build_host: no harness host is named" >&2; exit 1; }
 LOCAL_LANE_FILE="$S/local-cpu-lane"
 local_image=""
-[ -s "$LOCAL_LANE_FILE" ] && read -r local_image _ < "$LOCAL_LANE_FILE"
+# BUILD_HOST_REMOTE_ONLY=1 leaves the local lane out (the scheduled suites run on remote hosts only).
+[ -z "${BUILD_HOST_REMOTE_ONLY:-}" ] && [ -s "$LOCAL_LANE_FILE" ] && read -r local_image _ < "$LOCAL_LANE_FILE"
 lock_of() {
   local h=$1 pair name=""
   [ "$h" = local ] && { echo "$BUILD_LOCK_DIR/worv-dev-build.lock"; return; }

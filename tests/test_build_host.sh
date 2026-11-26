@@ -79,6 +79,8 @@ rm -f "$T/h/state/locks/cost-wait."*
 hold "$T/lk/worv-dev-build.lock"; hold "$T/lk/worv-dev-build-remote-one.lock"; hold "$T/lk/worv-dev-build-remote-two.lock"; wait_on "$T/lk/worv-dev-build-remote-one.lock"; wait_on "$T/lk/worv-dev-build-remote-two.lock"
 out=$($B)
 check "every lane taken: the local lane when it has the fewest waiters" '[[ "$out" == *"unix:///var/run/docker.sock"* ]]' "$out"
+out=$(BUILD_HOST_REMOTE_ONLY=1 $B)
+check "BUILD_HOST_REMOTE_ONLY leaves the local lane out" '[[ "$out" == *"ssh://"* ]]' "$out"
 rm -f "$T/h/state/local-cpu-lane"
 out=$($B)
 check "with the lane switched off, no compile goes local" '[[ "$out" == *"ssh://"* ]]' "$out"

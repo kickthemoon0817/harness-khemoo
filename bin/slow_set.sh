@@ -13,10 +13,12 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${HARNESS_STATE:=$HARNESS_HOME/state}"
 : "${TARGET_REPO:?}"; : "${GH_REPO:?}"
 : "${WORK_BRANCH:=ai/manure-mpm}"
-: "${SLOW_SET_WORKTREE:=$(dirname "$TARGET_REPO")/ai-worktrees/slowset}"
 : "${BUILDER_IMAGE:=worv-builder:isaac6}"
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set_name="fast set"; lock="fastset"; else S="$HARNESS_STATE/slow-set"; fast_flag=""; set_name="whole doctest set, \`[slow]\` cases included"; lock="slowset"; fi
+# Each mode has a worktree of its own: the hourly fast set never checks out a commit under a whole
+# set still testing, and never waits on its tree.
+: "${SLOW_SET_WORKTREE:=$(dirname "$TARGET_REPO")/ai-worktrees/$lock}"
 mkdir -p "$S/logs" "$HARNESS_STATE/locks"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
@@ -40,16 +42,29 @@ held_by_cost_read() {
         }'
 }
 run_on=""
+# With the harness kept to its remote hosts, bin/build_host.sh names the host and that host's compile
+# lock and builder image, its remote lanes only: a scheduled suite never runs on this host's CPU.
+if [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ]; then
+    lane=$(BUILD_HOST_REMOTE_ONLY=1 "$HARNESS_HOME/bin/build_host.sh") || exit 1
+    eval "$lane"
+    run_on=${DOCKER_HOST#ssh://}
+    export PATH="$HARNESS_HOME/bin/remote-docker:$PATH"
+    if held_by_cost_read "$run_on"; then
+        echo "$(date -u +%FT%TZ) $set_name deferred: every host is held by a cost read" >> "$S/deferred.log"
+        exit 0
+    fi
+fi
 for h in ${SLOW_SET_REMOTE_HOST:-} $(grep -v '^[[:space:]]*$' "$HARNESS_STATE/locks/remote-card" 2>/dev/null); do
-    [ -e "$HARNESS_STATE/locks/local-card-off" ] || [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ] && break
+    [ -z "$run_on" ] || break
+    [ -e "$HARNESS_STATE/locks/local-card-off" ] && break
     held_by_cost_read "$h" && continue
     REMOTE_CARD_HOST="$h" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1 || continue
     run_on="$h"; break
 done
-if [ -n "$run_on" ]; then
+if [ -n "$run_on" ] && [ -z "${WORV_DEV_BUILD_LOCK:-}" ]; then
     export DOCKER_HOST="ssh://$run_on" PATH="$HARNESS_HOME/bin/remote-docker:$PATH" \
         WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock
-elif held_by_cost_read local; then
+elif [ -z "$run_on" ] && held_by_cost_read local; then
     echo "$(date -u +%FT%TZ) $set_name deferred: every host is held by a cost read" >> "$S/deferred.log"
     exit 0
 fi
