@@ -161,8 +161,9 @@ check "a wait for another host leaves this one alone" '[ "$rc" = 0 ]' "rc=$rc $(
 rm -f "$G/state/locks/cost-wait."* "$G/state/locks/claim."*
 
 
-# This host's card is the owner's: a tick on the local daemon runs only card-less containers.
+# This host's card is the owner's: a tick on the local daemon runs only card-less build containers.
 LD=unix:///var/run/docker.sock
+export LOCAL_MOUNT_ROOT="$T/ws"
 local_refused() {  # <name> <args…>
   local name=$1; shift
   : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" "$@" 2> "$T/guard.err"; rc=$?
@@ -171,21 +172,33 @@ local_refused() {  # <name> <args…>
 local_refused "a tick's --gpus is refused on the local daemon" run --rm --gpus all img true
 local_refused "a tick's --runtime=nvidia is refused" run --rm --runtime=nvidia img true
 local_refused "a tick's NVIDIA_VISIBLE_DEVICES=all is refused" run --rm -e NVIDIA_VISIBLE_DEVICES=all img true
-local_refused "a tick's --env=NVIDIA_DRIVER_CAPABILITIES is refused" run --rm --env=NVIDIA_DRIVER_CAPABILITIES=all img true
+local_refused "a tick's attached -eNVIDIA_DRIVER_CAPABILITIES is refused" run --rm -eNVIDIA_DRIVER_CAPABILITIES=all img true
+local_refused "a tick's --env=NVIDIA_VISIBLE_DEVICES=all is refused" run --rm --env=NVIDIA_VISIBLE_DEVICES=all img true
 local_refused "a tick's --device is refused" run --rm --device /dev/nvidia0 img true
-local_refused "a tick's /dev mount is refused" run --rm -v /dev/nvidia0:/dev/nvidia0 img true
+local_refused "a tick's /dev bind is refused" run --rm -v /dev/nvidia0:/dev/nvidia0 img true
+local_refused "a tick's attached -v/ bind outside the root is refused" run --rm -v/:/host img true
+local_refused "a tick's --volume= docker socket is refused" run --rm --volume=/var/run/docker.sock:/s img true
+local_refused "a tick's bind escaping the root through .. is refused" run --rm -v "$T/ws/../../etc:/e" img true
+local_refused "a tick's --mount is refused" run --rm --mount type=bind,source=/dev,target=/d img true
 local_refused "a tick's --privileged is refused" run --rm --privileged img true
 local_refused "a tick's --env-file is refused" run --rm --env-file x.env img true
+local_refused "a tick's global option is refused" -H unix:///var/run/docker.sock run --rm --gpus all img true
+local_refused "a tick's create is refused" create --gpus all img true
 local_refused "a tick's exec into a container is refused" exec owner_container nvidia-smi
 local_refused "a tick's docker rm is refused" rm -f owner_container
-: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e NVIDIA_VISIBLE_DEVICES=void img true 2> "$T/guard.err"; rc=$?
-check "a tick's card-less run goes through with runc and the card hidden" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -e NVIDIA_VISIBLE_DEVICES=void img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+local_refused "a tick's image rm is refused" image rm worv-builder:isaac6
+local_refused "a tick's volume rm is refused" volume rm worv-dev-ccache
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$RO:/r:ro" -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc 'echo --gpus all' 2> "$T/guard.err"; rc=$?
+check "iter.sh's build run goes through with runc and the card hidden, the command untouched" '[ "$rc" = 0 ] && [ "$(calls)" = "docker DOCKER_HOST=$LD run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -v $RO:/r:ro -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc echo --gpus all" ]' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" image inspect img 2> "$T/guard.err"; rc=$?
+check "a tick's image inspect passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD image inspect img$" "$LOG"' "rc=$rc $(calls)"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" ps -q 2> "$T/guard.err"; rc=$?
-check "a tick's read-only command passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD ps -q$" "$LOG"' "rc=$rc $(calls)"
+check "a tick's ps passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD ps -q$" "$LOG"' "rc=$rc $(calls)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
 check "outside a tick the local daemon is left to its caller" '[ "$rc" = 0 ] && grep -q "run --rm --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+unset LOCAL_MOUNT_ROOT
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

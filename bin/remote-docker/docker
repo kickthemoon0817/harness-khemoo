@@ -19,41 +19,56 @@ self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
 # This host's card is the owner's, and its default runtime hands every container the card unless
-# told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) may only run its own
-# card-less containers: run and create, with no option that reaches a card or a device, and with
-# runc and NVIDIA_VISIBLE_DEVICES=void forced on; besides those, read-only commands. Runs outside a
-# tick are left to their caller.
+# told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) runs only what
+# `tools/dev/iter.sh build` needs: `docker run` with the options listed below, its bind sources under
+# LOCAL_MOUNT_ROOT ($HOME/tmp_workspace) or a named volume, no NVIDIA_* but a hidden card, and runc
+# and NVIDIA_VISIBLE_DEVICES=void forced on; besides that, read-only commands. A global option is
+# refused. Runs outside a tick are left to their caller.
 case "${DOCKER_HOST:-}" in ssh://*) ;; *)
   if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
-    args=("$@"); si=-1
-    for ((i = 0; i < ${#args[@]}; i++)); do case "${args[$i]}" in -*) ;; *) si=$i; break ;; esac; done
-    [ "$si" -ge 0 ] || exec "$real" "$@"
-    case "${args[$si]}" in
-      run|create) ;;
-      ps|images|image|inspect|version|info|volume|logs|wait) exec "$real" "$@" ;;
-      *) echo "remote-docker: on this host a tick runs only its own card-less containers, not \`docker ${args[$si]}\`; the local card and containers are the owner's" >&2
-         exit 75 ;;
+    refuse() { echo "remote-docker: on this host a tick runs only card-less build containers ($1); the local card and containers are the owner's" >&2; exit 75; }
+    case "${1:-}" in -*) refuse "global option $1" ;; "") exec "$real" ;; esac
+    case "$1" in
+      run) ;;
+      ps|version|info|logs|wait|inspect|images) exec "$real" "$@" ;;
+      image) case "${2:-}" in ls|inspect|history) exec "$real" "$@" ;; esac; refuse "docker image ${2:-}" ;;
+      volume) case "${2:-}" in ls|inspect) exec "$real" "$@" ;; esac; refuse "docker volume ${2:-}" ;;
+      *) refuse "docker $1" ;;
     esac
-    prev=""
-    for a in "${args[@]:$((si + 1))}"; do
-      bad=""
-      case "$a" in
-        --gpus|--gpus=*|--runtime|--runtime=*|--device|--device=*|--device-*|--privileged|--privileged=*|--cap-add|--cap-add=*|--env-file|--env-file=*) bad=$a ;;
-        --env=NVIDIA_VISIBLE_DEVICES=void|--env=NVIDIA_VISIBLE_DEVICES=none) ;;
-        --env=NVIDIA_*|-eNVIDIA_*|--volume=/dev/*|-v/dev/*) bad=$a ;;
-      esac
-      case "$prev" in
-        -e|--env) case "$a" in NVIDIA_VISIBLE_DEVICES=void|NVIDIA_VISIBLE_DEVICES=none) ;; NVIDIA_*) bad="$prev $a" ;; esac ;;
-        -v|--volume) case "$a" in /dev/*) bad="$prev $a" ;; esac ;;
-        --mount) case "$a" in *source=/dev/*|*src=/dev/*) bad="$prev $a" ;; esac ;;
-      esac
-      if [ -n "$bad" ]; then
-        echo "remote-docker: a tick does not start a container with a card or device access on this host (\`$bad\`); the local card is the owner's" >&2
-        exit 75
+    mount_root=$(realpath -m "${LOCAL_MOUNT_ROOT:-$HOME/tmp_workspace}")
+    check_volume() {
+      local src=${1%%:*}
+      if [[ "$src" == */* ]]; then
+        src=$(realpath -m "$src")
+        [[ "$src" == "$mount_root"/* ]] || refuse "bind source $src outside $mount_root"
+      else
+        [[ "$src" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || refuse "volume $1"
       fi
-      prev=$a
+    }
+    check_env() {
+      case "$1" in
+        NVIDIA_VISIBLE_DEVICES=void|NVIDIA_VISIBLE_DEVICES=none) ;;
+        NVIDIA_*) refuse "env $1" ;;
+      esac
+    }
+    shift; opts=()
+    while [ "$#" -gt 0 ]; do
+      a=$1
+      case "$a" in
+        --rm|-i|-t|-it|-ti|--init) opts+=("$a"); shift ;;
+        -v|--volume) [ "$#" -ge 2 ] || refuse "$a without a value"; check_volume "$2"; opts+=("$a" "$2"); shift 2 ;;
+        --volume=*) check_volume "${a#--volume=}"; opts+=("$a"); shift ;;
+        -v?*) check_volume "${a#-v}"; opts+=("$a"); shift ;;
+        -e|--env) [ "$#" -ge 2 ] || refuse "$a without a value"; check_env "$2"; opts+=("$a" "$2"); shift 2 ;;
+        --env=*) check_env "${a#--env=}"; opts+=("$a"); shift ;;
+        -e?*) check_env "${a#-e}"; opts+=("$a"); shift ;;
+        --entrypoint|-w|--workdir|-u|--user|--name) [ "$#" -ge 2 ] || refuse "$a without a value"; opts+=("$a" "$2"); shift 2 ;;
+        --entrypoint=*|--workdir=*|--user=*|--name=*) opts+=("$a"); shift ;;
+        -*) refuse "option $a" ;;
+        *) break ;;
+      esac
     done
-    exec "$real" "${args[@]:0:$((si + 1))}" --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${args[@]:$((si + 1))}"
+    exec "$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@"
   fi
   exec "$real" "$@" ;;
 esac
