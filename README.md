@@ -72,7 +72,9 @@ harness-only --on` alone is replaced on the next probe.
 <key> <detail>` lines to `state/stalls.log`: `lock_wait`, a process waiting `STALL_LOCK_MIN`
 (15) minutes on a remote build or suite lock in `/tmp`, with what the holder is running;
 `gpu_idle`, a card at 0 % on every probe of `STALL_GPU_IDLE_MIN` (30) minutes while a lock
-has a waiter or the allocator's last line counts claimable work; `host_degraded`, once per
+has a waiter or the allocator's last line counts claimable work; `queue_wait`, a run queue whose lease log
+has said BUSY for `STALL_QUEUE_MIN` (10) minutes on end while a card no live lease holds read 0 %, with
+the queue's own BUSY reason; `host_degraded`, once per
 demotion. A kind and key repeats at most every 30 minutes. It reads local state only.
 
 **Leftover pull requests.** `bin/pr_sweep.sh` (cron, every 30 minutes) closes each open pull request on an

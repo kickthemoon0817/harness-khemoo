@@ -113,5 +113,36 @@ check "a later demotion of the same host is raised again" '[ "$(count host_degra
 HARNESS_STATE=/proc/no-such-state "$W"; rc=$?
 check "a state directory it cannot write still exits 0" '[ "$rc" -eq 0 ]' "rc=$rc"
 
+
+# queue_wait reads run queues' lease logs, the probe table and the live leases.
+Q="$H/qs"; mkdir -p "$Q" "$H/ev/2026-11-26-2502-push/runs-render"
+QL="$H/ev/2026-11-26-2502-push/runs-render/lease.log"
+qrun() { : > "$Q/stalls.log"; rm -f "$Q/stall_watch.seen"; HARNESS_STATE="$Q" STALL_LOCK_GLOBS="$H/none/*.lock" STALL_QUEUE_LOGS="$H/ev/*/runs*/lease.log" "$W"; }
+qstalls() { grep ' STALL queue_wait ' "$Q/stalls.log"; }
+probe() {  # <host> <gpu %> <load>
+  { printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+    printf '%s\t%s\t0.2\t80\t%s\t24\t%s\t20\tok\n' "$(iso 1)" "$1" "$3" "$2"; } > "$Q/host_health.tsv"
+}
+busy_log() {  # <minutes of BUSY lines, one a minute, up to now>
+  { echo "holder 1 start $(iso "$1") queue=x want=any deadline=0"
+    for m in $(seq "$1" -1 0); do echo "$(iso "$m") BUSY no remote card is free, alone and quiet"; echo "nucleus ok: stable 9 min (host probe)"; done; } > "$QL"
+}
+probe idle@five 0 21.3; busy_log 12; qrun
+line=$(qstalls)
+check "a queue BUSY 10+ min beside an idle card raises queue_wait with its reason and the card" '[[ "$line" == *"STALL queue_wait 2026-11-26-2502-push/runs-render BUSY 12 min on end: no remote card is free, alone and quiet; idle card(s) no lease holds: idle@five (load 21.3 of 24 cores)"* ]]' "$(cat "$Q/stalls.log")"
+busy_log 6; qrun
+check "a queue BUSY under STALL_QUEUE_MIN raises nothing" '! qstalls' "$(qstalls)"
+busy_log 12; probe idle@five 87 21.3; qrun
+check "a queue waiting while every card works raises nothing" '! qstalls' "$(qstalls)"
+probe idle@five 0 21.3; busy_log 12; echo "$(iso 0) ACQUIRED slot=6 remote=idle@five" >> "$QL"; qrun
+check "a queue whose last stamped line is a grant raises nothing" '! qstalls' "$(qstalls)"
+busy_log 12; touch -d "-10 min" "$QL"; qrun
+check "a lease log not written for 3+ minutes belongs to no live queue and raises nothing" '! qstalls' "$(qstalls)"
+busy_log 12
+printf '#!/usr/bin/env bash\necho "remote card: idle@five (slots 6-7)"\necho "slot 6 HELD 2490 1 t domain=82 remote-all render (alive)"\n' > "$H/bin/lease.sh"; chmod +x "$H/bin/lease.sh"
+qrun
+check "an idle card a live lease holds (a kit booting) is not counted idle" '! qstalls' "$(qstalls)"
+rm -f "$H/bin/lease.sh"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
