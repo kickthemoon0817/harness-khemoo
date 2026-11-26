@@ -80,11 +80,26 @@ pick_model() {  # $1 = models already tried this tick
     done
 }
 
-# The harness is paused when its cron line is commented out or state/paused exists. The
-# launcher starts nothing and a runner chains nothing while paused; a tick already running
-# finishes its own claim.
+# The harness is paused when its cron line is commented out or state/paused exists, and held
+# while Nucleus has refused connections for NUCLEUS_HOLD_MIN (10) minutes on end
+# (state/nucleus/status, bin/nucleus_probe.sh): no kit can boot then, and a tick would spend its
+# claim finding that out. The launcher starts nothing and a runner chains nothing while paused or
+# held; a tick already running finishes its own claim, and the hold lifts with the probe's next ok.
+nucleus_held() {
+    local st since
+    st=$(cat "$HARNESS_STATE/nucleus/status" 2>/dev/null) || return 1
+    [[ "$st" == *"result=fail"* ]] || return 1
+    since=$(grep -o 'fail_since=[0-9]*' <<< "$st" | cut -d= -f2)
+    [ -n "$since" ] && [ $(( $(date +%s) - since )) -ge $(( ${NUCLEUS_HOLD_MIN:-10} * 60 )) ]
+}
 harness_paused() {
     [ -e "$HARNESS_STATE/paused" ] && return 0
+    if nucleus_held; then
+        mkdir -p "$LOGS" 2>/dev/null
+        tail -1 "$LOGS/allocator.log" 2>/dev/null | grep -q 'held: nucleus down' \
+            || echo "$(date -u +%Y%m%dT%H%M%SZ) held: nucleus down since $(date -u -d "@$(grep -o 'fail_since=[0-9]*' "$HARNESS_STATE/nucleus/status" | cut -d= -f2)" +%FT%TZ)" >> "$LOGS/allocator.log"
+        return 0
+    fi
     crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh' || return 0
     return 1
 }

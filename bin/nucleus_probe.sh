@@ -9,14 +9,17 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 dir="$HARNESS_HOME/state/nucleus"; mkdir -p "$dir"
 status="$dir/status"
 ok_since=$(grep -o 'ok_since=[0-9]*' "$status" 2>/dev/null | cut -d= -f2)
+fail_since=$(grep -o 'fail_since=[0-9]*' "$status" 2>/dev/null | cut -d= -f2)
 for i in 1 2 3 4 5 6; do
     now=$(date +%s)
     if timeout 3 bash -c "</dev/tcp/$NUCLEUS_HOST/$NUCLEUS_PORT" 2>/dev/null; then
         [ -n "$ok_since" ] || ok_since=$now
+        fail_since=""
         printf 'ok_since=%s last=%s result=ok\n' "$ok_since" "$now" >"$status.tmp"
     else
         ok_since=""
-        printf 'ok_since= last=%s result=fail\n' "$now" >"$status.tmp"
+        [ -n "$fail_since" ] || fail_since=$now
+        printf 'ok_since= last=%s result=fail fail_since=%s\n' "$now" "$fail_since" >"$status.tmp"
         echo "$(date -u -d @$now +%FT%TZ) FAIL" >>"$dir/flaps.log"
     fi
     mv -f "$status.tmp" "$status"
