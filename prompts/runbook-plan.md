@@ -294,7 +294,8 @@ overridden below.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
-     - **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
+     - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (`--want-host` naming the idle one, or none). Only a phase read against the 150 ms bar needs worker-03, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read.
+- **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
        (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
        and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
        `setsid nohup <harness>/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue
