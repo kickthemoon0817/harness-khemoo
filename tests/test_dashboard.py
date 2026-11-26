@@ -3,8 +3,10 @@
 Exercises bin/dashboard.py: the state-file parsers, the tick-to-issue mapping, the queue grouping, and the
 collector, page and HTTP server against a scratch harness home with a fake lease.sh, claimable.sh and gh.
 """
+import html
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -33,6 +35,7 @@ from dashboard_lib.models import ClaimRecord, JsonDict, LeaseSlot  # noqa: E402
 from dashboard_lib.parsers import StateParsers  # noqa: E402
 from dashboard_lib.procs import ProcessScanner  # noqa: E402
 from dashboard_lib.queue import IssueQueue, QueueLabels  # noqa: E402
+from dashboard_lib.redact import CommandRedactor  # noqa: E402
 from dashboard_lib.render import HtmlRenderer  # noqa: E402
 
 
@@ -76,7 +79,8 @@ class FixtureHarness:
         self._write_script("lease.sh", f"""\
             #!/usr/bin/env bash
             echo "lease.sh $*" >> "{self.calls_log}"
-            cat "{FIXTURES / 'lease_status.txt'}"
+            if [ -s "{self.home / 'lease_override.txt'}" ]; then cat "{self.home / 'lease_override.txt'}"
+            else cat "{FIXTURES / 'lease_status.txt'}"; fi
         """)
         self._write_script("claimable.sh", f"""\
             #!/usr/bin/env bash
@@ -120,20 +124,24 @@ class FixtureHarness:
                 sys.stderr.write("unexpected call\\n"); sys.exit(2)
         """)
 
-    def start_fake_tick(self, issue: int, slot: int) -> int:
+    def start_fake_tick(self, issue: int, slot: int, tool_command: str = "sleep 30") -> int:
         """
         Starts a process that looks like a harness tick: argv[0] `claude`, argv[1] `-p`, stdout to a tick log,
-        a slot lock open, and one tool shell child.
+        a slot lock open, and one tool shell child wrapping its command as Claude Code does.
 
         Args:
             issue: The issue its claim file names.
             slot: The slot lock it holds.
+            tool_command: The command its tool shell runs; it must block for a while and harm nothing.
 
         Returns:
             Its pid.
         """
+        escaped_command: str = tool_command.replace("'", "'\"'\"'")
+        tool_argument: Path = self.home / "tool_argument.txt"
+        tool_argument.write_text(f"true && eval '{escaped_command}' < /dev/null && pwd -P >| /dev/null")
         script: Path = self.home / "fake_tick.sh"
-        script.write_text("bash -c \"true && eval 'sleep 30' < /dev/null && pwd -P >| /dev/null\" &\nwait\n")
+        script.write_text(f'bash -c "$(cat \'{tool_argument}\')" &\nwait\n')
         self._slot_lock_file = (self.state / "locks" / f"slot{slot}.lock").open("w")
         log_file = (self.state / "logs" / f"tick-20261126T013000Z-slot{slot}.log").open("w")
         self.tick_process = subprocess.Popen(
@@ -150,7 +158,7 @@ class FixtureHarness:
         while time.time() < deadline:
             children: str = subprocess.run(["ps", "-o", "args=", "--ppid", str(pid)], capture_output=True,
                                            text=True).stdout
-            if "eval 'sleep 30'" in children:
+            if "eval '" in children:
                 break
             time.sleep(0.05)
         return pid
@@ -326,6 +334,103 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(StateParsers.tool_command(wrapped),
                          "timeout 60 bash -c 'until grep -q x f; do sleep 10; done'; date -u")
         self.assertIsNone(StateParsers.tool_command("plain command"))
+
+
+class RedactionTest(unittest.TestCase):
+    SHAPES: ClassVar[list[JsonDict]] = json.loads((FIXTURES / "secret_shapes.json").read_text())
+    KEPT: ClassVar[list[JsonDict]] = json.loads((FIXTURES / "kept_shapes.json").read_text())
+
+    def test_every_secret_shape_is_masked(self) -> None:
+        for shape in self.SHAPES:
+            with self.subTest(shape["shape"]):
+                masked: str = CommandRedactor.redact(f"tool {shape['text']} --next value")
+                self.assertNotIn(shape["secret"], masked)
+                self.assertIn(CommandRedactor.MASK, masked)
+                self.assertIn("--next value", masked)
+
+    def test_every_secret_shape_is_masked_in_a_summary(self) -> None:
+        for shape in self.SHAPES:
+            with self.subTest(shape["shape"]):
+                summary: str = CommandRedactor.summarize(f"cd /w && tool {shape['text']}", max_arguments=8,
+                                                         max_argument_chars=200)
+                self.assertTrue(summary.startswith("tool "), summary)
+                self.assertNotIn(shape["secret"], summary)
+                self.assertIn(CommandRedactor.MASK, summary)
+
+    def test_plain_values_are_kept(self) -> None:
+        for kept in self.KEPT:
+            with self.subTest(kept["text"]):
+                self.assertIn(kept["kept"], CommandRedactor.redact(kept["text"]))
+
+    def test_summary_names_the_working_command_briefly(self) -> None:
+        self.assertEqual(CommandRedactor.summarize(
+            "cd /w/mpm-2494 && ls env/nucleus.env 2>/dev/null; DOCKER_HOST=ssh://worv@h timeout 1500 "
+            "tools/dev/iter.sh build worv.env.manure > /tmp/p/build1.log 2>&1; echo rc=$?"),
+            "timeout 1500 tools/dev/iter.sh build worv.env.manure +1 more")
+        self.assertEqual(CommandRedactor.summarize(
+            "P=/a/b; for i in $(seq 1 9); do sleep 60; done; grep -E ' rc=' $P/runs/status"), "sleep 60 +1 more")
+        self.assertEqual(CommandRedactor.summarize(
+            "timeout 560 bash -c \"until grep -q 'RS6 start' $P/runs/status; do sleep 20; done\"; date -u"),
+            "timeout 560 bash -c 'grep -q RS6 start \u2026 +1 more' +1 more")
+        self.assertEqual(CommandRedactor.summarize("date -u; echo done"), "date -u +1 more")
+        self.assertEqual(CommandRedactor.summarize("cat /very/long/path/to/some/evidence/folder/with/a/file.log"),
+                         "cat \u2026/file.log")
+        self.assertEqual(CommandRedactor.summarize(""), "")
+        self.assertEqual(CommandRedactor.summarize_argv(("bash", "/h/bin/arm_queue.sh", "--issue", "2490", "--packet",
+                                                         "/p")), "arm_queue.sh --issue 2490 \u2026")
+        self.assertEqual(CommandRedactor.summarize_argv(("python3", "/h/bin/x.py", "--token", "abc")),
+                         "x.py --token [redacted]")
+
+
+class SecretSurfaceTest(unittest.TestCase):
+    """
+    Puts every secret shape where the dashboard looks, a tick's tool call, a lease holder's command line and the
+    stall log, and requires none to reach the JSON or the page.
+    """
+
+    def test_no_secret_reaches_the_json_or_the_page(self) -> None:
+        shapes: list[JsonDict] = json.loads((FIXTURES / "secret_shapes.json").read_text())
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        tool_command: str = "GH_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 bash -c 'sleep 30' x " + " ".join(
+            shape["text"] for shape in shapes)
+        tick_pid: int = harness.start_fake_tick(issue=2464, slot=3, tool_command=tool_command)
+        holder_script: Path = harness.home / "holder.sh"
+        holder_script.write_text("sleep 30\n")
+        holder = subprocess.Popen(["bash", str(holder_script)] + [word for shape in shapes for word in
+                                                                  shlex.split(shape["text"])],
+                                  start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(holder.pid, signal.SIGKILL), holder.wait()))
+        holder_with_flag = subprocess.Popen(["bash", str(holder_script), "--token", "flag-value-2", "--issue", "7"],
+                                            start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(holder_with_flag.pid, signal.SIGKILL), holder_with_flag.wait()))
+        lease_text: str = (FIXTURES / "lease_status.txt").read_text()
+        lease_text = lease_text.replace("slot 4 HELD 2490 432188", f"slot 4 HELD 2490 {holder.pid}")
+        lease_text = lease_text.replace("slot 5 HELD 2490 432188", f"slot 5 HELD 2490 {holder_with_flag.pid}")
+        (harness.home / "lease_override.txt").write_text(lease_text)
+        time.sleep(0.2)
+
+        collector: Collector = harness.collector()
+        collector.refresh_github_in_place()
+        snapshot = collector.snapshot()
+        snapshot_json: str = json.dumps(snapshot, default=str)
+        page: str = HtmlRenderer().render(snapshot, 30)
+
+        tick = next(tick for tick in snapshot["ticks"] if tick["pid"] == tick_pid)
+        self.assertEqual(tick["doing"], "bash -c 'sleep 30' x GH_TOKEN=[redacted] \u2026")
+        slots = {slot["slot"]: slot for slot in snapshot["leases"]["slots"]}
+        self.assertEqual(slots[5]["holder_kind"], "holder.sh --token [redacted] \u2026")
+        self.assertTrue(slots[4]["holder_kind"].startswith("holder.sh "))
+        stall = snapshot["health"]["stalls"][0]
+        self.assertIn("https://[redacted]@example.com/r.git", stall["detail"])
+        self.assertIn("GH_TOKEN=[redacted]", stall["detail"])
+        secrets_list: list[str] = [shape["secret"] for shape in shapes] + [
+            "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "stall-pass-1", "stall-token-1", "flag-value-2"]
+        for secret in secrets_list:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, snapshot_json)
+                self.assertNotIn(html.escape(secret, quote=True), page)
+                self.assertNotIn(secret, page)
 
 
 class TickMappingTest(unittest.TestCase):
@@ -562,7 +667,7 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertIsNone(queue["error"])
         self.assertEqual([pull["number"] for pull in snapshot["landings"]], [2496, 2499])
 
-        self.assertEqual(len(snapshot["health"]["stalls"]), 3)
+        self.assertEqual(len(snapshot["health"]["stalls"]), 4)
         self.assertEqual(snapshot["health"]["allocator"][-1]["kind"], "chain")
         usage = snapshot["usage"]
         self.assertEqual((usage["five_hour_pct"], usage["five_hour_band"], usage["allowed_band"]), (64.0, "half", "half"))

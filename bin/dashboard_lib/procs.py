@@ -9,6 +9,7 @@ from typing import ClassVar
 
 from dashboard_lib.models import ClaimRecord, LeaseSlot, ProcessInfo, TickProcess
 from dashboard_lib.parsers import StateParsers
+from dashboard_lib.redact import CommandRedactor
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class ProcessScanner:
     CLAUDE_BINARIES: ClassVar[frozenset[str]] = frozenset({"claude", "claude-code", "node"})
     LANDING_MARK: ClassVar[str] = "This tick is the merge slot's landing tick"
     SLOT_LOCK_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"/locks/slot(\d+)\.lock$")
-    TOOL_COMMAND_MAX_CHARS: ClassVar[int] = 400
+    TOOL_COMMAND_MAX_CHARS: ClassVar[int] = 160
 
     def __init__(self, harness_state_dir: Path, proc_root: Path = Path("/proc")) -> None:
         """
@@ -176,7 +177,7 @@ class ProcessScanner:
             tick_pids: The live ticks' pids.
 
         Returns:
-            `tick`, the script and its first arguments (`arm_queue.sh --issue 2490`), or `dead`.
+            `tick`, a redacted summary of the holder's command (`arm_queue.sh --issue 2490 ...`), or `dead`.
         """
         if pid is None:
             return ""
@@ -185,12 +186,7 @@ class ProcessScanner:
         process: ProcessInfo | None = processes.get(pid)
         if process is None:
             return "dead"
-        arguments: list[str] = list(process.argv)
-        if arguments and os.path.basename(arguments[0]) in ("bash", "sh", "python3", "python") and len(arguments) > 1:
-            arguments = arguments[1:]
-        if not arguments:
-            return "?"
-        return " ".join([os.path.basename(arguments[0])] + arguments[1:3])
+        return CommandRedactor.summarize_argv(process.argv) or "?"
 
     @staticmethod
     def map_pids_to_issues(
@@ -252,7 +248,8 @@ class ProcessScanner:
         self, tick_pid: int, children_by_parent: dict[int, list[ProcessInfo]], now_epoch: float
     ) -> tuple[str | None, int | None, int]:
         """
-        Finds the tick's youngest tool shell and the command it runs.
+        Finds the tick's youngest tool shell and a redacted summary of the command it runs; the raw command
+        line never leaves this method.
 
         Args:
             tick_pid: The tick.
@@ -260,7 +257,7 @@ class ProcessScanner:
             now_epoch: The current time.
 
         Returns:
-            The youngest tool call's command, its age in seconds, and how many tool shells the tick has open.
+            The youngest tool call's summary, its age in seconds, and how many tool shells the tick has open.
         """
         tool_shells: list[ProcessInfo] = []
         for child in children_by_parent.get(tick_pid, []):
@@ -274,12 +271,15 @@ class ProcessScanner:
             return None, None, 0
         youngest: ProcessInfo = max(tool_shells, key=lambda shell: shell.start_epoch)
         command: str | None = StateParsers.tool_command(youngest.argv[2])
-        if command is None:
+        summary: str = ""
+        if command is not None:
+            summary = CommandRedactor.summarize(command) or "shell step"
+        else:
             grandchildren: list[ProcessInfo] = children_by_parent.get(youngest.pid, [])
-            command = " ".join(grandchildren[0].argv) if grandchildren else None
-        if command is not None and len(command) > self.TOOL_COMMAND_MAX_CHARS:
-            command = command[: self.TOOL_COMMAND_MAX_CHARS - 1] + "\u2026"
-        return command, max(0, int(now_epoch - youngest.start_epoch)), len(tool_shells)
+            summary = CommandRedactor.summarize_argv(grandchildren[0].argv) if grandchildren else "shell step"
+        if len(summary) > self.TOOL_COMMAND_MAX_CHARS:
+            summary = summary[: self.TOOL_COMMAND_MAX_CHARS - 1] + "\u2026"
+        return summary, max(0, int(now_epoch - youngest.start_epoch)), len(tool_shells)
 
     def _boot_epoch(self) -> float:
         """

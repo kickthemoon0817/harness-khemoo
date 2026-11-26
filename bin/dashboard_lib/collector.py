@@ -31,6 +31,7 @@ from dashboard_lib.models import (
 from dashboard_lib.parsers import StateParsers
 from dashboard_lib.procs import ProcessScanner
 from dashboard_lib.queue import IssueQueue, QueueIssue, QueueLabels
+from dashboard_lib.redact import CommandRedactor
 
 
 @dataclass(frozen=True)
@@ -413,7 +414,7 @@ exit 0
         last_claimable_line: AllocatorLine | None = next(
             (line for line in reversed(allocator_lines) if "claimable" in line.fields), None)
         allocator_views: list[JsonDict] = [
-            dict(asdict(line), claimable_unverified="claimable" in line.fields
+            dict(asdict(line), text=CommandRedactor.redact(line.text), claimable_unverified="claimable" in line.fields
                  and self._during_github_outage(StateParsers.parse_iso_epoch(line.time), now))
             for line in allocator_lines[-self.config.allocator_lines:]
         ]
@@ -480,7 +481,9 @@ exit 0
             },
             "landings": github_payload.get("landings", []),
             "health": {
-                "stalls": [asdict(stall) for stall in StateParsers.parse_stalls(stalls_text, self.config.stall_lines)],
+                "stalls": [dict(asdict(stall), key=CommandRedactor.redact(stall.key),
+                                detail=CommandRedactor.redact(stall.detail))
+                           for stall in StateParsers.parse_stalls(stalls_text, self.config.stall_lines)],
                 "allocator": allocator_views,
             },
             "sources": self._sources_view(now),
@@ -648,7 +651,8 @@ exit 0
                     since_epoch = StateParsers.parse_iso_epoch(slot.since)
                 except ValueError:
                     since_epoch = None
-            return dict(asdict(slot), holder_kind=self.scanner.describe_holder(slot.pid, self._processes, tick_pids),
+            return dict(asdict(slot), holder=CommandRedactor.redact(slot.holder) if slot.holder else slot.holder,
+                        holder_kind=self.scanner.describe_holder(slot.pid, self._processes, tick_pids),
                         held_s=self._age(since_epoch, now))
 
         whole_card: dict[tuple[str, str | None, int | None], JsonDict] = {}
@@ -671,7 +675,7 @@ exit 0
             "device": slot_view(lease_status.device) if lease_status.device else None,
             "operator_priority": list(lease_status.operator_priority),
             "waits": [asdict(wait) for wait in lease_status.waits],
-            "unparsed": list(lease_status.unparsed_lines),
+            "unparsed": [CommandRedactor.redact(line) for line in lease_status.unparsed_lines],
         }
 
     def _usage_view(self, now: float) -> JsonDict:

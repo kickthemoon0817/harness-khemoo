@@ -2,7 +2,6 @@
 Renders a snapshot as one self-contained HTML page: inline CSS, inline SVG sparklines, no scripts.
 """
 import html
-import re
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -21,9 +20,6 @@ class HtmlRenderer:
     SPARK_WIDTH: ClassVar[int] = 240
     SPARK_HEIGHT: ClassVar[int] = 34
     SPARK_HIT_BUCKETS: ClassVar[int] = 48
-    COMMAND_PREAMBLE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^\s*(?:(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s;&]*)\s*;|cd\s+\S+\s*(?:&&|;))\s*"
-    )
     STATUS_LEVELS: ClassVar[dict[str, str]] = {
         "ok": "good", "held": "info", "alive": "good", "free": "idle", "orphan": "critical", "down": "critical",
         "slow": "warning", "unknown": "idle", "demoted": "serious", "paused": "idle", "running": "good",
@@ -464,7 +460,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             model_text: str = tick.get("model_label", "?") + (" landing" if tick.get("lane") == "landing" else "")
             doing: str = tick.get("doing") or ""
             doing_cell: str = (f'<span title="{self._e(doing)}">{self._duration(tick.get("doing_age_s"))} '
-                               f'{self._e(self._command_gist(doing))}</span>') if doing \
+                               f'{self._e(doing)}</span>') if doing \
                 else '<span class="note">thinking</span>'
             leases: str = " ".join(f"#{slot}" for slot in tick.get("lease_slots", [])) or "-"
             rows.append(
@@ -912,24 +908,6 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             The host without the user.
         """
         return host.split("@", 1)[-1]
-
-    @staticmethod
-    def _command_gist(command: str) -> str:
-        """
-        Drops a command's leading variable assignments and `cd`s, which say little about what it runs.
-
-        Args:
-            command: A tool call's command line.
-
-        Returns:
-            The command from its first other step, or the whole command when nothing else is left.
-        """
-        gist: str = command
-        while True:
-            match: re.Match[str] | None = HtmlRenderer.COMMAND_PREAMBLE_PATTERN.match(gist)
-            if match is None or not gist[match.end():].strip():
-                return gist
-            gist = gist[match.end():]
 
     @staticmethod
     def _clip(text: str, limit: int) -> str:

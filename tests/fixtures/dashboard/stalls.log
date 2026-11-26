@@ -1,3 +1,4 @@
+2026-11-25T11:00:01Z STALL lock_wait /tmp/worv-x.lock holder runs git push https://bob:stall-pass-1@example.com/r.git with GH_TOKEN=stall-token-1
 2026-11-25T12:06:11Z STALL host_degraded worv@10.0.0.6 moved last at 2026-11-25T12:06:02Z, 3 bad probes in a row now; last probe: slow, upload 0.31 MB/s, connect 0.16 s
 2026-11-25T13:05:01Z STALL lock_wait /tmp/worv-dev-build-remote-w03.lock 2 waiting (pids 3056785 3052674), 2 of them 15+ min, longest 15 min; holder pid 3032812, up 16 min (bash tools/dev/iter.sh build worv.env.manure)
 garbage line
