@@ -72,6 +72,7 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   one long issue cannot take every tick while others wait; then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
 - An issue labelled `ai:low` (owner, 2026-11-24) is lower priority. Claim one only when no claimable issue without `ai:low` is left, landings included. The speed path (the first version's 150 ms bar) carries `ai:first`, and always goes first.
+- **While an `ai:first` issue is claimable, an `ai:fable` issue without `ai:first` is not claimed either** (owner, 2026-11-26): new design rounds and low-priority work wait for the take-first queue. `bin/claimable.sh` counts the same way, so ticks are not started for work that waits.
 - An issue labelled `ai:signoff` is waiting for a sign-off. Never claim it; never merge its PR. The owner
   waived class B sign-off on 2026-09-26, so the operator reviews the packet and signs off in the owner's place.
 - An issue labelled `ai:ready` waits for a merge slot (override 3c). While a slot is open, resume it before
