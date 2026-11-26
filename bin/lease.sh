@@ -113,7 +113,11 @@ REMOTE_CARD_HOSTS="${REMOTE_CARD_HOSTS:-$(grep -v '^[[:space:]]*$' "$REMOTE_FILE
 HARNESS_ONLY_FILE="$LOCKS/harness-first-remote-only"
 HARNESS_ONLY_SCOPE=""
 HARNESS_HOSTS=""
-if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+# An issue the owner lists in local-card-issues (one number a line) may take this host's card too:
+# harness-only scope does not apply to its acquires.
+LOCAL_CARD_ISSUES_FILE="$LOCKS/local-card-issues"
+if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]] \
+    && ! grep -qx "${2:-}" "$LOCAL_CARD_ISSUES_FILE" 2>/dev/null; then
   REMOTE_CARD_HOSTS=$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)
   while IFS= read -r hh; do
     [ -n "$hh" ] && printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -qxF "$hh" && HARNESS_HOSTS+="$hh"$'\n'
