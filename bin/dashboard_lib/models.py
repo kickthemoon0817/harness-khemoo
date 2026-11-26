@@ -239,3 +239,51 @@ class SourceResult:
     duration_s: float | None = None
     attempted_at: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RunQueue:
+    """
+    One bin/arm_queue.sh run folder (`<packet>/runs*/`): who holds it, what it waits for and what it runs.
+    """
+
+    packet: str
+    runs: str
+    issue: int | None
+    holder_pid: int | None
+    alive: bool
+    state: str
+    want: str | None
+    arm: str | None
+    arm_host: str | None
+    arm_started: str | None
+    busy_since: str | None
+    busy_reason: str | None
+    granted_host: str | None
+    finished_at: str | None
+    updated_epoch: float
+
+
+@dataclass(frozen=True)
+class LockParty:
+    """
+    A process holding or waiting on a build lock, and the issue its worktree belongs to.
+    """
+
+    pid: int
+    issue: int | None
+    tree: str | None
+    alive: bool
+
+
+@dataclass(frozen=True)
+class BuildLane:
+    """
+    One host's compile lane: its build lock, the holder and the waiters in line.
+    """
+
+    name: str
+    host: str
+    path: str
+    holder: LockParty | None
+    waiters: tuple[LockParty, ...]

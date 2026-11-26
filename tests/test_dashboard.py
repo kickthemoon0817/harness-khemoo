@@ -34,11 +34,17 @@ import dashboard  # noqa: E402
 from dashboard_lib.collector import Collector, DashboardConfig  # noqa: E402
 from dashboard_lib.github import GitHubClient  # noqa: E402
 from dashboard_lib.harness_env import HarnessEnvReader  # noqa: E402
-from dashboard_lib.models import ClaimRecord, JsonDict, LeaseSlot  # noqa: E402
+from dashboard_lib.buildlocks import BuildLockReader  # noqa: E402
+from dashboard_lib.flow import FlowBuilder, FlowInputs  # noqa: E402
+from dashboard_lib.flowtrack import FlowTracker  # noqa: E402
+from dashboard_lib.models import (  # noqa: E402
+    BuildLane, ClaimRecord, JsonDict, LeaseSlot, LockParty, ProcessInfo, RunQueue, TickProcess,
+)
 from dashboard_lib.parsers import StateParsers  # noqa: E402
 from dashboard_lib.procs import ProcessScanner  # noqa: E402
 from dashboard_lib.queue import IssueQueue, QueueLabels  # noqa: E402
 from dashboard_lib.redact import CommandRedactor  # noqa: E402
+from dashboard_lib.runqueue import RunQueueReader  # noqa: E402
 from dashboard_lib.render import HtmlRenderer  # noqa: E402
 
 
@@ -58,8 +64,9 @@ class FixtureHarness:
         self.calls_log: Path = self.home / "calls.log"
         self.tick_processes: list[subprocess.Popen[bytes]] = []
         self._slot_lock_files: list[Any] = []
+        self.helper_processes: list[subprocess.Popen[bytes]] = []
         for directory in (self.home / "bin", self.home / "config", self.state / "locks", self.state / "logs",
-                          self.state / "model-cooldown"):
+                          self.state / "model-cooldown", self.home / "evidence", self.home / "buildlocks"):
             directory.mkdir(parents=True)
         shutil.copy(FIXTURES / "host_health.tsv", self.state / "host_health.tsv")
         shutil.copy(FIXTURES / "host_health.streaks", self.state / "host_health.streaks")
@@ -115,6 +122,9 @@ class FixtureHarness:
                 nodes = json.load(open(fixtures + name))
                 print(json.dumps({{"data": {{"repository": {{"issues": {{"totalCount": len(nodes),
                     "pageInfo": {{"hasNextPage": False, "endCursor": None}}, "nodes": nodes}}}}}}}}))
+            elif "search(" in query and any("is:issue is:closed" in a for a in arguments):
+                nodes = json.load(open(fixtures + "/closed.json"))
+                print(json.dumps({{"data": {{"search": {{"issueCount": len(nodes), "nodes": nodes}}}}}}))
             elif "search(" in query:
                 nodes = json.load(open(fixtures + "/merged.json"))
                 print(json.dumps({{"data": {{"search": {{"issueCount": len(nodes), "nodes": nodes}}}}}}))
@@ -170,6 +180,62 @@ class FixtureHarness:
             time.sleep(0.05)
         return pid
 
+    def start_fake_queue(self, issue: int, runs: str, status: str, lease_log: str) -> int:
+        """
+        Writes a run folder and starts a process that looks like its bin/arm_queue.sh holder.
+
+        Args:
+            issue: The issue its packet is named for.
+            runs: The run folder's name.
+            status: The `status` text.
+            lease_log: The `lease.log` text; `{pid}` stands for the holder's pid.
+
+        Returns:
+            The holder's pid.
+        """
+        script: Path = self.home / "bin" / "arm_queue.sh"
+        script.write_text("sleep 30\n")
+        holder = subprocess.Popen(["bash", str(script)], start_new_session=True)
+        self.helper_processes.append(holder)
+        folder: Path = self.home / "evidence" / f"2026-11-26-{issue}-fixture" / runs
+        folder.mkdir(parents=True)
+        (folder / "status").write_text(status)
+        (folder / "lease.log").write_text(lease_log.replace("{pid}", str(holder.pid)))
+        return holder.pid
+
+    def hold_build_lock(self, name: str, holder_issue: int, waiter_issue: int) -> tuple[int, int]:
+        """
+        Takes a build lock as iter.sh does (pid and tree written into it) and starts a waiter in another tree.
+
+        Args:
+            name: The lock name, `worv-dev-build-remote-<name>.lock`.
+            holder_issue: The issue of the holder's worktree.
+            waiter_issue: The issue of the waiter's worktree, its working directory.
+
+        Returns:
+            The holder's and the waiter's pids.
+        """
+        lock: Path = self.home / "buildlocks" / f"worv-dev-build-remote-{name}.lock"
+        holder = subprocess.Popen(["bash", "-c", 'exec 8>"$1"; flock 8; sleep 30', "_", str(lock)],
+                                  start_new_session=True)
+        self.helper_processes.append(holder)
+        deadline: float = time.time() + 5
+        while time.time() < deadline and not lock.exists():
+            time.sleep(0.05)
+        time.sleep(0.2)
+        lock.write_text(f"pid {holder.pid}, {self.home}/ai-worktrees/mpm-{holder_issue}, worv.env.manure\n")
+        tree: Path = self.home / "ai-worktrees" / f"mpm-{waiter_issue}"
+        tree.mkdir(parents=True, exist_ok=True)
+        waiter = subprocess.Popen(["flock", str(lock), "sleep", "30"], cwd=tree, start_new_session=True)
+        self.helper_processes.append(waiter)
+        while time.time() < deadline:
+            listing: str = subprocess.run(["lslocks", "-n", "-o", "PID,MODE,PATH"], capture_output=True,
+                                          text=True).stdout
+            if any(line.split()[:1] == [str(waiter.pid)] and "*" in line for line in listing.splitlines()):
+                break
+            time.sleep(0.05)
+        return holder.pid, waiter.pid
+
     def config(self, **overrides: Any) -> DashboardConfig:
         """
         Args:
@@ -183,6 +249,8 @@ class FixtureHarness:
             labels=QueueLabels(queue="ai:plan"), usage_cache=self.home / "usage-cache.json",
             gh_binary=str(self.home / "bin" / "gh"), remote_interval_s=0,
             crontab_command=(str(self.home / "bin" / "crontab"),),
+            evidence_root=self.home / "evidence", build_lock_dir=self.home / "buildlocks",
+            build_lock_names=(("worv@worker-a.local", "wa"), ("worv@10.0.0.6", "laptop")),
         )
         fields.update(overrides)
         return DashboardConfig(**fields)
@@ -219,6 +287,12 @@ class FixtureHarness:
             tick_process.wait(timeout=5)
         for slot_lock_file in self._slot_lock_files:
             slot_lock_file.close()
+        for helper in self.helper_processes:
+            try:
+                os.killpg(helper.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            helper.wait(timeout=5)
         self.temporary_directory.cleanup()
 
     def _write_script(self, name: str, text: str) -> None:
@@ -1080,6 +1154,221 @@ class HttpServerTest(unittest.TestCase):
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, completed.stdout + completed.stderr)
 
 
+class RunQueueTest(unittest.TestCase):
+    QUEUES: ClassVar[Path] = FIXTURES / "runqueues"
+
+    @staticmethod
+    def holder(pid: int) -> dict[int, ProcessInfo]:
+        return {pid: ProcessInfo(pid, 1, 0.0, ("bash", "/h/bin/arm_queue.sh", "--issue", "2502"))}
+
+    def test_a_queue_running_an_arm(self) -> None:
+        lease = RunQueueReader.parse_lease_log((self.QUEUES / "running" / "lease.log").read_text())
+        self.assertEqual((lease.holder_pid, lease.want, lease.busy_since, lease.last_host),
+                         (4101, "any", None, "worv@10.50.1.6"))
+        status = RunQueueReader.parse_status((self.QUEUES / "running" / "status").read_text())
+        self.assertEqual((status.arm, status.arm_host, status.arm_started, status.finished_at),
+                         ("RS6-on-s1323-render", "worv@10.50.1.6", "2026-11-26T03:03:10Z", None))
+
+    def test_a_queue_waiting_for_a_card_keeps_only_the_last_holders_busy_streak(self) -> None:
+        lease = RunQueueReader.parse_lease_log((self.QUEUES / "waiting" / "lease.log").read_text())
+        self.assertEqual((lease.holder_pid, lease.want), (4201, "worv@10.50.1.6"))
+        self.assertEqual((lease.busy_since, lease.busy_reason),
+                         ("2026-11-26T02:40:00Z", "no remote card is free, alone and quiet"))
+        self.assertIsNone(RunQueueReader.parse_status((self.QUEUES / "waiting" / "status").read_text()).arm)
+
+    def test_a_released_queue_is_finished(self) -> None:
+        status = RunQueueReader.parse_status((self.QUEUES / "finished" / "status").read_text())
+        self.assertEqual((status.arm, status.finished_at, status.granted_host),
+                         (None, "2026-11-26T02:51:16Z", "worv@worv-worker-03.local"))
+
+    def test_read_queues_names_state_issue_and_liveness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root: Path = Path(directory)
+            for name, packet in (("running", "2026-11-26-2502-push"), ("waiting", "2026-11-26-2464-rest"),
+                                 ("finished", "2026-11-26-2490-sub")):
+                shutil.copytree(self.QUEUES / name, root / packet / "runs")
+            old: Path = root / "2026-11-20-2000-old" / "runs"
+            shutil.copytree(self.QUEUES / "finished", old)
+            for path in old.iterdir():
+                os.utime(path, (time.time() - 86400, time.time() - 86400))
+            processes = {**self.holder(4101), **self.holder(4201)}
+            queues = RunQueueReader(root, 6 * 3600).read_queues(processes, time.time())
+        by_issue = {queue.issue: queue for queue in queues}
+        self.assertEqual(sorted(by_issue), [2464, 2490, 2502])
+        self.assertEqual((by_issue[2502].state, by_issue[2502].arm), ("running", "RS6-on-s1323-render"))
+        self.assertEqual(by_issue[2464].state, "waiting_card")
+        self.assertEqual((by_issue[2490].state, by_issue[2490].alive), ("finished", False))
+
+
+class BuildLockTest(unittest.TestCase):
+    def test_parses_lslocks_waiters_and_the_lock_file(self) -> None:
+        waiters = BuildLockReader.parse_lslocks_waiters((FIXTURES / "lslocks.json").read_text())
+        self.assertEqual(waiters, {"/tmp/worv-dev-build-remote-5090.lock": [2131760, 2387677],
+                                   "/tmp/worv-dev-build-remote-w03.lock": [99]})
+        self.assertEqual(BuildLockReader.parse_lslocks_waiters("not json"), {})
+        self.assertEqual(BuildLockReader.parse_lock_file((FIXTURES / "build_lock.txt").read_text()),
+                         (2088784, "/home/x/tmp_workspace/ai-worktrees/mpm-2464"))
+        self.assertEqual(BuildLockReader.parse_lock_file(""), (None, None))
+
+    def test_reads_a_live_holder_and_waiter(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        holder_pid, waiter_pid = harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
+        scanner: ProcessScanner = ProcessScanner(harness.state)
+        lanes = BuildLockReader({"worv@worker-a.local": "wa"}, harness.home / "buildlocks", 5).read_lanes(
+            ["worv@worker-a.local", "worv@10.0.0.6"], scanner.scan_processes(), {})
+        by_name = {lane.name: lane for lane in lanes}
+        self.assertEqual(sorted(by_name), ["10-0-0-6", "local", "wa"])
+        self.assertEqual((by_name["wa"].holder.pid, by_name["wa"].holder.issue), (holder_pid, 2495))
+        self.assertEqual([(waiter.pid, waiter.issue) for waiter in by_name["wa"].waiters], [(waiter_pid, 2388)])
+        self.assertIsNone(by_name["local"].holder)
+
+
+class FlowBuilderTest(unittest.TestCase):
+    NOW: ClassVar[float] = 1795657200.0
+
+    def inputs(self, **overrides: Any) -> FlowInputs:
+        issues = json.loads((FIXTURES / "issues.json").read_text())
+        groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(issues, {2380: "CLOSED", 2499: "MERGED"}, {}, {})
+        tick = TickProcess(11, "claude-opus-5-5", "Opus 5.5", "standard", 600, 1, None, 2464, "claim", "sleep 30",
+                           5, 1)
+        landing = TickProcess(12, "claude-opus-5-5", "Opus 5.5", "landing", 120, 2, None, 2201, "claim", None,
+                              None, 0)
+        running = RunQueue("2026-11-26-2502-x", "runs", 2502, 41, True, "running", "any", "RS6-p1",
+                           "worv@10.0.0.6", "2026-11-26T01:30:00Z", None, None, "worv@10.0.0.6", None, self.NOW)
+        waiting = RunQueue("2026-11-26-2490-x", "runs", 2490, 42, True, "waiting_card", "worv@10.0.0.6", None, None,
+                           None, "2026-11-26T01:28:00Z", "kit limit GH_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+                           None, None, self.NOW)
+        lanes = (BuildLane("wa", "worv@worker-a.local", "/l/wa", LockParty(51, 2495, "mpm-2495", True),
+                           (LockParty(52, 2388, "mpm-2388", True),)),)
+        slots = (LeaseSlot(4, "held", "2488", 2488, 61, "2026-11-26T01:00:00Z", 80, ("remote-all", "no-cost"),
+                           "worv@worker-a.local"),)
+        machines = [
+            {"key": "local", "name": "box", "status": "ok", "gpu": {"name": "RTX", "util_pct": 5.0}, "load1": 1.0,
+             "nproc": 8},
+            {"key": "worv@worker-a.local", "name": "worv@worker-a.local", "status": "ok",
+             "gpu": {"util_pct": 40.0, "mem_used_mb": 5000.0, "mem_total_mb": 16000.0}, "load1": 4.0, "nproc": 16},
+            {"key": "worv@10.0.0.6", "name": "worv@10.0.0.6", "status": "ok", "gpu": {"util_pct": 0.0},
+             "load1": 2.0, "nproc": 24},
+        ]
+        fields: dict[str, Any] = dict(
+            groups=groups, ticks=(tick, landing), queues=(running, waiting), lanes=lanes, lease_slots=slots,
+            closed_issues=json.loads((FIXTURES / "closed.json").read_text()), machines=machines,
+            titles={int(issue["number"]): (issue["title"], issue["url"]) for issue in issues}, now=self.NOW)
+        fields.update(overrides)
+        return FlowInputs(**fields)
+
+    def builder(self) -> FlowBuilder:
+        return FlowBuilder(QueueLabels(queue="ai:plan"), {"worv@worker-a.local": "wa", "worv@10.0.0.6": "laptop"},
+                           6 * 3600)
+
+    def test_each_issue_lands_in_its_column(self) -> None:
+        flow = self.builder().build(self.inputs())
+        cards = {card["issue"]: card for card in flow["cards"]}
+        expected: dict[int, tuple[str, str]] = {
+            2502: ("running", "running RS6-p1 on laptop"),
+            2488: ("running", "holding wa"),
+            2490: ("waiting_card", "waiting for a card"),
+            2495: ("compiling", "compiling on wa"),
+            2388: ("compiling", "waiting for the wa compile lane"),
+            2201: ("landing", "landing"),
+            2464: ("claimed", "claimed"),
+            2504: ("waiting", "held back by the gate"),
+            2503: ("waiting", "held back by the gate"),
+            2467: ("held", "on the operator"),
+            2200: ("held", "waiting for sign-off"),
+            2492: ("done", "done"),
+        }
+        for issue, (column, label) in expected.items():
+            with self.subTest(issue=issue):
+                self.assertEqual((cards[issue]["column"], cards[issue]["label"]), (column, label))
+        self.assertNotIn(1240, cards)
+        self.assertNotIn(2310, cards)
+        self.assertEqual(cards[2388]["detail"], "1 in line for wa")
+        self.assertIn("[redacted]", cards[2490]["detail"])
+        self.assertNotIn("ghp_", json.dumps(flow))
+        self.assertTrue(cards[2490]["detail"].startswith("BUSY 12 min: kit limit"))
+
+    def test_edges_run_to_the_lanes_held_and_waited_for(self) -> None:
+        flow = self.builder().build(self.inputs())
+        edges = sorted((edge["issue"], edge["device"], edge["lane"], edge["kind"]) for edge in flow["edges"])
+        self.assertEqual(edges, [
+            (2388, "worv@worker-a.local", "compile", "waits"),
+            (2488, "worv@worker-a.local", "card", "holds"),
+            (2490, "worv@10.0.0.6", "card", "waits"),
+            (2495, "worv@worker-a.local", "compile", "holds"),
+            (2502, "worv@10.0.0.6", "card", "holds"),
+        ])
+        device = {item["key"]: item for item in flow["devices"]}
+        self.assertTrue(device["worv@10.0.0.6"]["idle_with_queue"])
+        self.assertFalse(device["worv@worker-a.local"]["idle_with_queue"])
+        self.assertEqual(device["worv@worker-a.local"]["holders"], ["#2488 slot 4 remote-all no-cost"])
+        self.assertEqual(device["worv@worker-a.local"]["compile"], "compile: #2495, 1 waiting")
+        for edge in flow["edges"]:
+            self.assertEqual(edge["y2"], device[edge["device"]]["y"] + device[edge["device"]]["h"])
+
+    def test_columns_hold_at_most_their_cap(self) -> None:
+        flow = self.builder().build(self.inputs())
+        for column in flow["columns"]:
+            shown = [card for card in flow["cards"] if card["column"] == column["key"]]
+            self.assertEqual(len(shown), column["count"] - column["hidden"])
+            self.assertLessEqual(len(shown), FlowBuilder.MAX_CARDS)
+
+
+class FlowTrackerTest(unittest.TestCase):
+    @staticmethod
+    def flow(cards: list[tuple[int, int, int, str]]) -> JsonDict:
+        return {"cards": [{"issue": issue, "x": x, "y": y, "label": label} for issue, x, y, label in cards],
+                "edges": [{"issue": issue, "device": "d", "lane": "card", "kind": "holds"}
+                          for issue, _, _, label in cards if label.startswith("running")]}
+
+    def test_moves_fresh_cards_transitions_and_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path: Path = Path(directory) / "flow_state.json"
+            tracker: FlowTracker = FlowTracker(path, animate_s=20)
+            first = self.flow([(1, 10, 100, "claimed"), (2, 10, 160, "claimed")])
+            tracker.update_in_place(first, 1000.0)
+            self.assertFalse(any(card["fresh"] or card["moved"] for card in first["cards"]))
+            self.assertEqual(first["transitions"], [])
+
+            second = self.flow([(1, 300, 100, "running RS6-p1 on laptop"), (2, 10, 100, "claimed"),
+                                (3, 10, 160, "claimed")])
+            tracker.update_in_place(second, 1030.0)
+            cards = {card["issue"]: card for card in second["cards"]}
+            self.assertEqual((cards[1]["moved"], cards[1]["from_x"], cards[1]["from_y"]), (True, 10, 100))
+            self.assertEqual((cards[2]["moved"], cards[2]["from_y"]), (True, 160))
+            self.assertTrue(cards[3]["fresh"])
+            self.assertTrue(second["edges"][0]["fresh"])
+            self.assertEqual(second["transitions"][0]["issue"], 1)
+            self.assertEqual((second["transitions"][0]["from"], second["transitions"][0]["to"]),
+                             ("claimed", "running RS6-p1 on laptop"))
+
+            within = self.flow([(1, 300, 100, "running RS6-p1 on laptop"), (2, 10, 100, "claimed"),
+                                (3, 10, 160, "claimed")])
+            tracker.update_in_place(within, 1045.0)
+            self.assertTrue({card["issue"]: card for card in within["cards"]}[1]["moved"])
+            later = self.flow([(1, 300, 100, "running RS6-p1 on laptop"), (3, 10, 160, "claimed")])
+            tracker.update_in_place(later, 1060.0)
+            self.assertFalse(any(card["moved"] for card in later["cards"]))
+            self.assertEqual((later["transitions"][0]["issue"], later["transitions"][0]["to"]), (2, "off the board"))
+
+            crowded = self.flow([(1, 300, 100, "running RS6-p1 on laptop")])
+            crowded["overflow"] = [{"issue": 3, "column": "claimed", "label": "claimed"}]
+            tracker.update_in_place(crowded, 1070.0)
+            self.assertEqual(len(crowded["transitions"]), 2)
+            shown_again = self.flow([(1, 300, 100, "running RS6-p1 on laptop"), (3, 10, 160, "claimed")])
+            tracker.update_in_place(shown_again, 1080.0)
+            self.assertTrue({card["issue"]: card for card in shown_again["cards"]}[3]["fresh"])
+            self.assertEqual(len(shown_again["transitions"]), 2)
+
+            restarted: FlowTracker = FlowTracker(path, animate_s=20)
+            restarted.load()
+            again = self.flow([(1, 300, 100, "running RS6-p1 on laptop"), (3, 10, 160, "claimed")])
+            restarted.update_in_place(again, 1100.0)
+            self.assertFalse(any(card["fresh"] for card in again["cards"]))
+            self.assertEqual(len(again["transitions"]), 2)
+
+
 class MachineCardTest(unittest.TestCase):
     def test_containers_fold_into_a_details_list(self) -> None:
         snapshot: JsonDict = {"generated_epoch": 0, "machines": [{
@@ -1091,6 +1380,53 @@ class MachineCardTest(unittest.TestCase):
         self.assertIn("<details><summary>containers <span class=\"sub\">2</span></summary>", page)
         self.assertIn("<li><span class=\"line\" title=\"isaac:1\">worv-iter-4</span>", page)
         self.assertNotIn("worv-iter-4 <span class=\"sub\">Up 8 minutes</span>; ", page)
+
+
+class FlowPageTest(unittest.TestCase):
+    def test_the_collector_builds_a_live_flow_and_the_page_draws_it(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        tick_pid: int = harness.start_fake_tick(issue=2464, slot=3)
+        harness.start_fake_queue(2502, "runs-render", (FIXTURES / "runqueues" / "running" / "status").read_text()
+                                 .replace("worv@10.50.1.6", "worv@10.0.0.6"),
+                                 "holder {pid} start 2026-11-26T01:20:00Z queue=/q want=any deadline=1\n")
+        harness.start_fake_queue(2504, "runs", "", "holder {pid} start 2026-11-26T01:20:00Z queue=/q "
+                                 "want=worv@10.0.0.6 deadline=1\n2026-11-26T01:30:00Z BUSY kit limit 2/2\n")
+        harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
+        clock_epoch: list[float] = [FixtureHarness.PINNED_EPOCH]
+        collector: Collector = harness.collector(clock=lambda: clock_epoch[0])
+        collector.refresh_github_in_place()
+        first = collector.snapshot()
+        cards = {card["issue"]: card for card in first["flow"]["cards"]}
+        self.assertEqual(cards[2464]["column"], "claimed")
+        self.assertEqual((cards[2502]["column"], cards[2502]["label"]),
+                         ("running", "running RS6-on-s1323-render on laptop"))
+        self.assertEqual(cards[2504]["column"], "waiting_card")
+        self.assertEqual(cards[2490]["label"], "holding wa")
+        self.assertEqual(cards[2495]["column"], "compiling")
+        self.assertEqual(cards[2388]["label"], "waiting for the wa compile lane")
+        self.assertEqual(cards[2492]["column"], "done")
+        self.assertEqual(first["sources"]["activity"]["error"], None)
+
+        (harness.state / "locks" / "claim.2464").unlink()
+        os.killpg(harness.tick_processes[0].pid, signal.SIGKILL)
+        harness.tick_processes[0].wait(timeout=5)
+        clock_epoch[0] += 30
+        second = collector.snapshot()
+        self.assertNotIn(tick_pid, [tick["pid"] for tick in second["ticks"]])
+        moved = {card["issue"]: card for card in second["flow"]["cards"]}[2464]
+        self.assertEqual(moved["column"], "waiting")
+        self.assertTrue(moved["moved"])
+        self.assertEqual(second["flow"]["transitions"][0]["issue"], 2464)
+
+        page: str = HtmlRenderer().render(second, 30, "access")
+        for expected in ('class="flow-canvas"', 'class="fdev', "laptop", "compile: #2495, 1 waiting",
+                         'class="fcard waiting moved"', "--dx:", '<path class="fedge card holds',
+                         'class="fedge compile waits', "Waiting for a card", "#2464</b> claimed →",
+                         "&lt;script&gt;alert(1)&lt;/script&gt;"):
+            self.assertIn(expected, page)
+        self.assertNotIn("<script", page)
+        self.assertNotIn(FixtureHarness.FAKE_TOKEN, page + json.dumps(second, default=str))
 
 
 if __name__ == "__main__":

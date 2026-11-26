@@ -46,6 +46,14 @@ query($search: String!) {
   }
 }
 """
+    CLOSED_QUERY: ClassVar[str] = """
+query($search: String!) {
+  search(query: $search, type: ISSUE, first: 50) {
+    issueCount
+    nodes { ... on Issue { number title url closedAt } }
+  }
+}
+"""
     MAX_ISSUE_PAGES: ClassVar[int] = 5
     STATES_PER_QUERY: ClassVar[int] = 60
 
@@ -167,6 +175,22 @@ query($search: String!) {
         data: JsonDict = self._graphql(self.MERGED_QUERY, {"search": f"repo:{self.repo} is:pr is:merged merged:>={since_iso}"})
         pulls: list[JsonDict] = [node for node in data["search"]["nodes"] if node and node.get("number")]
         return sorted(pulls, key=lambda pull: pull.get("mergedAt") or "", reverse=True)
+
+    def fetch_closed_issues(self, label: str, since_iso: str) -> list[JsonDict]:
+        """
+        Lists issues carrying a label that closed since a time.
+
+        Args:
+            label: The label.
+            since_iso: ISO-8601 UTC lower bound.
+
+        Returns:
+            Issue nodes (number, title, url, closedAt), latest close first.
+        """
+        data: JsonDict = self._graphql(self.CLOSED_QUERY, {
+            "search": f'repo:{self.repo} is:issue is:closed label:"{label}" closed:>={since_iso}'})
+        issues: list[JsonDict] = [node for node in data["search"]["nodes"] if node and node.get("number")]
+        return sorted(issues, key=lambda issue: issue.get("closedAt") or "", reverse=True)
 
     def find_issue_for_pid(self, pid: int) -> int | None:
         """

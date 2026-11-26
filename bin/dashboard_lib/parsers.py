@@ -48,6 +48,8 @@ class StateParsers:
     MODEL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
     TOOL_EVAL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\beval '(.*)' < /dev/null", re.DOTALL)
     DOCKER_CGROUP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"docker[-/]([0-9a-f]{12})")
+    WORKTREE_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"ai-worktrees/[A-Za-z][A-Za-z0-9]*-(\d+)(?:/|$)")
+    PACKET_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|/)\d{4}-\d{2}-\d{2}-(\d+)-[^/]*(?:/|$)")
 
     @staticmethod
     def parse_iso_epoch(iso_text: str) -> float:
@@ -370,6 +372,22 @@ class StateParsers:
             gpu_processes=gpu_processes,
             containers=tuple(containers),
         )
+
+    @staticmethod
+    def issue_from_path(path: str) -> int | None:
+        """
+        Reads the issue a worktree or evidence packet belongs to from its path.
+
+        Args:
+            path: A path holding an `ai-worktrees/<prefix>-<issue>` worktree or a
+                `<YYYY-MM-DD>-<issue>-<slug>` packet.
+
+        Returns:
+            The issue number, or None when the path names neither.
+        """
+        match: re.Match[str] | None = StateParsers.WORKTREE_ISSUE_PATTERN.search(path) \
+            or StateParsers.PACKET_ISSUE_PATTERN.search(path)
+        return int(match.group(1)) if match else None
 
     @staticmethod
     def model_label(model_id: str) -> str:

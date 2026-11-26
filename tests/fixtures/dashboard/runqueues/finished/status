@@ -1,0 +1,5 @@
+granted: export WORV_ITER_CONTAINER=worv-iter-4 DOCKER_HOST=ssh://worv@worv-worker-03.local 2026-11-26T02:40:01Z
+RS6-on-s1322-render start 2026-11-26T02:47:25Z load1=5.28 host=worv@worv-worker-03.local
+RS6-on-s1322-render rc=0 end 2026-11-26T02:51:15Z load1=7.03
+ALLDONE render.queue 2026-11-26T02:51:15Z
+RELEASED render.queue 2026-11-26T02:51:16Z

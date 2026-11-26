@@ -179,9 +179,11 @@ bin/dashboard.sh stop
 HARNESS_HOME=/path/to/live/harness DASHBOARD_PORT=8790 bin/dashboard.sh   # read another checkout
 ```
 
-`bin/dashboard.py --help` lists the options: the cadences, the sparkline window, and `--once`, which
-prints one JSON snapshot and exits. The dashboard writes only its own history, GitHub cache, pid file
-and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). From `config/harness.env` it reads `GH_TOKEN`,
+`bin/dashboard.py --help` lists the options: the cadences, the sparkline window, the evidence root
+(`EVIDENCE_ROOT`), the build locks' names and folder (`BUILD_LOCK_NAMES`, `BUILD_LOCK_DIR`, as
+`bin/build_host.sh` reads them), how long a closed issue stays as done, and `--once`, which
+prints one JSON snapshot and exits. The dashboard writes only its own history, GitHub cache, flow state,
+URL, pid file and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). From `config/harness.env` it reads `GH_TOKEN`,
 `GH_REPO` and the label keys (`ISSUE_LABEL`, `WIP_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`,
 `READY_LABEL`, `FABLE_LABEL`, `FIRST_LABEL`, `LOW_LABEL`) and no other key; `--queue-label`
 overrides `ISSUE_LABEL`. The token reaches `gh` only through its environment and is removed from
@@ -194,6 +196,7 @@ every response. Every GitHub call is a read.
 | Running ticks | `claude -p` processes whose stdout is a `state/logs/tick-*.log`: slot from the slot lock they hold, model from `--model`, issue from the newest `state/locks/claim.<issue>` naming the pid, else a lease the pid holds, else a cached GitHub search for its claim comment. "Now" summarises the tick's youngest tool call: the working command's executable and a few arguments, with secret-looking values masked. No raw command line is served | each page load |
 | Issue queue and landings | GraphQL reads of the open `ai` issues, any `FIRST_LABEL` issue outside them, their `Depends on` states and the last day's merged PRs. Claimable follows `bin/claimable.sh`'s rules, its first-before-low gate included, and the panel lists what the gate holds back. The count is the dashboard's own; `bin/claimable.sh`'s (run every 5 min) and the allocator's stand beside it, marked unverified when taken while the dashboard's own read was failing, since `claimable.sh` prints 1 when `gh` fails | 1 min |
 | Stalls, allocator | the tails of `state/stalls.log` and `state/logs/allocator.log` | each page load |
+| Flow: each device with its card use, load, card memory, lease holders and compile lane; each issue as a card in its state column (waiting, claimed, compiling, waiting for a card, running on a card, landing, held, done), a line to each device lane it holds (solid) or waits for (dashed), and the latest transitions | the panels' data, plus the run folders `<evidence root>/*/runs*/` written in the last 6 h (`lease.log`: holder and BUSY streak; `status`: the arm running and its host), the build locks `<lock dir>/worv-dev-build-remote-<name>.lock` and `worv-dev-build.lock` (holder from the lock file, waiters from `lslocks`) and the issues closed in the last 6 h. Cards that changed state slide there on the next load; the last positions and transitions are kept in `state/dashboard/flow_state.json` | 10 s |
 | Usage | `~/.claude/usage-cache.json`, placed against the allocator's cut points (`bin/usage-lib.sh` defaults) | each page load |
 
 A slow ssh or `gh` call never holds a page: each source keeps its last result, and the footer

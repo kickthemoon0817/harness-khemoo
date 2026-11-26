@@ -13,9 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
 
+from dashboard_lib.buildlocks import BuildLockReader
+from dashboard_lib.flow import FlowBuilder, FlowInputs
+from dashboard_lib.flowtrack import FlowTracker
 from dashboard_lib.github import GitHubClient, GitHubError
 from dashboard_lib.models import (
     AllocatorLine,
+    BuildLane,
     ClaimRecord,
     HostHealthRow,
     HostStreak,
@@ -24,6 +28,7 @@ from dashboard_lib.models import (
     LeaseStatus,
     MachineProbe,
     ProcessInfo,
+    RunQueue,
     SourceResult,
     TickProcess,
     UsageReading,
@@ -32,6 +37,7 @@ from dashboard_lib.parsers import StateParsers
 from dashboard_lib.procs import ProcessScanner
 from dashboard_lib.queue import IssueQueue, QueueIssue, QueueLabels
 from dashboard_lib.redact import CommandRedactor
+from dashboard_lib.runqueue import RunQueueReader
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,13 @@ class DashboardConfig:
     dependency_ttl_s: float = 600.0
     pid_lookup_retry_s: float = 600.0
     claim_file_max_age_s: float = 172800.0
+    evidence_root: Path = Path.home() / "tmp_workspace" / "artifacts" / "manure-plan" / "evidence"
+    run_queue_window_s: float = 21600.0
+    build_lock_names: tuple[tuple[str, str], ...] = (("worv@10.50.1.6", "5090"), ("worv@worv-worker-03.local", "w03"))
+    build_lock_dir: Path = Path("/tmp")
+    done_window_s: float = 21600.0
+    flow_animate_s: float = 20.0
+    activity_ttl_s: float = 10.0
 
     @property
     def state_dir(self) -> Path:
@@ -157,6 +170,13 @@ exit 0
         self._processes: dict[int, ProcessInfo] = {}
         self.local_history_path: Path = config.data_dir / "local_history.tsv"
         self.github_cache_path: Path = config.data_dir / "github_cache.json"
+        self.run_queue_reader: RunQueueReader = RunQueueReader(config.evidence_root, config.run_queue_window_s)
+        self.build_lock_reader: BuildLockReader = BuildLockReader(dict(config.build_lock_names), config.build_lock_dir,
+                                                                  config.command_timeout_s)
+        self.flow_builder: FlowBuilder = FlowBuilder(config.labels, dict(config.build_lock_names),
+                                                     config.done_window_s)
+        self.flow_tracker: FlowTracker = FlowTracker(config.data_dir / "flow_state.json", config.flow_animate_s)
+        self._activity_lock: threading.Lock = threading.Lock()
 
     def start(self) -> None:
         """
@@ -167,6 +187,7 @@ exit 0
         os.chmod(self.config.data_dir, 0o700)
         self._load_local_history_in_place()
         self._load_github_cache_in_place()
+        self.flow_tracker.load()
         periodic_sources: list[tuple[str, float, Callable[[], None]]] = [
             ("local", self.config.local_interval_s, self.refresh_local_sample_in_place),
             ("remote", self.config.remote_interval_s, self.refresh_remote_probes_in_place),
@@ -318,11 +339,14 @@ exit 0
                     self._dependency_cache[number] = (state, started)
             since_iso: str = self._iso(started - 86400)
             landings: list[JsonDict] = self.github.fetch_merged_pulls(since_iso)
+            closed_issues: list[JsonDict] = self.github.fetch_closed_issues(
+                labels.all_issues, self._iso(started - self.config.done_window_s))
             self._look_up_unmapped_ticks_in_place(started)
             dependency_states: dict[int, str] = {number: self._dependency_cache[number][0]
                                                  for number in wanted_dependencies if number in self._dependency_cache}
             payload: JsonDict = {"issues": issues, "first_only_issues": first_only_issues,
-                                 "dependency_states": dependency_states, "landings": landings}
+                                 "dependency_states": dependency_states, "landings": landings,
+                                 "closed_issues": closed_issues}
             self._store("github", SourceResult(payload, started, duration_s=self.clock() - started,
                                                attempted_at=started))
             self._record_github_outcome_in_place(started, succeeded=True)
@@ -424,6 +448,13 @@ exit 0
 
         lease_view: JsonDict = self._lease_view(lease_status, lease_result, tick_pids, now)
         machines: list[JsonDict] = self._machine_views(lease_status, waiting_count, now)
+        run_queues, build_lanes = self._activity(ticks, now)
+        flow: JsonDict = self.flow_builder.build(FlowInputs(
+            groups=groups, ticks=ticks, queues=run_queues, lanes=build_lanes,
+            lease_slots=lease_status.slots if lease_status else (),
+            closed_issues=github_payload.get("closed_issues", []), machines=machines, titles=issue_titles, now=now,
+        ))
+        self.flow_tracker.update_in_place(flow, now)
         paused_result: SourceResult | None = self._result("paused")
         paused_state: JsonDict = paused_result.data if paused_result else {"paused": False, "reason": ""}
         live_standard_ticks: int = sum(1 for tick in ticks if tick.lane != "landing")
@@ -488,8 +519,40 @@ exit 0
                            for stall in StateParsers.parse_stalls(stalls_text, self.config.stall_lines)],
                 "allocator": allocator_views,
             },
+            "flow": flow,
             "sources": self._sources_view(now),
         }
+
+    def _activity(self, ticks: tuple[TickProcess, ...], now: float) -> tuple[tuple[RunQueue, ...],
+                                                                               tuple[BuildLane, ...]]:
+        """
+        Reads the run queues and compile lanes, at most every `activity_ttl_s`, keeping the last good read.
+
+        Args:
+            ticks: The live ticks, to name the issue of a lock party with no worktree in its path.
+            now: The current epoch.
+
+        Returns:
+            The run queues and the compile lanes.
+        """
+        with self._activity_lock:
+            previous: SourceResult | None = self._result("activity")
+            if previous is not None and previous.attempted_at is not None \
+                    and now - previous.attempted_at < self.config.activity_ttl_s and previous.data is not None:
+                return previous.data
+            started: float = self.clock()
+            run_queues: tuple[RunQueue, ...] = self.run_queue_reader.read_queues(self._processes, now)
+            try:
+                build_lanes: tuple[BuildLane, ...] = self.build_lock_reader.read_lanes(
+                    self._remote_hosts(), self._processes,
+                    {tick.pid: tick.issue for tick in ticks if tick.issue is not None})
+            except (OSError, subprocess.TimeoutExpired) as error:
+                self._store_failure("activity", self._describe_error(error), started)
+                kept: SourceResult | None = self._result("activity")
+                return (run_queues, kept.data[1] if kept and kept.data else ())
+            self._store("activity", SourceResult((run_queues, build_lanes), started,
+                                                 duration_s=self.clock() - started, attempted_at=now))
+            return run_queues, build_lanes
 
     def _machine_views(self, lease_status: LeaseStatus | None, waiting_count: int, now: float) -> list[JsonDict]:
         """
@@ -733,6 +796,7 @@ exit 0
             "lease": self.config.fast_ttl_s, "procs": self.config.fast_ttl_s, "local": self.config.local_interval_s,
             "paused": self.config.local_interval_s, "remote": self.config.remote_interval_s,
             "github": self.config.github_interval_s, "claimable_sh": self.config.claimable_interval_s,
+            "activity": self.config.activity_ttl_s,
         }
         view: JsonDict = {}
         for name, interval_s in intervals.items():

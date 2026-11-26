@@ -199,6 +199,10 @@ class DashboardApp:
             local_interval_s=options.local_interval,
             remote_interval_s=options.remote_interval,
             claimable_interval_s=options.claimable_interval,
+            evidence_root=Path(options.evidence_root).expanduser(),
+            build_lock_names=self.parse_build_lock_names(options.build_locks),
+            build_lock_dir=Path(options.build_lock_dir),
+            done_window_s=options.done_hours * 3600,
         )
         github: GitHubClient | None = GitHubClient(repo, self.github_token or None, options.gh) if repo else None
         self.collector: Collector = Collector(self.config, github)
@@ -281,6 +285,17 @@ class DashboardApp:
         return QueueLabels(all_issues=options.all_label, **overrides)
 
     @staticmethod
+    def parse_build_lock_names(text: str) -> tuple[tuple[str, str], ...]:
+        """
+        Args:
+            text: `<user@host>=<name> ...`, bin/build_host.sh's BUILD_LOCK_NAMES.
+
+        Returns:
+            (host, name) pairs; a word without `=` is left out.
+        """
+        return tuple((host, name) for host, _, name in (word.partition("=") for word in text.split()) if host and name)
+
+    @staticmethod
     def parse_options(arguments: list[str]) -> argparse.Namespace:
         """
         Args:
@@ -312,6 +327,15 @@ class DashboardApp:
                             help="read-only ssh probe of each remote host; 0 turns it off")
         parser.add_argument("--claimable-interval", type=float, default=300.0,
                             help="how often to run bin/claimable.sh; 0 turns it off")
+        parser.add_argument("--evidence-root",
+                            default=os.environ.get("EVIDENCE_ROOT", "~/tmp_workspace/artifacts/manure-plan/evidence"),
+                            help="folder of evidence packets whose runs*/ folders bin/arm_queue.sh writes")
+        parser.add_argument("--build-locks",
+                            default=os.environ.get("BUILD_LOCK_NAMES",
+                                                   "worv@10.50.1.6=5090 worv@worv-worker-03.local=w03"),
+                            help="'<user@host>=<name> ...': each remote host's build lock name, as bin/build_host.sh")
+        parser.add_argument("--build-lock-dir", default=os.environ.get("BUILD_LOCK_DIR", "/tmp"))
+        parser.add_argument("--done-hours", type=float, default=6.0, help="how long a closed issue stays as done")
         parser.add_argument("--once", action="store_true", help="print one JSON snapshot and exit")
         return parser.parse_args(arguments)
 

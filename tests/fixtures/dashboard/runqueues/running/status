@@ -1,0 +1,5 @@
+granted: export MANURE_GATE_LEASE_FILE=/h/state/locks/resource.lease.6 WORV_ITER_CONTAINER=worv-iter-6 ROS_DOMAIN_ID=82 DOCKER_HOST=ssh://worv@10.50.1.6 2026-11-26T02:54:44Z
+RS6-off-s1323-render lease slot 6 HELD 2502 4101 2026-11-26T02:54:44Z domain=82 remote-all no-cost render (alive)
+RS6-off-s1323-render start 2026-11-26T02:54:52Z load1=5.21 gpu_used_mib=20 tree=/w/parent-bfeb265d8 slot=worv-iter-6 domain=82 host=worv@10.50.1.6
+RS6-off-s1323-render rc=0 end 2026-11-26T03:03:01Z load1=6.10
+RS6-on-s1323-render start 2026-11-26T03:03:10Z load1=5.80 gpu_used_mib=24 tree=/w/parent-bfeb265d8 slot=worv-iter-6 domain=82 host=worv@10.50.1.6

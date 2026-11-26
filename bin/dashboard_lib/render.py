@@ -116,6 +116,48 @@ margin-right:3px;white-space:nowrap}
 .containers li{display:flex;justify-content:space-between;gap:8px;border-top:0;padding:1px 0}
 .containers li .sub{white-space:nowrap;font-size:11px}
 .hscroll{overflow-x:auto}.hscroll table{min-width:560px}
+.flow-scroll{overflow:auto;max-width:100%;border-radius:6px;background:var(--row);border:1px solid var(--border)}
+.flow-canvas{position:relative;font-size:11px;line-height:1.3}
+.flow-edges{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+.fedge{fill:none;stroke-width:1.5;opacity:.75}
+.fedge.card{stroke:var(--series)}.fedge.compile{stroke:var(--serious)}
+.fedge.waits{stroke-dasharray:5 4;opacity:.7}
+.fdev{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 9px;
+overflow:hidden;display:flex;flex-direction:column;gap:3px}
+.fdev .top{display:flex;justify-content:space-between;gap:6px;align-items:center}
+.fdev .top b{font-size:13px}.fdev .sub{font-size:11px}
+.fdev .meter{height:6px}
+.fdev .anchors{position:absolute;left:0;right:0;bottom:2px;height:12px;font-size:10px;color:var(--ink2)}
+.fdev .anchors span{position:absolute;transform:translateX(-50%)}
+.fdev .holders{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fdev.flagged{border-color:var(--warning);box-shadow:0 0 0 1px var(--warning)}
+.fcol{position:absolute;font-size:11px;font-weight:650;color:var(--ink2);text-transform:uppercase;letter-spacing:.04em;
+border-bottom:1px solid var(--hair);padding:2px 0 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+background:var(--row)}
+.fcol .sub{font-weight:400;text-transform:none;letter-spacing:0}
+.fmore{position:absolute;font-size:11px;color:var(--ink2);font-style:italic}
+.fcard{position:absolute;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--idle);
+border-radius:6px;padding:4px 6px;overflow:hidden}
+.fcard .l1{display:flex;gap:4px;align-items:center;white-space:nowrap;overflow:hidden}
+.fcard .l1 a{font-weight:650}
+.fcard .chip{font-size:10px;padding:0 4px;margin:0}
+.fcard .l2,.fcard .l3{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fcard .l3{color:var(--ink2)}
+.fcard.claimed{border-left-color:var(--info)}.fcard.compiling{border-left-color:var(--serious)}
+.fcard.waiting_card{border-left-color:var(--warning)}.fcard.running{border-left-color:var(--good)}
+.fcard.landing{border-left-color:var(--info)}.fcard.done{border-left-color:var(--good);opacity:.8}
+.fcard.moved{animation:flow-move 1.1s cubic-bezier(.2,.7,.2,1) both}
+.fcard.fresh{animation:flow-in .9s ease-out both}
+.fedge.fresh{animation:flow-fade .8s ease-out .3s both}
+.fedge.late{animation:flow-fade .6s ease-out 1.1s both}
+@keyframes flow-move{from{transform:translate(var(--dx),var(--dy))}to{transform:none}}
+@keyframes flow-in{from{opacity:0;transform:translateY(-10px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes flow-fade{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.fcard,.fedge{animation:none!important}}
+.flow-legend{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--ink2);margin:0 0 6px}
+.flow-legend svg{vertical-align:middle}
+.flow-trail{margin:8px 0 0;padding:0;list-style:none;font-size:12px}
+.flow-trail li{padding:2px 0;border-top:1px dashed var(--hair);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 footer{color:var(--ink2);font-size:11px}
 footer table td,footer table th{font-size:11px;padding:2px 6px}
 """
@@ -141,6 +183,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             self._queue_section(snapshot),
             f'<section class="grid thirds">{self._landings_panel(snapshot)}{self._stalls_panel(snapshot)}'
             f'{self._allocator_panel(snapshot)}</section>',
+            self._flow_section(snapshot),
             self._sources_footer(snapshot, token_query),
             "</main>",
         ))
@@ -730,6 +773,136 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         return (f'<article class="panel"><h2>Allocator <span class="sub">state/logs/allocator.log, newest first</span>'
                 '</h2><div class="scroll"><table><colgroup><col style="width:60px"><col style="width:110px"><col>'
                 f"</colgroup>{body}</table></div></article>")
+
+    def _flow_section(self, snapshot: JsonDict) -> str:
+        """
+        Renders the flow diagram: devices on top, issue cards in state columns under them, a line from each card
+        to each device lane it holds (solid) or waits for (dashed), and the newest transitions under it. A card
+        that moved since the last diagram starts where it was and slides to its place; new cards and lines fade
+        in. Positions come from the snapshot, so the page needs no script.
+
+        Args:
+            snapshot: The snapshot.
+
+        Returns:
+            The section HTML, or an empty string when the snapshot has no diagram.
+        """
+        flow: JsonDict | None = snapshot.get("flow")
+        if not flow:
+            return ""
+        width: int = int(flow["width"])
+        height: int = int(flow["height"])
+        moved_issues: frozenset[int] = frozenset(card["issue"] for card in flow["cards"] if card.get("moved"))
+        paths: list[str] = []
+        for edge in flow["edges"]:
+            x1, y1, x2, y2 = (float(edge[key]) for key in ("x1", "y1", "x2", "y2"))
+            bend: float = max(40.0, (y1 - y2) / 2)
+            state: str = "late" if edge["issue"] in moved_issues else ("fresh" if edge.get("fresh") else "")
+            paths.append(
+                f'<path class="fedge {self._e(edge["lane"])} {self._e(edge["kind"])} {state}" '
+                f'd="M{x1:.0f},{y1:.0f} C{x1:.0f},{y1 - bend:.0f} {x2:.0f},{y2 + bend:.0f} {x2:.0f},{y2:.0f}">'
+                f'<title>#{self._e(edge["issue"])} {self._e(edge["kind"])} the {self._e(edge["lane"])} lane of '
+                f'{self._e(edge["device"])}</title></path>'
+            )
+        parts: list[str] = [f'<svg class="flow-edges" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+                            f'aria-hidden="true">{"".join(paths)}</svg>']
+        for device in flow["devices"]:
+            parts.append(self._flow_device(device))
+        for column in flow["columns"]:
+            parts.append(f'<div class="fcol" style="left:{column["x"]}px;top:{column["y"]}px;width:{column["w"]}px">'
+                         f'{self._e(column["title"])} <span class="sub">{column["count"]}</span></div>')
+            if column["hidden"]:
+                parts.append(f'<div class="fmore" style="left:{column["x"] + 4}px;top:{column["more_y"]}px">'
+                             f'+{column["hidden"]} more</div>')
+        for card in flow["cards"]:
+            parts.append(self._flow_card(card))
+        legend: str = (
+            '<div class="flow-legend">'
+            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge card holds"/></svg> '
+            'holds a card</span>'
+            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge card waits"/></svg> '
+            'waits for a card</span>'
+            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge compile holds"/></svg>'
+            ' holds a compile lane</span>'
+            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge compile waits"/></svg>'
+            ' waits for a compile lane</span>'
+            '<span>cards slide to their new state on each refresh</span></div>'
+        )
+        trail: str = "".join(
+            f'<li title="{self._e(transition["from"])} → {self._e(transition["to"])}">'
+            f'<span class="sub">{self._clock(transition["time"])}</span> <b>#{self._e(transition["issue"])}</b> '
+            f'{self._e(transition["from"])} → {self._e(transition["to"])}</li>'
+            for transition in flow.get("transitions", [])[:8]
+        ) or '<li class="note">no transition seen yet</li>'
+        return (
+            '<section class="panel"><h2>Flow <span class="sub">issues by state, and the device each holds or waits '
+            'for</span></h2>'
+            f'{legend}<div class="flow-scroll"><div class="flow-canvas" style="width:{width}px;height:{height}px">'
+            f'{"".join(parts)}</div></div><ol class="flow-trail">{trail}</ol></section>'
+        )
+
+    def _flow_device(self, device: JsonDict) -> str:
+        """
+        Renders one device node: card use, load, card memory, lease holders, compile lane and the idle flag.
+
+        Args:
+            device: A device from the snapshot's flow.
+
+        Returns:
+            The node HTML.
+        """
+        util: float | None = device.get("gpu_util_pct")
+        flag: str = self._pill("warning", "card idle, queue waiting") if device.get("idle_with_queue") else ""
+        status: str = self._pill(self.STATUS_LEVELS.get(device.get("status") or "", "idle"),
+                                 device.get("status") or "unknown")
+        holders: str = ", ".join(self._e(holder) for holder in device.get("holders", [])) or "no lease held"
+        memory: str = f'{self._gb(device.get("gpu_mem_used_mb"))} / {self._gb(device.get("gpu_mem_total_mb"))} GB'
+        load: str = f'{self._number(device.get("load1"))} / {device.get("nproc") or "?"} cores'
+        width: float = min(100.0, max(0.0, float(util or 0)))
+        card_anchor: float = device["w"] * 0.3
+        compile_anchor: float = device["w"] * 0.75
+        return (
+            f'<div class="fdev{" flagged" if device.get("idle_with_queue") else ""}" '
+            f'style="left:{device["x"]}px;top:{device["y"]}px;width:{device["w"]}px;height:{device["h"]}px">'
+            f'<div class="top"><span><b>{self._e(device["tag"])}</b> <span class="sub">{self._e(device["name"])}'
+            f'</span></span><span class="pills">{flag}{status}</span></div>'
+            f'<div class="sub">{self._e(device.get("gpu_name") or "card unknown")}</div>'
+            f'<div style="display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center">'
+            f'<span class="sub">GPU</span><span class="meter"><b style="width:{width:.0f}%"></b></span>'
+            f'<span class="num">{self._percent(util)}</span></div>'
+            f'<div class="sub num">load {load} &middot; card memory {memory}</div>'
+            f'<div class="holders" title="{holders}">lease: {holders}</div>'
+            f'<div class="sub">{self._e(device.get("compile", ""))}</div>'
+            f'<div class="anchors"><span style="left:{card_anchor:.0f}px">▾ card</span>'
+            f'<span style="left:{compile_anchor:.0f}px">▾ compile</span></div></div>'
+        )
+
+    def _flow_card(self, card: JsonDict) -> str:
+        """
+        Renders one issue card at its place; a moved card starts at its old place, a new one fades in.
+
+        Args:
+            card: A card from the snapshot's flow.
+
+        Returns:
+            The card HTML.
+        """
+        motion: str = ""
+        classes: str = f'fcard {self._e(card["column"])}'
+        if card.get("moved") and card.get("from_x") is not None:
+            classes += " moved"
+            motion = f';--dx:{float(card["from_x"]) - float(card["x"]):.0f}px;--dy:{float(card["from_y"]) - float(card["y"]):.0f}px'
+        elif card.get("fresh"):
+            classes += " fresh"
+        chips: str = "".join(f'<span class="chip">{self._e(chip)}</span>' for chip in card.get("chips", []))
+        hover: str = f'#{card["issue"]} {card.get("title", "")}: {card.get("detail", "")}'
+        return (
+            f'<div class="{classes}" style="left:{card["x"]}px;top:{card["y"]}px;width:{card["w"]}px;'
+            f'height:{card["h"]}px{motion}" title="{self._e(hover)}">'
+            f'<div class="l1">{self._issue_link(card["issue"], card.get("url"))}{chips}</div>'
+            f'<div class="l2">{self._e(card.get("detail", ""))}</div>'
+            f'<div class="l3">{self._e(card.get("title", ""))}</div></div>'
+        )
 
     def _sources_footer(self, snapshot: JsonDict, token_query: str) -> str:
         """
