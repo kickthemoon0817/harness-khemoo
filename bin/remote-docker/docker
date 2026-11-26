@@ -28,6 +28,9 @@ for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
 # the engine and not another tick's compile: a tick that does not hold that lease starts no
 # container on the host. Runs outside a tick (the operator, the scheduled suites) are not held.
 # A whole card held with `--no-cost` times nothing, so the host's other work goes on beside it.
+# A cost read still waiting for a card asks it to go quiet (bin/cost_wait_hosts.sh): another
+# tick's container without a card (`--gpus` absent) is refused there too. Containers with a card
+# answer to their own lease, and the waiting issue's own containers run.
 harness_home=$(cd "$self_dir/../.." && pwd)
 if caller_tick=$("$harness_home/bin/tick-pid.sh" "$$" 2>/dev/null); then
   holder=$("$harness_home/bin/lease.sh" status < /dev/null 2>/dev/null | awk -v h="$target" '
@@ -44,6 +47,16 @@ if caller_tick=$("$harness_home/bin/tick-pid.sh" "$$" 2>/dev/null); then
     done
     if [ -z "$own" ]; then
       echo "remote-docker: $target is held whole by #$holder_issue's cost read (lease.sh status shows remote-all); run this on the other host's lane" >&2
+      exit 75
+    fi
+  fi
+  gpus=""; for a in "$@"; do case "$a" in --gpus|--gpus=*) gpus=1 ;; esac; done
+  if [ -z "$gpus" ]; then
+    caller_issue=$(grep -lE "^[0-9]+ $caller_tick( |$)" "$harness_home"/state/locks/claim.* 2>/dev/null | head -1)
+    caller_issue=${caller_issue##*.}
+    waiter=$("$harness_home/bin/cost_wait_hosts.sh" ${caller_issue:+--except-issue "$caller_issue"} | awk -v h="$target" '$1 == h { print $2; exit }')
+    if [ -n "$waiter" ]; then
+      echo "remote-docker: #$waiter's cost read waits for $target to go quiet; run this container on the other host's lane (bin/build_host.sh names it)" >&2
       exit 75
     fi
   fi

@@ -17,7 +17,6 @@ H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 S="${HARNESS_STATE:-$H/state}"
 : "${BUILD_LOCK_NAMES:=worv@10.50.1.6=5090 worv@worv-worker-03.local=w03}"
 : "${BUILD_LOCK_DIR:=/tmp}"
-: "${COST_WAIT_FRESH_S:=120}"
 mapfile -t hosts < <(grep -v '^[[:space:]]*$' "$S/locks/harness-first-remote-only" 2>/dev/null)
 [ "${#hosts[@]}" -gt 0 ] || { echo "build_host: no harness host is named" >&2; exit 1; }
 lock_of() {
@@ -30,22 +29,7 @@ held=$("$H/bin/lease.sh" status < /dev/null 2>/dev/null | awk '
     /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
     /^slot [0-9]+ HELD / && / remote-all / && !/ no-cost / && /\(alive\)$/ { held[$2] = 1 }
     END { for (h in lo) for (s in held) if (s + 0 >= lo[h] && s + 0 <= hi[h]) { print h; break } }')
-any_held=$("$H/bin/lease.sh" status < /dev/null 2>/dev/null | awk '
-    /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
-    /^slot [0-9]+ HELD / && /\(alive\)$/ { held[$2] = 1 }
-    END { for (h in lo) for (s in held) if (s + 0 >= lo[h] && s + 0 <= hi[h]) { print h; break } }')
-waited=""; now=$(date +%s)
-for f in "$S"/locks/cost-wait.*; do
-  [ -f "$f" ] || continue
-  read -r want t _ < "$f"
-  [[ "${t:-}" =~ ^[0-9]+$ ]] && [ $(( now - t )) -le "$COST_WAIT_FRESH_S" ] || continue
-  if [ "$want" != any ]; then waited+="$want"$'\n'; continue; fi
-  quiet=$(awk -F'\t' -v held=" $(echo $any_held) " '
-      $1 != "time" && index(held, " " $2 " ") == 0 && $5 ~ /^[0-9.]+$/ { load[$2] = $5 }
-      END { best = ""; for (h in load) if (best == "" || load[h] + 0 < load[best] + 0) best = h; print best }' \
-      "$S/host_health.tsv" 2>/dev/null)
-  [ -n "$quiet" ] && waited+="$quiet"$'\n'
-done
+waited=$("$H/bin/cost_wait_hosts.sh" | awk '{ print $1 }')
 cands=()
 for h in "${hosts[@]}"; do
   grep -qxF "$h" <<< "$held" && continue
