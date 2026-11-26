@@ -132,6 +132,7 @@ in-flight ticks finish on their own.
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
 | `bin/pr_sweep.sh` | cron every 30 min: closes open `ai/<n>-…` pull requests whose issue is closed |
+| `bin/build_host.sh` | prints the `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` exports for the host whose compile lock is free |
 | `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
 
 ## Scenario arm queues
