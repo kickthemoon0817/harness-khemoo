@@ -109,6 +109,13 @@ margin-right:3px;white-space:nowrap}
 .note{color:var(--ink2);font-size:12px}.line{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
 .empty{color:var(--ink2);font-style:italic;padding:4px 0}
+.list li.fold{white-space:normal}
+.list details summary{cursor:pointer;color:var(--ink2);list-style:revert}
+.list details[open] summary{margin-bottom:2px}
+.containers{margin:0;padding:0 0 0 14px;list-style:none}
+.containers li{display:flex;justify-content:space-between;gap:8px;border-top:0;padding:1px 0}
+.containers li .sub{white-space:nowrap;font-size:11px}
+.hscroll{overflow-x:auto}.hscroll table{min-width:560px}
 footer{color:var(--ink2);font-size:11px}
 footer table td,footer table th{font-size:11px;padding:2px 6px}
 """
@@ -288,14 +295,16 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             for process in machine.get("gpu_processes", [])
         ]
         containers: list[str] = [
-            f'{self._e(container.get("name", ""))} <span class="sub">{self._e(container.get("status", ""))}</span>'
+            f'<li><span class="line" title="{self._e(container.get("image", ""))}">{self._e(container.get("name", ""))}'
+            f'</span><span class="sub">{self._e(container.get("status", ""))}</span></li>'
             for container in machine.get("containers", [])
         ]
         details: str = ""
         if processes:
             details += f'<li title="compute processes on the card">card: {"; ".join(processes)}</li>'
         if containers:
-            details += f'<li>containers: {"; ".join(containers)}</li>'
+            details += (f'<li class="fold"><details><summary>containers <span class="sub">{len(containers)}</span>'
+                        f'</summary><ul class="containers">{"".join(containers)}</ul></details></li>')
         error: str = f'<div class="err">live read: {self._e(machine["probe_error"])}</div>' \
             if machine.get("probe_error") else ""
         sampled: str = f'<div class="note">sampled {self._duration(machine.get("age_s"))} ago</div>' \
@@ -479,7 +488,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             "<tr><th>Issue</th><th>Model</th><th>Slot</th><th>Age</th><th>Leases</th><th>Now</th><th>PID / from</th></tr>"
             f'{"".join(rows)}</table>'
         ) if rows else '<div class="empty">no tick running</div>'
-        return f'<article class="panel"><h2>Running ticks <span class="sub">{len(ticks)} live</span></h2>{table}</article>'
+        return (f'<article class="panel"><h2>Running ticks <span class="sub">{len(ticks)} live</span></h2>'
+                f'<div class="hscroll">{table}</div></article>')
 
     def _leases_panel(self, snapshot: JsonDict) -> str:
         """
@@ -543,7 +553,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         error: str = f'<div class="err">last read failed: {self._e(leases["error"])}</div>' if leases.get("error") else ""
         held: int = sum(1 for slot in leases.get("slots", []) if slot.get("state") != "free")
         return (f'<article class="panel"><h2>GPU slots and leases <span class="sub">{held} of '
-                f'{len(leases.get("slots", []))} held</span></h2>{table}<ul class="list">{"".join(notes)}</ul>{error}</article>')
+                f'{len(leases.get("slots", []))} held</span></h2><div class="hscroll">{table}</div>'
+                f'<ul class="list">{"".join(notes)}</ul>{error}</article>')
 
     def _queue_section(self, snapshot: JsonDict) -> str:
         """
@@ -739,9 +750,9 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             for name, source in snapshot.get("sources", {}).items()
             if source.get("interval_s", 0) > 0 or source.get("age_s") is not None
         )
-        return ('<footer class="panel"><table><colgroup><col style="width:120px"><col style="width:70px">'
+        return ('<footer class="panel"><div class="hscroll"><table><colgroup><col style="width:120px"><col style="width:70px">'
                 '<col style="width:90px"><col style="width:70px"><col></colgroup>'
-                f"<tr><th>Source</th><th>Age</th><th>Cadence</th><th>Took</th><th>Last error</th></tr>{rows}</table>"
+                f"<tr><th>Source</th><th>Age</th><th>Cadence</th><th>Took</th><th>Last error</th></tr>{rows}</table></div>"
                 f'<div style="margin-top:4px">JSON: <a href="/api/state{self._e(token_query)}">/api/state</a></div>'
                 '</footer>')
 

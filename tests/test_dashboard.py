@@ -1080,5 +1080,18 @@ class HttpServerTest(unittest.TestCase):
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, completed.stdout + completed.stderr)
 
 
+class MachineCardTest(unittest.TestCase):
+    def test_containers_fold_into_a_details_list(self) -> None:
+        snapshot: JsonDict = {"generated_epoch": 0, "machines": [{
+            "key": "local", "name": "box", "kind": "local", "status": "ok", "history": {}, "slots": [],
+            "containers": [{"name": "worv-iter-4", "status": "Up 8 minutes", "image": "isaac:1"},
+                           {"name": "isaac_sim_dev", "status": "Up 3 weeks", "image": "isaac:2"}],
+        }]}
+        page: str = HtmlRenderer().render(snapshot, 30)
+        self.assertIn("<details><summary>containers <span class=\"sub\">2</span></summary>", page)
+        self.assertIn("<li><span class=\"line\" title=\"isaac:1\">worv-iter-4</span>", page)
+        self.assertNotIn("worv-iter-4 <span class=\"sub\">Up 8 minutes</span>; ", page)
+
+
 if __name__ == "__main__":
     unittest.main()
