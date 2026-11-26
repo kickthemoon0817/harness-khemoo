@@ -256,6 +256,18 @@ check "--want-host asks the lease for that host alone" \
   'grep -q "lease acquire 2464 .*want=worv@hostA" "$CALLS" && ! grep "lease acquire" "$CALLS" | tail -1 | grep -q "want= "' "$(calls)"
 
 new_case "$A|RS1-c|RS1|||||"
+mkdir -p "$P/runs"; echo any > "$P/runs/want-host"
+printf 'grant:hostB\n' > "$T/lease.seq"; run_q --want-host worv@hostA; rc=$?
+check "a want-host override of any unpins the queue: it asks with no host and keeps a grant elsewhere" \
+  '[ "$rc" -eq 0 ] && grep -q "want-host override: worv@hostA -> any" "$P/runs/lease.log" && ! grep -q "not worv@hostA: released" "$P/runs/lease.log" && grep -q "container=iter-hostB" "$CALLS"' "rc=$rc $(cat "$P/runs/lease.log") $(calls)"
+
+new_case "$A|RS1-c|RS1|||||"
+mkdir -p "$P/runs"; echo any > "$P/runs/want-host"
+printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host worv@hostA --bar-read; rc=$?
+check "a bar read keeps its host: the override is not read and a grant elsewhere is released" \
+  '[ "$rc" -eq 0 ] && ! grep -q "want-host override" "$P/runs/lease.log" && grep -q "grant on worv@hostB, not worv@hostA: released" "$P/runs/lease.log" && grep -q "^holder .* bar=1 " "$P/runs/lease.log"' "rc=$rc $(cat "$P/runs/lease.log")"
+
+new_case "$A|RS1-c|RS1|||||"
 run_q --runner baseline --host-load; rc=$?
 check "--runner baseline runs pbd_baseline.py with the engine arm" \
   'grep -q "runner pbd_baseline.py run tools/eval/scenarios/RS1.toml --arm engine --run-mode lockstep_sync --out" "$CALLS"' "$(calls)"
