@@ -160,9 +160,11 @@ exit 0
 
     def start(self) -> None:
         """
-        Creates the data directory, loads the saved history and GitHub cache, and starts the source threads.
+        Creates the data directory, owner-only, loads the saved history and GitHub cache, and starts the source
+        threads.
         """
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.config.data_dir, 0o700)
         self._load_local_history_in_place()
         self._load_github_cache_in_place()
         periodic_sources: list[tuple[str, float, Callable[[], None]]] = [

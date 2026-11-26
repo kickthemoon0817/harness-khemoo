@@ -3,7 +3,10 @@
 Exercises bin/dashboard.py: the state-file parsers, the tick-to-issue mapping, the queue grouping, and the
 collector, page and HTTP server against a scratch harness home with a fake lease.sh, claimable.sh and gh.
 """
+import contextlib
 import html
+import http.client
+import io
 import json
 import os
 import shlex
@@ -414,7 +417,7 @@ class SecretSurfaceTest(unittest.TestCase):
         collector.refresh_github_in_place()
         snapshot = collector.snapshot()
         snapshot_json: str = json.dumps(snapshot, default=str)
-        page: str = HtmlRenderer().render(snapshot, 30)
+        page: str = HtmlRenderer().render(snapshot, 30, "access")
 
         tick = next(tick for tick in snapshot["ticks"] if tick["pid"] == tick_pid)
         self.assertEqual(tick["doing"], "bash -c 'sleep 30' x GH_TOKEN=[redacted] \u2026")
@@ -698,7 +701,7 @@ class CollectorAndPageTest(unittest.TestCase):
 
     def test_page_renders_every_panel_and_escapes(self) -> None:
         page: str = HtmlRenderer().render(self.snapshot, 30)
-        for expected in ("Harness status", '<meta http-equiv="refresh" content="30">', "worv@worker-a.local",
+        for expected in ("Harness status", '<meta http-equiv="refresh" content="30;url=/', "worv@worker-a.local",
                          "moved last (3 bad probes)", "GPU slots and leases", "whole card", "operator priority",
                          "Running ticks", "#2464", "Opus 5.5", "Claimable", "from this read (ai:plan)",
                          "claimable.sh 2", "held back by the first-before-low gate: 2", "#2503",
@@ -794,9 +797,16 @@ class CollectorAndPageTest(unittest.TestCase):
 
 
 class HttpServerTest(unittest.TestCase):
-    def test_serves_page_json_and_health_on_loopback_without_the_token(self) -> None:
-        harness: FixtureHarness = FixtureHarness()
-        self.addCleanup(harness.close)
+    def serve(self, harness: FixtureHarness) -> tuple[dashboard.DashboardHttpServer, int]:
+        """
+        Starts the dashboard's server on a free port for one test.
+
+        Args:
+            harness: The scratch harness home.
+
+        Returns:
+            The server and its port.
+        """
         options = dashboard.DashboardApp.parse_options([
             "--harness-home", str(harness.home), "--data-dir", str(harness.home / "data"), "--port", "0",
             "--gh", str(harness.home / "bin" / "gh"),
@@ -805,30 +815,133 @@ class HttpServerTest(unittest.TestCase):
         app = dashboard.DashboardApp(options)
         self.assertEqual(app.config.repo, "example/repo")
         app.collector.refresh_github_in_place()
-        server = dashboard.DashboardHttpServer(0, app.collector, HtmlRenderer(), 30, (app.token,))
+        server = dashboard.DashboardHttpServer(0, app.collector, HtmlRenderer(), 30, (app.github_token,),
+                                               self.ACCESS_TOKEN)
         self.addCleanup(server.server_close)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        host, port = server.server_address[:2]
-        self.assertEqual(host, "127.0.0.1")
-        base: str = f"http://127.0.0.1:{port}"
-        with urllib.request.urlopen(base + "/healthz", timeout=10) as response:
-            self.assertEqual(response.read(), b"ok\n")
-        with urllib.request.urlopen(base + "/", timeout=30) as response:
-            page: str = response.read().decode()
-            self.assertEqual(response.headers["Content-Type"], "text/html; charset=utf-8")
-        with urllib.request.urlopen(base + "/api/state", timeout=30) as response:
-            state = json.loads(response.read())
-        with self.assertRaises(urllib.error.HTTPError) as missing:
-            urllib.request.urlopen(base + "/config/harness.env", timeout=10)
-        self.assertEqual(missing.exception.code, 404)
+        return server, server.server_address[1]
+
+    @staticmethod
+    def request(port: int, path: str, host: str | None) -> tuple[int, dict[str, str], str]:
+        """
+        Sends one GET with a chosen Host header, or none.
+
+        Args:
+            port: The server's port.
+            path: Path and query.
+            host: The Host header; None sends none.
+
+        Returns:
+            Status, headers and body.
+        """
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            connection.putrequest("GET", path, skip_host=True)
+            if host is not None:
+                connection.putheader("Host", host)
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, {name.lower(): value for name, value in response.getheaders()}, \
+                response.read().decode()
+        finally:
+            connection.close()
+
+    ACCESS_TOKEN: ClassVar[str] = "test-access-token-0123456789"
+
+    def test_serves_page_json_and_health_on_loopback_without_the_github_token(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        server, port = self.serve(harness)
+        self.assertEqual(server.server_address[0], "127.0.0.1")
+        self.assertEqual(server.url, f"http://127.0.0.1:{port}/?t={self.ACCESS_TOKEN}")
+        host: str = f"127.0.0.1:{port}"
+        status, _, body = self.request(port, "/healthz", host)
+        self.assertEqual((status, body), (200, "ok\n"))
+        status, headers, page = self.request(port, f"/?t={self.ACCESS_TOKEN}", host)
+        self.assertEqual((status, headers["content-type"]), (200, "text/html; charset=utf-8"))
+        status, _, body = self.request(port, f"/api/state?t={self.ACCESS_TOKEN}", f"localhost:{port}")
+        self.assertEqual(status, 200)
+        state = json.loads(body)
+        status, _, _ = self.request(port, f"/config/harness.env?t={self.ACCESS_TOKEN}", host)
+        self.assertEqual(status, 404)
         self.assertIn("Harness status", page)
+        self.assertIn(f'content="30;url=/?t={self.ACCESS_TOKEN}"', page)
+        self.assertIn(f'href="/api/state?t={self.ACCESS_TOKEN}"', page)
+        self.assertNotIn(self.ACCESS_TOKEN, body)
         self.assertEqual(state["repo"], "example/repo")
         self.assertEqual(state["queue"]["counts"]["running"] + state["queue"]["counts"]["claimable"], 4)
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, page)
-        self.assertNotIn(FixtureHarness.FAKE_TOKEN, json.dumps(state))
+        self.assertNotIn(FixtureHarness.FAKE_TOKEN, body)
         self.assertEqual(server.scrub(f"x {FixtureHarness.FAKE_TOKEN} y"), "x [redacted] y")
+
+    def test_refuses_a_foreign_host_and_a_missing_or_wrong_access_token(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        _, port = self.serve(harness)
+        good: str = f"?t={self.ACCESS_TOKEN}"
+        for host in ("attacker.example", f"attacker.example:{port}", f"127.0.0.1:{port + 1}", "127.0.0.1",
+                     f"0.0.0.0:{port}", "", None):
+            for path in ("/healthz", "/" + good, "/api/state" + good):
+                with self.subTest(host=host, path=path):
+                    status, _, body = self.request(port, path, host)
+                    self.assertEqual(status, 421)
+                    self.assertNotIn("Harness status", body)
+        for path in ("/", "/api/state", "/?t=", "/api/state?t=wrong", "/?x=" + self.ACCESS_TOKEN,
+                     f"/api/state?t={self.ACCESS_TOKEN}x"):
+            with self.subTest(path=path):
+                status, _, body = self.request(port, path, f"127.0.0.1:{port}")
+                self.assertEqual(status, 403)
+                self.assertNotIn("repo", body)
+        status, _, _ = self.request(port, "/" + good, f"LOCALHOST:{port}")
+        self.assertEqual(status, 200)
+
+    def test_every_response_carries_the_security_headers(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        _, port = self.serve(harness)
+        for path, host, expected_status in (("/?t=" + self.ACCESS_TOKEN, f"127.0.0.1:{port}", 200),
+                                            ("/api/state?t=" + self.ACCESS_TOKEN, f"127.0.0.1:{port}", 200),
+                                            ("/", f"127.0.0.1:{port}", 403),
+                                            ("/", "evil.example", 421),
+                                            ("/missing", f"127.0.0.1:{port}", 404)):
+            with self.subTest(path=path, host=host):
+                status, headers, _ = self.request(port, path, host)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(headers["cross-origin-resource-policy"], "same-origin")
+                self.assertEqual(headers["x-content-type-options"], "nosniff")
+                self.assertEqual(headers["referrer-policy"], "no-referrer")
+                policy: str = headers["content-security-policy"]
+                self.assertIn("default-src 'none'", policy)
+                self.assertIn("frame-ancestors 'none'", policy)
+                self.assertNotIn("http", policy)
+                self.assertNotIn("*", policy)
+
+    def test_request_log_never_holds_the_access_token(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        _, port = self.serve(harness)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            self.request(port, f"/api/state?t={self.ACCESS_TOKEN}", f"127.0.0.1:{port}")
+        self.assertIn("/api/state?t=[token]", captured.getvalue())
+        self.assertNotIn(self.ACCESS_TOKEN, captured.getvalue())
+
+    def test_private_file_is_owner_only_and_never_follows_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path: Path = Path(directory) / "dashboard.url"
+            path.write_text("old")
+            path.chmod(0o644)
+            dashboard.DashboardApp.write_private_file(path, "http://127.0.0.1:1/?t=x\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_text(), "http://127.0.0.1:1/?t=x\n")
+            target: Path = Path(directory) / "elsewhere"
+            target.write_text("keep")
+            link: Path = Path(directory) / "planted.url"
+            link.symlink_to(target)
+            with self.assertRaises(OSError):
+                dashboard.DashboardApp.write_private_file(link, "secret")
+            self.assertEqual(target.read_text(), "keep")
 
     def test_labels_come_from_the_env_file_and_the_flag_overrides_the_queue_label(self) -> None:
         harness: FixtureHarness = FixtureHarness()
@@ -858,18 +971,34 @@ class HttpServerTest(unittest.TestCase):
         self.addCleanup(subprocess.run, [script, "stop"], env=environment, capture_output=True)
         started = subprocess.run([script, *options], env=environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(started.returncode, 0, started.stderr)
-        self.assertEqual(started.stdout.strip(), f"http://127.0.0.1:{port}/")
+        url: str = started.stdout.strip()
+        self.assertRegex(url, rf"^http://127\.0\.0\.1:{port}/\?t=[A-Za-z0-9_-]{{20,}}$")
+        access_token: str = url.split("?t=", 1)[1]
+        data: Path = harness.home / "data"
+        self.assertEqual(data.stat().st_mode & 0o777, 0o700)
+        for name in ("dashboard.url", "dashboard.log", "dashboard.pid"):
+            self.assertEqual((data / name).stat().st_mode & 0o077, 0, name)
+        self.assertEqual((data / "dashboard.url").read_text().strip(), url)
         again = subprocess.run([script, *options], env=environment, capture_output=True, text=True, timeout=30)
         self.assertIn("already running", again.stdout)
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=30) as response:
+        self.assertIn(url, again.stdout)
+        with urllib.request.urlopen(url.replace("/?t=", "/api/state?t="), timeout=30) as response:
             self.assertEqual(json.loads(response.read())["repo"], "example/repo")
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=30)
+        self.assertEqual(refused.exception.code, 403)
         status = subprocess.run([script, "status"], env=environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(status.returncode, 0)
+        self.assertIn(url, status.stdout)
         stopped = subprocess.run([script, "stop"], env=environment, capture_output=True, text=True, timeout=30)
         self.assertIn("stopped pid", stopped.stdout)
+        self.assertFalse((data / "dashboard.url").exists())
         status = subprocess.run([script, "status"], env=environment, capture_output=True, text=True, timeout=30)
         self.assertEqual(status.returncode, 1)
-        self.assertNotIn(FixtureHarness.FAKE_TOKEN, (harness.home / "data" / "dashboard.log").read_text())
+        log: str = (data / "dashboard.log").read_text()
+        self.assertNotIn(FixtureHarness.FAKE_TOKEN, log)
+        self.assertIn(url, log)
+        self.assertNotIn(f"?t={access_token} HTTP", log)
 
     def test_once_prints_a_snapshot_without_the_token(self) -> None:
         harness: FixtureHarness = FixtureHarness()

@@ -2,6 +2,7 @@
 Renders a snapshot as one self-contained HTML page: inline CSS, inline SVG sparklines, no scripts.
 """
 import html
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
@@ -112,17 +113,19 @@ footer{color:var(--ink2);font-size:11px}
 footer table td,footer table th{font-size:11px;padding:2px 6px}
 """
 
-    def render(self, snapshot: JsonDict, refresh_s: int) -> str:
+    def render(self, snapshot: JsonDict, refresh_s: int, access_token: str = "") -> str:
         """
         Renders the whole page.
 
         Args:
             snapshot: The collector's snapshot.
             refresh_s: Seconds between automatic reloads.
+            access_token: The server's access token, carried by the reload and the JSON link.
 
         Returns:
             The HTML document.
         """
+        token_query: str = f"?t={urllib.parse.quote(access_token, safe='')}" if access_token else ""
         body: str = "".join((
             self._header(snapshot),
             "<main>",
@@ -131,13 +134,14 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             self._queue_section(snapshot),
             f'<section class="grid thirds">{self._landings_panel(snapshot)}{self._stalls_panel(snapshot)}'
             f'{self._allocator_panel(snapshot)}</section>',
-            self._sources_footer(snapshot),
+            self._sources_footer(snapshot, token_query),
             "</main>",
         ))
         return (
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            f"<meta http-equiv=\"refresh\" content=\"{int(refresh_s)}\">"
+            f"<meta http-equiv=\"refresh\" content=\"{int(refresh_s)};url=/{self._e(token_query)}\">"
+            "<meta name=\"referrer\" content=\"no-referrer\">"
             "<link rel=\"icon\" href=\"data:,\"><title>Harness status</title>"
             f"<style>{self.STYLE}</style></head><body>{body}</body></html>"
         )
@@ -716,12 +720,13 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
                 '</h2><div class="scroll"><table><colgroup><col style="width:60px"><col style="width:110px"><col>'
                 f"</colgroup>{body}</table></div></article>")
 
-    def _sources_footer(self, snapshot: JsonDict) -> str:
+    def _sources_footer(self, snapshot: JsonDict, token_query: str) -> str:
         """
         Renders every source's age, cadence, duration and last error.
 
         Args:
             snapshot: The snapshot.
+            token_query: The access token query, for the JSON link.
 
         Returns:
             The footer HTML.
@@ -737,7 +742,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         return ('<footer class="panel"><table><colgroup><col style="width:120px"><col style="width:70px">'
                 '<col style="width:90px"><col style="width:70px"><col></colgroup>'
                 f"<tr><th>Source</th><th>Age</th><th>Cadence</th><th>Took</th><th>Last error</th></tr>{rows}</table>"
-                '<div style="margin-top:4px">JSON: <a href="/api/state">/api/state</a></div></footer>')
+                f'<div style="margin-top:4px">JSON: <a href="/api/state{self._e(token_query)}">/api/state</a></div>'
+                '</footer>')
 
     def _pill(self, level: str, text: Any) -> str:
         """
@@ -763,7 +769,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         if number is None:
             return ""
         if url:
-            return f'<a href="{self._e(url)}" target="_blank" rel="noopener">#{self._e(number)}</a>'
+            return f'<a href="{self._e(url)}" target="_blank" rel="noopener noreferrer">#{self._e(number)}</a>'
         return f"#{self._e(number)}"
 
     def _issue_ref(self, issue: Any, holder: Any) -> str:

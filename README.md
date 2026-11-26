@@ -153,9 +153,14 @@ the baseline runner, files to collect, host load sampling and the head check.
 
 ## Status dashboard
 
-`bin/dashboard.sh` starts `bin/dashboard.py` detached and prints its URL, `http://127.0.0.1:8787/`.
-It listens on 127.0.0.1 only, reloads every 30 s, and serves the same data as JSON at `/api/state`.
-It needs Python 3 and nothing else.
+`bin/dashboard.sh` starts `bin/dashboard.py` detached and prints its URL,
+`http://127.0.0.1:8787/?t=<token>`. The token is new at each start, and `/` and `/api/state` refuse a
+request without it. `dashboard.sh status` prints the URL again from `state/dashboard/dashboard.url`,
+which only its owner can read. The server listens on 127.0.0.1 only. It answers only requests whose
+Host is `127.0.0.1:<port>` or `localhost:<port>`, which stops a web page that rebinds its own name to
+127.0.0.1. Every response forbids framing, MIME sniffing, cross-origin reads and any outside source.
+The page reloads every 30 s, and `/api/state` serves the same data as JSON. It needs Python 3 and
+nothing else.
 
 ```bash
 bin/dashboard.sh                           # prints the URL

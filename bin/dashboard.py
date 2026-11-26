@@ -10,11 +10,14 @@ From <harness home>/config/harness.env it reads GH_TOKEN, GH_REPO and the label 
 key; the token reaches `gh` through its environment and is never shown. bin/dashboard.sh starts this detached.
 """
 import argparse
+import hmac
 import json
 import os
+import secrets
 import signal
 import sys
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
@@ -32,26 +35,39 @@ from dashboard_lib.render import HtmlRenderer  # noqa: E402
 
 class DashboardHttpServer(ThreadingHTTPServer):
     """
-    The HTTP server, carrying the collector and renderer its handlers use.
+    The HTTP server, carrying the collector and renderer its handlers use, the Host names it answers to and the
+    access token of this start.
     """
 
     daemon_threads: bool = True
 
     def __init__(self, port: int, collector: Collector, renderer: HtmlRenderer, refresh_s: int,
-                 secret_values: tuple[str, ...]) -> None:
+                 secret_values: tuple[str, ...], access_token: str) -> None:
         """
         Args:
-            port: The port on 127.0.0.1.
+            port: The port on 127.0.0.1; 0 picks a free one.
             collector: Builds the snapshots.
             renderer: Renders them as HTML.
             refresh_s: The page's reload interval.
             secret_values: Strings that must never leave in a response.
+            access_token: The token `/` and `/api/state` require as `?t=`.
         """
         super().__init__(("127.0.0.1", port), DashboardRequestHandler)
         self.collector: Collector = collector
         self.renderer: HtmlRenderer = renderer
         self.refresh_s: int = refresh_s
         self.secret_values: tuple[str, ...] = tuple(value for value in secret_values if value)
+        self.access_token: str = access_token
+        bound_port: int = self.server_address[1]
+        self.allowed_hosts: frozenset[str] = frozenset({f"127.0.0.1:{bound_port}", f"localhost:{bound_port}"})
+
+    @property
+    def url(self) -> str:
+        """
+        Returns:
+            The page's URL, access token included.
+        """
+        return f"http://127.0.0.1:{self.server_address[1]}/?t={self.access_token}"
 
     def scrub(self, body: str) -> str:
         """
@@ -71,41 +87,68 @@ class DashboardHttpServer(ThreadingHTTPServer):
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     """
     Answers `/` (HTML), `/api/state` (JSON) and `/healthz`; everything else is 404.
+
+    A request whose Host header is not `127.0.0.1:<port>` or `localhost:<port>` gets 421, so a page that rebinds
+    its own name to 127.0.0.1 cannot read the dashboard. `/` and `/api/state` also need this start's access
+    token as `?t=`, else 403. Every response forbids framing, sniffing, cross-origin reads, referrers and any
+    source but itself.
     """
 
     server: DashboardHttpServer
     server_version: ClassVar[str] = "harness-dashboard"
+    SECURITY_HEADERS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+                                    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Cache-Control", "no-store"),
+    )
 
     def do_GET(self) -> None:
         """
         Serves one GET.
         """
-        path: str = self.path.split("?", 1)[0]
-        if path == "/healthz":
+        host: str = (self.headers.get("Host") or "").strip().lower()
+        if host not in self.server.allowed_hosts:
+            self._send(421, "text/plain; charset=utf-8", "misdirected request: use 127.0.0.1 or localhost\n")
+            return
+        parts: urllib.parse.SplitResult = urllib.parse.urlsplit(self.path)
+        if parts.path == "/healthz":
             self._send(200, "text/plain; charset=utf-8", "ok\n")
             return
-        if path not in ("/", "/index.html", "/api/state"):
+        if parts.path not in ("/", "/index.html", "/api/state"):
             self._send(404, "text/plain; charset=utf-8", "not found\n")
             return
+        given_token: str = urllib.parse.parse_qs(parts.query).get("t", [""])[0]
+        if not hmac.compare_digest(given_token.encode(), self.server.access_token.encode()):
+            self._send(403, "text/plain; charset=utf-8",
+                       "forbidden: open the URL that bin/dashboard.sh status prints\n")
+            return
         snapshot: JsonDict = self.server.collector.snapshot()
-        if path == "/api/state":
+        if parts.path == "/api/state":
             self._send(200, "application/json; charset=utf-8", json.dumps(snapshot, indent=1, default=str))
         else:
-            self._send(200, "text/html; charset=utf-8", self.server.renderer.render(snapshot, self.server.refresh_s))
+            self._send(200, "text/html; charset=utf-8",
+                       self.server.renderer.render(snapshot, self.server.refresh_s, self.server.access_token))
 
     def log_message(self, format: str, *args: object) -> None:
         """
-        Logs only the request line and status, never headers.
+        Logs the method, path and status, never the query (it carries the access token) or the headers.
 
         Args:
             format: The format string.
             *args: Its arguments.
         """
-        sys.stderr.write(f"{self.log_date_time_string()} {format % args}\n")
+        line: str = format % args
+        if self.server.access_token:
+            line = line.replace(self.server.access_token, "[token]")
+        sys.stderr.write(f"{self.log_date_time_string()} {line}\n")
 
     def _send(self, status: int, content_type: str, body: str) -> None:
         """
-        Sends a response with the secrets scrubbed.
+        Sends a response with the secrets scrubbed and the security headers set.
 
         Args:
             status: HTTP status.
@@ -116,14 +159,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        for name, value in self.SECURITY_HEADERS:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
 
 class DashboardApp:
     """
-    Reads the options and the two GitHub keys, then runs the collector and the server until stopped.
+    Reads the options and the harness.env keys, then runs the collector and the server until stopped.
     """
 
     LABEL_KEYS: ClassVar[dict[str, str]] = {
@@ -131,6 +175,7 @@ class DashboardApp:
         "READY_LABEL": "ready", "FABLE_LABEL": "fable", "FIRST_LABEL": "first", "LOW_LABEL": "low",
     }
     ENV_KEYS: ClassVar[frozenset[str]] = frozenset({"GH_TOKEN", "GH_REPO", *LABEL_KEYS})
+    URL_FILE_NAME: ClassVar[str] = "dashboard.url"
 
     def __init__(self, options: argparse.Namespace) -> None:
         """
@@ -140,7 +185,7 @@ class DashboardApp:
         self.options: argparse.Namespace = options
         harness_home: Path = Path(options.harness_home).resolve()
         env_values: dict[str, str] = HarnessEnvReader.read_keys(harness_home / "config" / "harness.env", self.ENV_KEYS)
-        self.token: str = env_values.get("GH_TOKEN", "")
+        self.github_token: str = env_values.get("GH_TOKEN", "")
         repo: str | None = options.repo or env_values.get("GH_REPO") or os.environ.get("GH_REPO") or None
         self.config: DashboardConfig = DashboardConfig(
             harness_home=harness_home,
@@ -155,7 +200,7 @@ class DashboardApp:
             remote_interval_s=options.remote_interval,
             claimable_interval_s=options.claimable_interval,
         )
-        github: GitHubClient | None = GitHubClient(repo, self.token or None, options.gh) if repo else None
+        github: GitHubClient | None = GitHubClient(repo, self.github_token or None, options.gh) if repo else None
         self.collector: Collector = Collector(self.config, github)
 
     def run(self) -> int:
@@ -174,10 +219,11 @@ class DashboardApp:
             if self.config.claimable_interval_s > 0:
                 self.collector.refresh_claimable_in_place()
             body: str = json.dumps(self.collector.snapshot(), indent=1, default=str)
-            print(body.replace(self.token, "[redacted]") if self.token else body)
+            print(body.replace(self.github_token, "[redacted]") if self.github_token else body)
             return 0
         server: DashboardHttpServer = DashboardHttpServer(self.options.port, self.collector, HtmlRenderer(),
-                                                          self.options.refresh, (self.token,))
+                                                          self.options.refresh, (self.github_token,),
+                                                          secrets.token_urlsafe(24))
         stop_requested: threading.Event = threading.Event()
 
         def request_stop(signal_number: int, frame: FrameType | None) -> None:
@@ -187,7 +233,9 @@ class DashboardApp:
         signal.signal(signal.SIGTERM, request_stop)
         signal.signal(signal.SIGINT, request_stop)
         self.collector.start()
-        sys.stderr.write(f"harness dashboard on http://127.0.0.1:{server.server_address[1]}/ "
+        url_path: Path = self.config.data_dir / self.URL_FILE_NAME
+        self.write_private_file(url_path, server.url + "\n")
+        sys.stderr.write(f"harness dashboard on {server.url} "
                          f"(home {self.config.harness_home}, data {self.config.data_dir}, "
                          f"repo {self.config.repo or 'unset'}, queue label {self.config.labels.queue})\n")
         sys.stderr.flush()
@@ -196,7 +244,22 @@ class DashboardApp:
         finally:
             self.collector.stop()
             server.server_close()
+            url_path.unlink(missing_ok=True)
         return 0
+
+    @staticmethod
+    def write_private_file(path: Path, text: str) -> None:
+        """
+        Writes a file only its owner can read, never through a symlink planted at its path.
+
+        Args:
+            path: The file.
+            text: Its contents.
+        """
+        descriptor: int = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w") as private_file:
+            private_file.write(text)
 
     @staticmethod
     def _labels(env_values: dict[str, str], options: argparse.Namespace) -> QueueLabels:
