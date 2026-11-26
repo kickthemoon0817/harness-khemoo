@@ -363,6 +363,7 @@ drop_whole_card() {
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
+    case "$issue" in -*) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote [--no-cost]|--device]: an issue number comes first, not $issue" >&2; exit 2 ;; esac
     stated="${3:-}"
     if [ "$stated" = "--device" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
@@ -417,7 +418,7 @@ case "${1:-}" in
           f=$(slot_file "$s")
           echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all${no_cost} render" > "$f"
         done
-        rm -f "$LOCKS/slot-wait.$issue"
+        rm -f "$LOCKS/slot-wait.$issue" "$LOCKS/cost-wait.$issue"
         f=$(slot_file "$s0")
         echo "ACQUIRED slot=$s0 file=$f container=worv-iter-$s0 domain=$(( 76 + s0 )) cache=$CACHE_BASE/cache-slot$s0 remote=$h exclusive=all-remote"
         echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=worv-iter-$s0 ROS_DOMAIN_ID=$(( 76 + s0 )) WORV_ITER_CACHE_ROOT=$CACHE_BASE/cache-slot$s0 DOCKER_HOST=ssh://$h PATH=$H/bin/remote-docker:\$PATH"
@@ -445,6 +446,9 @@ case "${1:-}" in
         REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
         grant_remote_all "$i" "$(remote_host "$i")"
       done
+      # A cost read left waiting names the card it waits for (or any), so bin/build_host.sh keeps
+      # compiles off that card until it is quiet. The runner asks every 30 s and refreshes it.
+      [ -n "$no_cost" ] || echo "${LEASE_WANT_HOST:-any} $(date +%s)" > "$LOCKS/cost-wait.$issue"
       echo "BUSY no remote card is free, alone and quiet"; exit 1
     fi
     if [ "$stated" = "--all" ]; then
