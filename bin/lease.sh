@@ -433,9 +433,19 @@ case "${1:-}" in
         done
         [ "$own" = 1 ] && grant_remote_all "$i" "$(remote_host "$i")"
       done
+      # An issue the operator named ahead of this one (`lease.sh prioritize`) whose cost read is
+      # waiting (a cost-wait marker its runner refreshed) gets the first free card it can use; a
+      # fresh grant to this issue leaves that card to it and may take another.
+      prio=""; prio_want=""; reserved=""
+      if [ -s "$OPERATOR_FILE" ]; then
+        for n in $(cat "$OPERATOR_FILE"); do
+          [ "$n" = "$issue" ] && break
+          f="$LOCKS/cost-wait.$n"; [ -s "$f" ] || continue
+          read -r w t _ < "$f"
+          if [[ "${t:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - t )) -le "${COST_WAIT_FRESH_S:-120}" ]; then prio=$n; prio_want=$w; break; fi
+        done
+      fi
       for i in $(host_order); do
-        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
-        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
         free=1
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s"); hp=""
@@ -443,12 +453,18 @@ case "${1:-}" in
           if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then free=0; break; fi
         done
         [ "$free" = 1 ] || continue
+        if [ -n "$prio" ] && [ -z "$reserved" ] && { [ "$prio_want" = any ] || [ "$prio_want" = "$(remote_host "$i")" ]; }; then
+          reserved=$i; continue
+        fi
+        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
+        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
         REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
         grant_remote_all "$i" "$(remote_host "$i")"
       done
       # A cost read left waiting names the card it waits for (or any), so bin/build_host.sh keeps
       # compiles off that card until it is quiet. The runner asks every 30 s and refreshes it.
       [ -n "$no_cost" ] || echo "${LEASE_WANT_HOST:-any} $(date +%s)" > "$LOCKS/cost-wait.$issue"
+      [ -n "$reserved" ] && { echo "BUSY the free card $(remote_host "$reserved") is left to issue $prio, which has priority"; exit 1; }
       echo "BUSY no remote card is free, alone and quiet"; exit 1
     fi
     if [ "$stated" = "--all" ]; then
