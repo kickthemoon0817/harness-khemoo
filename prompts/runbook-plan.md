@@ -298,6 +298,7 @@ overridden below.
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
      - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (no `--want-host`, so the queue takes the first card that is free and quiet). Only a phase read against the 150 ms bar needs worker-03, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read; `bin/card_dispatch.sh` unpins a queue that waits 5+ minutes on a busy card while another is free, idle and quiet, by writing `any` to its `<runs>/want-host`. A queue that reads the bar passes `--bar-read` to `bin/arm_queue.sh`, and is never moved. A whole-card run that times nothing, such as a render pair for V5, takes `--acquire-args "--all-remote --no-cost"`: the card still runs nothing else, but the host's load is not read and its builds go on beside it, so a render never waits for the build host to go quiet.
 - **Work while a queue waits (operator, 2026-11-26).** A queue waiting for a card needs no watching: the runner polls and the stall watch reports a long wait. While it waits, do the issue's card-free work: the next Ask's design, code, compile and host cases. Do it in a separate worktree on its own branch, because an arm reads the queued trees' `bin/`; never rebuild or edit a tree a live queue may still run. Never spend a wait in a sleep loop, and never pause an issue for want of a card while card-free work is left. A device-record or other card run takes its card only for its device stage: host suites first, with no card.
+- **Readings ride with the change (operator, 2026-11-26).** A reading that only measures (a bar table, an attribution, a setting read alone) is part of the issue whose change it decides, never an issue of its own; its numbers go in that issue's packet. A test-only issue exists only for the daily full regression, its device run, and a failing gate.
 - **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
        (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
        and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
@@ -656,10 +657,11 @@ overridden below.
        identical. Land with the record as the head has it, name the changed hash-set files in the landing comment
        under `Device record: stale, <files>`, and leave `tests/device_record.toml` untouched, so two such landings
        in one slot never conflict on it.
-     - **The refresh.** A stale record is repaired by one device run on the head, not one per landing. The tick
-       that lands a stale record opens `test: refresh the device record` (tests only, labels `ai` and `ai:plan`) unless
-       one is open, and the next device-code landing closes it if it comes first. The release-readiness issue requires
-       `check` green: the image build fails on a red one.
+     - **The refresh (operator, 2026-11-26).** A stale record is repaired once a day, by the daily full
+       regression's one device run on that day's head, not after each landing: a landing never opens a refresh
+       issue. A stale record blocks only the release image build, which the release-readiness issue runs after
+       reading `check` green, so between those the head carries a stale record named in each landing comment. A
+       device-code landing still runs the device suite on its own merge result, as above.
 
      Never write the record by hand. A device run that fails only in `cuMemAlloc: out of memory` is a card reading,
      not a verdict: re-run those cases alone by name once the card has room, and never the whole suite twice.
