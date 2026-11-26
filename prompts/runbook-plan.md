@@ -5,7 +5,7 @@ including `runbook.md` and `design.md` where they conflict.
 
 ## Hosts (owner, 2026-11-21, 2026-11-23)
 
-Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) and `worv@10.50.1.6` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; a build or arm that copies a tree goes to the first host. Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
+Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) and `worv@10.50.1.6` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; an arm that copies a tree goes to the first host. A compile goes where `bin/build_host.sh` says (below). Kits, builds, tests, AOT, device suites and cost reads go there; never this host's own card or CPU lane. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
 Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
 
@@ -13,6 +13,8 @@ Each remote host is its own lane, with its own locks. The single remote lock nam
 |---|---|---|
 | `worv@10.50.1.6` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
 | `worv@worv-worker-03.local` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
+
+**Which host compiles (operator, 2026-11-26).** Before each `tools/dev/iter.sh build`, run `eval "$(<harness>/bin/build_host.sh)"`. It exports `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` for the first host whose compile lock is free, and leaves out a host that a cost read holds whole. When every lock is taken, it picks the host with the fewest waiters. The build's outputs copy back here, so the arms may run on either card. Never queue a compile behind another host's compile while the other lane is free.
 
 - **Never build or run a suite on a host whose card a cost read holds** (`lease.sh status`: a live `remote-all` on its slots). Use the other host's lane, so the read times the engine and not a compile.
 - **Choosing a lane for a build or a suite.** Take the host whose lock is free. If both are free, take the one with the lower load1 per core (`ssh <host> cat /proc/loadavg; nproc`). If both are held, wait on the one with the shorter holder. Put that host in `DOCKER_HOST=ssh://<host>`.
@@ -294,7 +296,8 @@ overridden below.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
-     - **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
+     - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (no `--want-host`, so the queue takes the first card that is free and quiet). Only a phase read against the 150 ms bar needs worker-03, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read. A whole-card run that times nothing, such as a render pair for V5, takes `--acquire-args "--all-remote --no-cost"`: the card still runs nothing else, but the host's load is not read and its builds go on beside it, so a render never waits for the build host to go quiet.
+- **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
        (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
        and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
        `setsid nohup <harness>/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue

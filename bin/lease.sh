@@ -402,7 +402,11 @@ case "${1:-}" in
       # A cost read may take a whole remote card: every slot of one remote host,
       # granted only while no other run holds one of them, the card runs no other
       # process and the host is quiet (bin/remote_room.sh --alone). Every arm of
-      # one read runs on that one card.
+      # one read runs on that one card. `--all-remote --no-cost` is a whole card for a run that
+      # times nothing (a render pair): the card still runs no other process, but the host's load
+      # is not read, and its mark lets the host's builds go on (bin/remote-docker/docker).
+      no_cost=""; room=--alone
+      if [ "${4:-}" = --no-cost ]; then no_cost=" no-cost"; room=--alone-card; fi
       exec 8>"$K"; flock 8
       [ -n "$REMOTE_CARD_HOSTS" ] || { echo "BUSY no remote card is named"; exit 1; }
       n=$(remote_count)
@@ -411,7 +415,7 @@ case "${1:-}" in
         s0=$(host_slots "$i" | head -1)
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s")
-          echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all render" > "$f"
+          echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all${no_cost} render" > "$f"
         done
         rm -f "$LOCKS/slot-wait.$issue"
         f=$(slot_file "$s0")
@@ -438,7 +442,7 @@ case "${1:-}" in
           if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then free=0; break; fi
         done
         [ "$free" = 1 ] || continue
-        REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" --alone >/dev/null 2>&1 || continue
+        REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
         grant_remote_all "$i" "$(remote_host "$i")"
       done
       echo "BUSY no remote card is free, alone and quiet"; exit 1
@@ -715,5 +719,5 @@ case "${1:-}" in
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
     done
     ;;
-  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | local --off|--on | status" >&2; exit 2;;
+  *) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote [--no-cost]|--device] | release <issue> | prioritize <issue>|--clear | remote <user@host>|--off | local --off|--on | status" >&2; exit 2;;
 esac

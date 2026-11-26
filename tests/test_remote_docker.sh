@@ -105,5 +105,40 @@ check "the function takes that inherited DOCKER_HOST as unset and sends the run 
 HARNESS_HOME="$here" HARNESS_STATE="$T/state" PATH="$T/fake:$PATH" bash -c '. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env; DOCKER_HOST=ssh://other@h2 docker ps; timeout 5 bash -c "docker ps -a"'
 check "an explicit ssh DOCKER_HOST wins, and bash -c under timeout keeps the function" 'grep -q "docker DOCKER_HOST=ssh://other@h2 ps$" "$LOG" && grep -q "docker DOCKER_HOST=ssh://fake@host ps -a" "$LOG"' "$(calls)"
 
+
+# The cost-read guard, read through a fake harness tree: a tick may not start a container on a
+# host another issue holds whole, unless that hold is marked no-cost.
+G="$T/guard"; mkdir -p "$G/bin/remote-docker"; cp "$SHIM" "$G/bin/remote-docker/docker"
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+cat > "$G/bin/lease.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "remote card: fake@host (slots 4-5)"
+echo "slot 4 HELD 2490 1 2026-11-26T00:00:00Z domain=80 remote-all${GUARD_MARK:-} render (alive)"
+EOF
+chmod +x "$G/bin/"*.sh "$G/bin/remote-docker/docker"
+: > "$LOG"; DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
+check "a whole-card cost hold refuses another tick's container on that host" '[ "$rc" = 75 ] && grep -q "held whole by #2490" "$T/guard.err" && ! grep -q " run " "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; GUARD_MARK=" no-cost" DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
+check "a whole-card no-cost hold lets the host's builds go on" '[ "$rc" = 0 ] && grep -q "docker DOCKER_HOST=ssh://fake@host run --rm img true" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+
+# remote_room.sh: --alone reads the host's load; --alone-card does not.
+R="$T/room"; mkdir -p "$R/bin" "$R/fake"; cp "$here/bin/remote_room.sh" "$R/bin/"
+cat > "$R/fake/ssh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *query-compute-apps*) printf '%s %s %s\n' "${ROOM_APPS:-0}" "${ROOM_LOAD:-20.0}" 24 ;;
+  *) echo "60000 20000" ;;
+esac
+EOF
+chmod +x "$R/fake/ssh"
+out=$(PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/remote_room.sh" --alone); rc=$?
+check "--alone refuses a loaded host" '[ "$rc" = 1 ] && [[ "$out" == "busy load1=20.0"* ]]' "rc=$rc $out"
+out=$(PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/remote_room.sh" --alone-card); rc=$?
+check "--alone-card takes a loaded host whose card is free" '[ "$rc" = 0 ] && [[ "$out" == ok* ]]' "rc=$rc $out"
+out=$(ROOM_APPS=1 PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/remote_room.sh" --alone-card); rc=$?
+check "--alone-card still refuses a card that runs another process" '[ "$rc" = 1 ] && [[ "$out" == "busy 1 compute"* ]]' "rc=$rc $out"
+out=$(ROOM_LOAD=2.0 PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/remote_room.sh" --alone); rc=$?
+check "--alone takes a quiet host whose card is free" '[ "$rc" = 0 ] && [[ "$out" == ok* ]]' "rc=$rc $out"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
