@@ -124,6 +124,7 @@ in-flight ticks finish on their own.
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
 | `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
+| `bin/dashboard.sh` | starts the status dashboard (`bin/dashboard.py`, `bin/dashboard_lib/`) on 127.0.0.1 and prints its URL |
 
 ## Scenario arm queues
 
@@ -149,6 +150,38 @@ an empty folder there is the tick's mkdir claim, a missing one is claimed, a ful
 `bin/arm_queue.sh --help` lists the options: the whole-card host (`--want-host`), the margins,
 the baseline runner, files to collect, host load sampling and the head check.
 `tests/test_arm_queue.sh` runs it against fake lease, iter, docker, card and host commands.
+
+## Status dashboard
+
+`bin/dashboard.sh` starts `bin/dashboard.py` detached and prints its URL, `http://127.0.0.1:8787/`.
+It listens on 127.0.0.1 only, reloads every 30 s, and serves the same data as JSON at `/api/state`.
+It needs Python 3 and nothing else.
+
+```bash
+bin/dashboard.sh --queue-label ai:plan     # the harness's ISSUE_LABEL; prints the URL
+bin/dashboard.sh status                    # pid and URL
+bin/dashboard.sh stop
+HARNESS_HOME=/path/to/live/harness DASHBOARD_PORT=8790 bin/dashboard.sh   # read another checkout
+```
+
+`bin/dashboard.py --help` lists the options: the cadences, the sparkline window, and `--once`, which
+prints one JSON snapshot and exits. The dashboard writes only its own history, GitHub cache, pid file
+and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). It reads `GH_TOKEN` and `GH_REPO` from
+`config/harness.env` and no other key. The token reaches `gh` only through its environment and is
+removed from every response. Every GitHub call is a read.
+
+| Panel | Reads | Cadence |
+|---|---|---|
+| Machines: load against cores, memory, card use and memory, card processes, containers | this host: `/proc`, `nvidia-smi`, `docker ps`, kept in `state/dashboard/local_history.tsv`; remote hosts: `state/host_health.tsv` and `.streaks` (status, upload, history), plus a read-only ssh probe for memory, card size, processes and containers (`--remote-interval 0` turns it off) | 30 s local, 2 min ssh |
+| GPU slots and leases | `bin/lease.sh status` | each page load |
+| Running ticks | `claude -p` processes whose stdout is a `state/logs/tick-*.log`: slot from the slot lock they hold, model from `--model`, issue from the newest `state/locks/claim.<issue>` naming the pid, else a lease the pid holds, else a cached GitHub search for its claim comment; "Now" is the tick's youngest tool call | each page load |
+| Issue queue and landings | one GraphQL read of the open `ai` issues, their `Depends on` states and the last day's merged PRs; claimable follows `bin/claimable.sh`'s rules, and `bin/claimable.sh` itself runs every 5 min for its count | 1 min |
+| Stalls, allocator | the tails of `state/stalls.log` and `state/logs/allocator.log` | each page load |
+| Usage | `~/.claude/usage-cache.json`, placed against the allocator's cut points (`bin/usage-lib.sh` defaults) | each page load |
+
+A slow ssh or `gh` call never holds a page: each source keeps its last result, and the footer
+shows its age and last error. `tests/test_dashboard.py` runs it against fixture state files and a fake
+`lease.sh`, `claimable.sh` and `gh`.
 
 ## Documentation
 
