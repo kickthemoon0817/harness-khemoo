@@ -176,6 +176,15 @@ for pattern in $STALL_LOCK_GLOBS; do
   done
 done
 
+# While the harness is held for Nucleus (bin/tick.sh `nucleus_held`: the probe failing for
+# NUCLEUS_HOLD_MIN, 10, minutes on end), no kit can boot, so an idle card is the outage, not a
+# stall: gpu_idle, queue_wait and card_held_idle stay quiet until the probe connects again.
+nucleus_down=""
+ns=$(cat "$S/nucleus/status" 2>/dev/null)
+if [[ "$ns" == *"result=fail"* ]]; then
+  fs=$(grep -o 'fail_since=[0-9]*' <<< "$ns" | cut -d= -f2)
+  [ -n "$fs" ] && [ $(( now - fs )) -ge $(( ${NUCLEUS_HOLD_MIN:-10} * 60 )) ] && nucleus_down=1
+fi
 # gpu_idle: the work waiting is a lock waiter or the allocator's last claimable count.
 declare -A demoted=()
 if [ -r "$S/host_health.streaks" ]; then
@@ -183,7 +192,7 @@ if [ -r "$S/host_health.streaks" ]; then
 fi
 alloc=$(grep 'claimable=' "$S/logs/allocator.log" 2>/dev/null | tail -1)
 claimable=$(sed -n 's/.*claimable=\([0-9][0-9]*\).*/\1/p' <<< "$alloc")
-if [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable:-0}" -gt 0 ]; }; then
+if [ -z "$nucleus_down" ] && [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable:-0}" -gt 0 ]; }; then
   cutoff=$(date -u -d "@$(( now - STALL_GPU_IDLE_MIN * 60 ))" +%FT%TZ)
   half=$(date -u -d "@$(( now - STALL_GPU_IDLE_MIN * 30 ))" +%FT%TZ)
   # A host counts when every row in the window reads its card at 0 % and its load under a
@@ -199,7 +208,7 @@ fi
 
 # queue_wait: a queue's lease log written in the last 3 minutes whose last stamped lines are all
 # BUSY, the first of them STALL_QUEUE_MIN or more ago, while a card no live lease holds is idle.
-if [ -r "$S/host_health.tsv" ]; then
+if [ -z "$nucleus_down" ] && [ -r "$S/host_health.tsv" ]; then
   held_hosts=""
   if [ -x "$HARNESS_HOME/bin/lease.sh" ]; then
     held_hosts=$("$HARNESS_HOME/bin/lease.sh" status < /dev/null 2>/dev/null | awk '
@@ -229,7 +238,7 @@ if [ -r "$S/host_health.tsv" ]; then
 fi
 
 # card_held_idle: whole-card holds from lease.sh status, against the probe rows of the window.
-if [ -r "$S/host_health.tsv" ] && [ -x "$HARNESS_HOME/bin/lease.sh" ]; then
+if [ -z "$nucleus_down" ] && [ -r "$S/host_health.tsv" ] && [ -x "$HARNESS_HOME/bin/lease.sh" ]; then
   cutoff=$(date -u -d "@$(( now - STALL_HELD_IDLE_MIN * 60 ))" +%FT%TZ)
   half=$(date -u -d "@$(( now - STALL_HELD_IDLE_MIN * 30 ))" +%FT%TZ)
   while read -r h issue mark since; do

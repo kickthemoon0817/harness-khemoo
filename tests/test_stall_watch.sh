@@ -169,5 +169,18 @@ chprobes 0; chrun
 check "a single-slot hold is not a whole-card hold" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
 rm -f "$H/bin/lease.sh"
 
+
+# While Nucleus has been down 10+ minutes, the idle alarms stay quiet.
+NQ="$H/nq"; mkdir -p "$NQ/nucleus"
+{ printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+  for m in 30 27 24 21 18 15 12 9 6 3 0; do printf '%s\tidle@a\t0.2\t80\t0.1\t16\t0\t20\tok\n' "$(iso "$m")"; done; } > "$NQ/host_health.tsv"
+mkdir -p "$NQ/logs"; echo "20261126T000000Z five=0% week=1% allowed=10 busy=0 claimable=3 -> spawning 3" > "$NQ/logs/allocator.log"
+HARNESS_STATE="$NQ" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"
+check "an idle card with work waiting raises gpu_idle when Nucleus is up" 'grep -q "STALL gpu_idle idle@a" "$NQ/stalls.log"' "$(cat "$NQ/stalls.log" 2>/dev/null)"
+: > "$NQ/stalls.log"; rm -f "$NQ/stall_watch.seen"
+echo "ok_since= last=$(date +%s) result=fail fail_since=$(( $(date +%s) - 900 ))" > "$NQ/nucleus/status"
+HARNESS_STATE="$NQ" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"
+check "the same idle card raises nothing while Nucleus has been down 15 minutes" '! grep -q "gpu_idle" "$NQ/stalls.log"' "$(cat "$NQ/stalls.log")"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
