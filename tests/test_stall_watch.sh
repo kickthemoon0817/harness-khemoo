@@ -146,5 +146,28 @@ qrun
 check "an idle card a live lease holds (a kit booting) is not counted idle" '! qstalls' "$(qstalls)"
 rm -f "$H/bin/lease.sh"
 
+
+# card_held_idle reads the whole-card holds and the probe rows.
+CH="$H/ch"; mkdir -p "$CH"
+chrun() { : > "$CH/stalls.log"; rm -f "$CH/stall_watch.seen"; HARNESS_STATE="$CH" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"; }
+chprobes() {  # <gpu % at the newest probe> : probes every 3 min over 30 min, 0 % but the newest
+  { printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+    for m in 30 27 24 21 18 15 12 9 6 3; do printf '%s\theld@w\t0.2\t80\t9.0\t16\t0\t30\tok\n' "$(iso "$m")"; done
+    printf '%s\theld@w\t0.2\t80\t9.0\t16\t%s\t30\tok\n' "$(iso 0)" "$1"; } > "$CH/host_health.tsv"
+}
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote-all no-cost render (alive)"\n' "$(iso 70)" > "$H/bin/lease.sh"; chmod +x "$H/bin/lease.sh"
+chprobes 0; chrun
+line=$(grep ' STALL card_held_idle ' "$CH/stalls.log")
+check "a card held whole at 0 % for the whole window raises card_held_idle with its holder" '[[ "$line" == *"STALL card_held_idle held@w #2511 holds it whole (no-cost) since "*"card 0 % on all "*" probes of the last 20 min"* ]]' "$(cat "$CH/stalls.log")"
+chprobes 64; chrun
+check "a held card that works on the newest probe raises nothing" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote-all no-cost render (alive)"\n' "$(iso 5)" > "$H/bin/lease.sh"
+chprobes 0; chrun
+check "a hold younger than the window raises nothing" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote (alive)"\n' "$(iso 70)" > "$H/bin/lease.sh"
+chprobes 0; chrun
+check "a single-slot hold is not a whole-card hold" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+rm -f "$H/bin/lease.sh"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

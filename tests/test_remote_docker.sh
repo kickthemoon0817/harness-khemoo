@@ -160,5 +160,59 @@ echo "other@host $(date +%s)" > "$G/state/locks/cost-wait.2504"
 check "a wait for another host leaves this one alone" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
 rm -f "$G/state/locks/cost-wait."* "$G/state/locks/claim."*
 
+
+# This host's card is the owner's: a tick on the local daemon runs only card-less build containers.
+LD=unix:///var/run/docker.sock
+# Bind sources must sit under the user's tmp_workspace, so these cases mount a scratch dir there.
+LW=$(mktemp -d -p "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace" .remote-docker-test.XXXXXX); mkdir -p "$LW/ro"
+trap 'rm -rf "$T" "$LW"' EXIT
+local_refused() {  # <name> <args…>
+  local name=$1; shift
+  : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" "$@" 2> "$T/guard.err"; rc=$?
+  check "$name" '[ "$rc" = 75 ] && ! grep -q "^docker" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+}
+local_refused "a tick's --gpus is refused on the local daemon" run --rm --gpus all img true
+local_refused "a tick's --runtime=nvidia is refused" run --rm --runtime=nvidia img true
+local_refused "a tick's NVIDIA_VISIBLE_DEVICES=all is refused" run --rm -e NVIDIA_VISIBLE_DEVICES=all img true
+local_refused "a tick's attached -eNVIDIA_DRIVER_CAPABILITIES is refused" run --rm -eNVIDIA_DRIVER_CAPABILITIES=all img true
+local_refused "a tick's attached -e=NVIDIA_VISIBLE_DEVICES=all is refused" run --rm -e=NVIDIA_VISIBLE_DEVICES=all img true
+local_refused "a tick's attached -v=/:/host is refused" run --rm -v=/:/host img true
+local_refused "a tick's attached -v with a root-relative path is refused" run --rm "-v$LW/ro:/r" img true
+local_refused "a tick's relative bind source is refused" run --rm -v ./x:/x img true
+local_refused "a tick's bind outside tmp_workspace is refused" run --rm -v "$RO:/r" img true
+local_refused "a tick's --env=NVIDIA_VISIBLE_DEVICES=all is refused" run --rm --env=NVIDIA_VISIBLE_DEVICES=all img true
+local_refused "a tick's --device is refused" run --rm --device /dev/nvidia0 img true
+local_refused "a tick's /dev bind is refused" run --rm -v /dev/nvidia0:/dev/nvidia0 img true
+local_refused "a tick's attached -v/ bind outside the root is refused" run --rm -v/:/host img true
+local_refused "a tick's --volume= docker socket is refused" run --rm --volume=/var/run/docker.sock:/s img true
+local_refused "a tick's bind escaping the root through .. is refused" run --rm -v "$LW/../../../etc:/e" img true
+ln -s / "$LW/root-link"
+local_refused "a tick's bind through a symlink out of the root is refused" run --rm -v "$LW/root-link/etc:/e" img true
+local_refused "a tick's --mount is refused" run --rm --mount type=bind,source=/dev,target=/d img true
+local_refused "a tick's --privileged is refused" run --rm --privileged img true
+local_refused "a tick's --env-file is refused" run --rm --env-file x.env img true
+local_refused "a tick's global option is refused" -H unix:///var/run/docker.sock run --rm --gpus all img true
+local_refused "a tick's create is refused" create --gpus all img true
+local_refused "a tick's exec into a container is refused" exec owner_container nvidia-smi
+local_refused "a tick's docker rm is refused" rm -f owner_container
+local_refused "a tick's image rm is refused" image rm worv-builder:isaac6
+local_refused "a tick's volume rm is refused" volume rm worv-dev-ccache
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/./ro:/r:ro" -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc 'echo --gpus all' 2> "$T/guard.err"; rc=$?
+check "iter.sh's build run goes through with runc and the card hidden, the command untouched" '[ "$rc" = 0 ] && [ "$(calls)" = "docker DOCKER_HOST=$LD run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -v $LW/ro:/r:ro -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc echo --gpus all" ]' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; mkdir -p "$LW/rw"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/ro:/r:ro" -v "$LW/rw:/w" --entrypoint bash img -lc true 2> "$T/guard.err"; rc=$?
+check "after a local run each writable bind is handed back to the user, a read-only one is not" '[ "$rc" = 0 ] && [ "$(grep -c "entrypoint chown" "$LOG")" = 1 ] && grep -q "run --rm --runtime=runc --network none -v $LW/rw:/w --entrypoint chown worv-builder:isaac6 -R $(id -u):$(id -g) /w" "$LOG"' "rc=$rc $(calls)"
+mkdir -p "$T/rcfake"; printf '#!/usr/bin/env bash\necho "docker DOCKER_HOST=${DOCKER_HOST:-} $*" >> "$LOG"\ncase "$*" in *"entrypoint chown"*) exit 0 ;; esac\nexit 3\n' > "$T/rcfake/docker"; chmod +x "$T/rcfake/docker"
+: > "$LOG"; PATH="$T/rcfake:$PATH" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/rw:/w" --entrypoint bash img -lc false 2> "$T/guard.err"; rc=$?
+check "a failed local run still hands its bind back and keeps its exit code" '[ "$rc" = 3 ] && grep -q "entrypoint chown" "$LOG"' "rc=$rc $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" image inspect img 2> "$T/guard.err"; rc=$?
+check "a tick's image inspect passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD image inspect img$" "$LOG"' "rc=$rc $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" ps -q 2> "$T/guard.err"; rc=$?
+check "a tick's ps passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD ps -q$" "$LOG"' "rc=$rc $(calls)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
+check "outside a tick the local daemon is left to its caller" '[ "$rc" = 0 ] && grep -q "run --rm --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+rm -rf "$LW"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

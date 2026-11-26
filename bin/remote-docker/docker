@@ -18,7 +18,93 @@ unset -f docker 2>/dev/null
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
-case "${DOCKER_HOST:-}" in ssh://*) ;; *) exec "$real" "$@" ;; esac
+# This host's card is the owner's, and its default runtime hands every container the card unless
+# told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) runs only what
+# `tools/dev/iter.sh build` needs: `docker run` with the options listed below in their separate or
+# `--long=` forms, each bind source an absolute path under the user's tmp_workspace (passed on
+# resolved) or a named volume, no NVIDIA_* but a hidden card, and runc and NVIDIA_VISIBLE_DEVICES=void
+# forced on; besides that, read-only commands. A global option is refused. Runs outside a tick are
+# left to their caller. A tick runs as the same user, so this keeps a mistake off the owner's card;
+# it is not a boundary against a process set on crossing it.
+case "${DOCKER_HOST:-}" in ssh://*) ;; *)
+  if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
+    refuse() { echo "remote-docker: on this host a tick runs only card-less build containers ($1); the local card and containers are the owner's" >&2; exit 75; }
+    case "${1:-}" in -*) refuse "global option $1" ;; "") exec "$real" ;; esac
+    case "$1" in
+      run) ;;
+      ps|version|info|logs|wait|inspect|images) exec "$real" "$@" ;;
+      image) case "${2:-}" in ls|inspect|history) exec "$real" "$@" ;; esac; refuse "docker image ${2:-}" ;;
+      volume) case "${2:-}" in ls|inspect) exec "$real" "$@" ;; esac; refuse "docker volume ${2:-}" ;;
+      *) refuse "docker $1" ;;
+    esac
+    mount_root=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
+    # Prints the spec docker gets: a bind source resolved, a named volume as given.
+    resolve_volume() {
+      local src=${1%%:*} rest=""
+      [[ "$1" == *:* ]] && rest=":${1#*:}"
+      if [[ "$src" == /* ]]; then
+        src=$(realpath -m "$src")
+        [[ "$src" == "$mount_root"/* ]] || refuse "bind source $src outside $mount_root"
+        printf '%s%s' "$src" "$rest"
+      elif [[ "$src" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        printf '%s' "$1"
+      else
+        refuse "volume $1"
+      fi
+    }
+    check_env() {
+      case "$1" in
+        NVIDIA_VISIBLE_DEVICES=void|NVIDIA_VISIBLE_DEVICES=none) ;;
+        NVIDIA_*) refuse "env $1" ;;
+      esac
+    }
+    shift; opts=()
+    while [ "$#" -gt 0 ]; do
+      a=$1
+      case "$a" in
+        --rm|-i|-t|-it|-ti|--init) opts+=("$a"); shift ;;
+        -v|--volume) [ "$#" -ge 2 ] || refuse "$a without a value"; spec=$(resolve_volume "$2") || exit 75; opts+=(-v "$spec"); shift 2 ;;
+        --volume=*) spec=$(resolve_volume "${a#--volume=}") || exit 75; opts+=(-v "$spec"); shift ;;
+        -e|--env) [ "$#" -ge 2 ] || refuse "$a without a value"; check_env "$2"; opts+=("$a" "$2"); shift 2 ;;
+        --env=*) check_env "${a#--env=}"; opts+=("$a"); shift ;;
+        --entrypoint|-w|--workdir|-u|--user|--name) [ "$#" -ge 2 ] || refuse "$a without a value"; opts+=("$a" "$2"); shift 2 ;;
+        --entrypoint=*|--workdir=*|--user=*|--name=*) opts+=("$a"); shift ;;
+        -*) refuse "option $a" ;;
+        *) break ;;
+      esac
+    done
+    cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
+  else
+    cmd=("$real" "$@"); opts=()
+    if [ "${1:-}" = run ]; then
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -d|--detach|--detach=true) cmd=(); break ;;
+          -v|--volume) opts+=(-v "${2:-}"); shift 2 ;;
+          --volume=*) opts+=(-v "${1#--volume=}"); shift ;;
+          -*) shift ;;
+          *) break ;;
+        esac
+      done
+    fi
+    [ "${#cmd[@]}" -gt 0 ] || exec "$real" "$@"
+  fi
+  # A container writes as root, so each writable bind under the user's tmp_workspace is handed back
+  # to the user once a foreground run ends; the next host-side step writes there.
+  "${cmd[@]}"; rc=$?
+  ws=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
+  for ((k = 0; k + 1 < ${#opts[@]}; k++)); do
+    [ "${opts[$k]}" = -v ] || continue
+    spec=${opts[$((k + 1))]}; src=${spec%%:*}
+    [[ "$src" == /* ]] || continue
+    case "$spec" in *:ro|*:ro,*) continue ;; esac
+    src=$(realpath -m "$src"); [[ "$src" == "$ws"/* ]] && [ -d "$src" ] || continue
+    "$real" run --rm --runtime=runc --network none -v "$src:/w" --entrypoint chown \
+        "${REMOTE_DOCKER_CHOWN_IMAGE:-worv-builder:isaac6}" -R "$(id -u):$(id -g)" /w >/dev/null 2>&1
+  done
+  exit "$rc" ;;
+esac
 target=${DOCKER_HOST#ssh://}
 sub=""
 for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
