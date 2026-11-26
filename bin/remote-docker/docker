@@ -18,7 +18,20 @@ unset -f docker 2>/dev/null
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
-case "${DOCKER_HOST:-}" in ssh://*) ;; *) exec "$real" "$@" ;; esac
+# This host's card is the owner's: a tick never starts a container with a card on the local daemon.
+# Its CPU may take a tick's compiles (bin/build_host.sh's local lane), which run without one.
+case "${DOCKER_HOST:-}" in ssh://*) ;; *)
+  for a in "$@"; do
+    case "$a" in
+      --gpus|--gpus=*)
+        if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
+          echo "remote-docker: a tick does not start a container with a card on this host; the local card is the owner's" >&2
+          exit 75
+        fi ;;
+    esac
+  done
+  exec "$real" "$@" ;;
+esac
 target=${DOCKER_HOST#ssh://}
 sub=""
 for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done

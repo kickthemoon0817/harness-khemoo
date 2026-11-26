@@ -160,5 +160,16 @@ echo "other@host $(date +%s)" > "$G/state/locks/cost-wait.2504"
 check "a wait for another host leaves this one alone" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
 rm -f "$G/state/locks/cost-wait."* "$G/state/locks/claim."*
 
+
+# This host's card is the owner's: a tick never gets a card from the local daemon.
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
+check "a tick's container with a card is refused on the local daemon" '[ "$rc" = 75 ] && grep -q "local card is the owner" "$T/guard.err" && ! grep -q " run " "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm -e NVIDIA_VISIBLE_DEVICES=void img true 2> "$T/guard.err"; rc=$?
+check "a tick's card-less container runs on the local daemon" '[ "$rc" = 0 ] && grep -q "run --rm -e NVIDIA_VISIBLE_DEVICES=void img true" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
+check "outside a tick the local daemon is left to its caller" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

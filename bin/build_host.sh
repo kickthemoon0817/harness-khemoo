@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Prints the export line a tick evals before `tools/dev/iter.sh build`, naming the remote host to
-# compile on and that host's compile lock:
-#   export DOCKER_HOST=ssh://<host> WORV_DEV_BUILD_LOCK=<lock dir>/worv-dev-build-remote-<name>.lock
+# Prints the export line a tick evals before `tools/dev/iter.sh build`, naming the host to compile
+# on, that host's compile lock and the builder image there:
+#   export DOCKER_HOST=ssh://<host> WORV_DEV_BUILD_LOCK=<lock dir>/worv-dev-build-remote-<name>.lock WORV_BUILDER_IMAGE=worv-builder:isaac6
+# With state/local-cpu-lane present (owner, 2026-11-26: this host's CPU takes compiles, never its
+# card), this host is a lane after the remote ones: it takes a compile when no remote lane is
+# free and unwaited, under the host's own dev build lock (shared with the owner's own builds) and
+# the builder image the file names:
+#   export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=<lock dir>/worv-dev-build.lock WORV_BUILDER_IMAGE=<image>
 # Each host compiles one build at a time under its lock. Hosts are read in the harness order
 # (state/locks/harness-first-remote-only). A host that a live cost read holds whole is left out,
 # unless every host is; a hold marked no-cost does not count. A host a waiting cost read asks for
@@ -19,8 +24,12 @@ S="${HARNESS_STATE:-$H/state}"
 : "${BUILD_LOCK_DIR:=/tmp}"
 mapfile -t hosts < <(grep -v '^[[:space:]]*$' "$S/locks/harness-first-remote-only" 2>/dev/null)
 [ "${#hosts[@]}" -gt 0 ] || { echo "build_host: no harness host is named" >&2; exit 1; }
+LOCAL_LANE_FILE="$S/local-cpu-lane"
+local_image=""
+[ -s "$LOCAL_LANE_FILE" ] && read -r local_image _ < "$LOCAL_LANE_FILE"
 lock_of() {
   local h=$1 pair name=""
+  [ "$h" = local ] && { echo "$BUILD_LOCK_DIR/worv-dev-build.lock"; return; }
   for pair in $BUILD_LOCK_NAMES; do [ "${pair%%=*}" = "$h" ] && name=${pair#*=}; done
   [ -n "$name" ] || name=$(printf '%s' "${h#*@}" | tr -c 'A-Za-z0-9' '-')
   echo "$BUILD_LOCK_DIR/worv-dev-build-remote-$name.lock"
@@ -36,8 +45,12 @@ for h in "${hosts[@]}"; do
   grep -qxF "$h" <<< "$waited" && continue
   cands+=("$h")
 done
-[ "${#cands[@]}" -gt 0 ] || for h in "${hosts[@]}"; do grep -qxF "$h" <<< "$held" || cands+=("$h"); done
-[ "${#cands[@]}" -gt 0 ] || cands=("${hosts[@]}")
+if [ -z "$local_image" ]; then
+  [ "${#cands[@]}" -gt 0 ] || for h in "${hosts[@]}"; do grep -qxF "$h" <<< "$held" || cands+=("$h"); done
+  [ "${#cands[@]}" -gt 0 ] || cands=("${hosts[@]}")
+else
+  cands+=(local)
+fi
 best="" best_wait=""
 for h in "${cands[@]}"; do
   l=$(lock_of "$h")
@@ -45,4 +58,8 @@ for h in "${cands[@]}"; do
   w=$(lslocks -n -o PATH,BLOCKER 2>/dev/null | awk -v p="$l" '$1 == p && $2 != "" { n++ } END { print n + 0 }')
   if [ -z "$best_wait" ] || [ "$w" -lt "$best_wait" ]; then best=$h; best_wait=$w; fi
 done
-echo "export DOCKER_HOST=ssh://$best WORV_DEV_BUILD_LOCK=$(lock_of "$best")"
+if [ "$best" = local ]; then
+  echo "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$(lock_of local) WORV_BUILDER_IMAGE=$local_image"
+else
+  echo "export DOCKER_HOST=ssh://$best WORV_DEV_BUILD_LOCK=$(lock_of "$best") WORV_BUILDER_IMAGE=worv-builder:isaac6"
+fi
