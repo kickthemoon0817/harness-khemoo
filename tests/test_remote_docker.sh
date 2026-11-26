@@ -108,12 +108,12 @@ check "an explicit ssh DOCKER_HOST wins, and bash -c under timeout keeps the fun
 
 # The cost-read guard, read through a fake harness tree: a tick may not start a container on a
 # host another issue holds whole, unless that hold is marked no-cost.
-G="$T/guard"; mkdir -p "$G/bin/remote-docker"; cp "$SHIM" "$G/bin/remote-docker/docker"
+G="$T/guard"; mkdir -p "$G/bin/remote-docker" "$G/state/locks"; cp "$SHIM" "$G/bin/remote-docker/docker"; cp "$here/bin/cost_wait_hosts.sh" "$G/bin/"
 printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
 cat > "$G/bin/lease.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "remote card: fake@host (slots 4-5)"
-echo "slot 4 HELD 2490 1 2026-11-26T00:00:00Z domain=80 remote-all${GUARD_MARK:-} render (alive)"
+[ -n "${GUARD_NOHOLD:-}" ] || echo "slot 4 HELD 2490 1 2026-11-26T00:00:00Z domain=80 remote-all${GUARD_MARK:-} render (alive)"
 EOF
 chmod +x "$G/bin/"*.sh "$G/bin/remote-docker/docker"
 : > "$LOG"; DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
@@ -139,6 +139,26 @@ out=$(ROOM_APPS=1 PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/r
 check "--alone-card still refuses a card that runs another process" '[ "$rc" = 1 ] && [[ "$out" == "busy 1 compute"* ]]' "rc=$rc $out"
 out=$(ROOM_LOAD=2.0 PATH="$R/fake:$PATH" REMOTE_CARD_HOST=fake@host bash "$R/bin/remote_room.sh" --alone); rc=$?
 check "--alone takes a quiet host whose card is free" '[ "$rc" = 0 ] && [[ "$out" == ok* ]]' "rc=$rc $out"
+
+
+# A cost read waiting for a host keeps other ticks' card-less containers off it.
+echo "2495 999999 2026-11-26T04:00:00Z" > "$G/state/locks/claim.2495"
+echo "fake@host $(date +%s)" > "$G/state/locks/cost-wait.2504"
+: > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm -e NVIDIA_VISIBLE_DEVICES=void img true 2> "$T/guard.err"; rc=$?
+check "a card-less container is refused on a host another issue's cost read waits for" '[ "$rc" = 75 ] && grep -q "#2504.s cost read waits for fake@host" "$T/guard.err" && ! grep -q " run " "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
+check "a container with a card answers to its lease, not to the wait" '[ "$rc" = 0 ] && grep -q "run --rm --gpus all img true" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+mv "$G/state/locks/claim.2495" "$G/state/locks/claim.2504"; sed -i 's/^2495 /2504 /' "$G/state/locks/claim.2504"
+: > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
+check "the waiting issue's own tick still runs its containers there" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
+mv "$G/state/locks/claim.2504" "$G/state/locks/claim.2495"; sed -i 's/^2504 /2495 /' "$G/state/locks/claim.2495"
+echo "fake@host $(( $(date +%s) - 600 ))" > "$G/state/locks/cost-wait.2504"
+: > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
+check "a wait marker no runner refreshed is ignored" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
+echo "other@host $(date +%s)" > "$G/state/locks/cost-wait.2504"
+: > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
+check "a wait for another host leaves this one alone" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
+rm -f "$G/state/locks/cost-wait."* "$G/state/locks/claim."*
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

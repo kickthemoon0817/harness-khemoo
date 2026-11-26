@@ -7,7 +7,7 @@ T=$(mktemp -d); pids=()
 cleanup() { [ "${#pids[@]}" -gt 0 ] && kill "${pids[@]}" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 mkdir -p "$T/h/bin" "$T/h/state/locks" "$T/lk"
-cp "$here/bin/build_host.sh" "$T/h/bin/"
+cp "$here/bin/build_host.sh" "$here/bin/cost_wait_hosts.sh" "$T/h/bin/"
 printf '%s\n' "a@one" "b@two" > "$T/h/state/locks/harness-first-remote-only"
 cat > "$T/h/bin/lease.sh" <<'L'
 #!/usr/bin/env bash
@@ -21,8 +21,8 @@ export HARNESS_HOME="$T/h" HARNESS_STATE="$T/h/state" BUILD_LOCK_DIR="$T/lk" BUI
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 B="bash $T/h/bin/build_host.sh"
-hold() { flock "$1" sleep 300 & pids+=($!); sleep 0.3; }
-wait_on() { flock "$1" true & pids+=($!); sleep 0.3; }
+hold() { ( exec 9>"$1"; flock 9; exec sleep 300 ) > /dev/null 2>&1 & pids+=($!); sleep 0.3; }
+wait_on() { flock "$1" true > /dev/null 2>&1 & pids+=($!); sleep 0.3; }
 
 out=$($B)
 check "both locks free: the first host" '[ "$out" = "export DOCKER_HOST=ssh://a@one WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-one.lock" ]' "$out"
