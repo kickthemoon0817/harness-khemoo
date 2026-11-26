@@ -42,9 +42,15 @@ held_by_cost_read() {
         }'
 }
 run_on=""
-# With the harness kept to its remote hosts, bin/build_host.sh names the host and that host's compile
-# lock and builder image, its remote lanes only: a scheduled suite never runs on this host's CPU.
-if [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ]; then
+# The scheduled suites are CPU work, so with this host's CPU lane on (state/local-cpu-lane, owner
+# 2026-11-26) they run here, under the host's dev build lock and the lane's builder image, which keeps
+# both remote cards free for the runs that need a card. Otherwise, with the harness kept to its remote
+# hosts, bin/build_host.sh names a remote host and that host's compile lock and builder image.
+if [ -s "$HARNESS_STATE/local-cpu-lane" ]; then
+    read -r BUILDER_IMAGE _ < "$HARNESS_STATE/local-cpu-lane"
+    export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build.lock WORV_BUILDER_IMAGE="$BUILDER_IMAGE"
+    run_on=local
+elif [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ]; then
     lane=$(BUILD_HOST_REMOTE_ONLY=1 "$HARNESS_HOME/bin/build_host.sh") || exit 1
     eval "$lane"
     run_on=${DOCKER_HOST#ssh://}
