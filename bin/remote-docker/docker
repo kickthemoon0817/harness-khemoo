@@ -18,18 +18,43 @@ unset -f docker 2>/dev/null
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
-# This host's card is the owner's: a tick never starts a container with a card on the local daemon.
-# Its CPU may take a tick's compiles (bin/build_host.sh's local lane), which run without one.
+# This host's card is the owner's, and its default runtime hands every container the card unless
+# told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) may only run its own
+# card-less containers: run and create, with no option that reaches a card or a device, and with
+# runc and NVIDIA_VISIBLE_DEVICES=void forced on; besides those, read-only commands. Runs outside a
+# tick are left to their caller.
 case "${DOCKER_HOST:-}" in ssh://*) ;; *)
-  for a in "$@"; do
-    case "$a" in
-      --gpus|--gpus=*)
-        if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
-          echo "remote-docker: a tick does not start a container with a card on this host; the local card is the owner's" >&2
-          exit 75
-        fi ;;
+  if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
+    args=("$@"); si=-1
+    for ((i = 0; i < ${#args[@]}; i++)); do case "${args[$i]}" in -*) ;; *) si=$i; break ;; esac; done
+    [ "$si" -ge 0 ] || exec "$real" "$@"
+    case "${args[$si]}" in
+      run|create) ;;
+      ps|images|image|inspect|version|info|volume|logs|wait) exec "$real" "$@" ;;
+      *) echo "remote-docker: on this host a tick runs only its own card-less containers, not \`docker ${args[$si]}\`; the local card and containers are the owner's" >&2
+         exit 75 ;;
     esac
-  done
+    prev=""
+    for a in "${args[@]:$((si + 1))}"; do
+      bad=""
+      case "$a" in
+        --gpus|--gpus=*|--runtime|--runtime=*|--device|--device=*|--device-*|--privileged|--privileged=*|--cap-add|--cap-add=*|--env-file|--env-file=*) bad=$a ;;
+        --env=NVIDIA_VISIBLE_DEVICES=void|--env=NVIDIA_VISIBLE_DEVICES=none) ;;
+        --env=NVIDIA_*|-eNVIDIA_*|--volume=/dev/*|-v/dev/*) bad=$a ;;
+      esac
+      case "$prev" in
+        -e|--env) case "$a" in NVIDIA_VISIBLE_DEVICES=void|NVIDIA_VISIBLE_DEVICES=none) ;; NVIDIA_*) bad="$prev $a" ;; esac ;;
+        -v|--volume) case "$a" in /dev/*) bad="$prev $a" ;; esac ;;
+        --mount) case "$a" in *source=/dev/*|*src=/dev/*) bad="$prev $a" ;; esac ;;
+      esac
+      if [ -n "$bad" ]; then
+        echo "remote-docker: a tick does not start a container with a card or device access on this host (\`$bad\`); the local card is the owner's" >&2
+        exit 75
+      fi
+      prev=$a
+    done
+    exec "$real" "${args[@]:0:$((si + 1))}" --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${args[@]:$((si + 1))}"
+  fi
   exec "$real" "$@" ;;
 esac
 target=${DOCKER_HOST#ssh://}
