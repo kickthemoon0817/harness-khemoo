@@ -56,8 +56,8 @@ class FixtureHarness:
         self.home: Path = Path(self.temporary_directory.name).resolve() / "harness"
         self.state: Path = self.home / "state"
         self.calls_log: Path = self.home / "calls.log"
-        self.tick_process: subprocess.Popen[bytes] | None = None
-        self._slot_lock_file: Any = None
+        self.tick_processes: list[subprocess.Popen[bytes]] = []
+        self._slot_lock_files: list[Any] = []
         for directory in (self.home / "bin", self.home / "config", self.state / "locks", self.state / "logs",
                           self.state / "model-cooldown"):
             directory.mkdir(parents=True)
@@ -130,31 +130,35 @@ class FixtureHarness:
     def start_fake_tick(self, issue: int, slot: int, tool_command: str = "sleep 30") -> int:
         """
         Starts a process that looks like a harness tick: argv[0] `claude`, argv[1] `-p`, stdout to a tick log,
-        a slot lock open, and one tool shell child wrapping its command as Claude Code does.
+        a slot lock open, and one tool shell child wrapping its command as Claude Code does. The tool shell sleeps
+        before its `eval`, so the command is only carried in its argv, never run: it may be any text, quoting
+        that does not parse included.
 
         Args:
             issue: The issue its claim file names.
-            slot: The slot lock it holds.
-            tool_command: The command its tool shell runs; it must block for a while and harm nothing.
+            slot: The slot lock it holds; one tick a slot.
+            tool_command: The command its tool shell carries.
 
         Returns:
             Its pid.
         """
         escaped_command: str = tool_command.replace("'", "'\"'\"'")
-        tool_argument: Path = self.home / "tool_argument.txt"
-        tool_argument.write_text(f"true && eval '{escaped_command}' < /dev/null && pwd -P >| /dev/null")
-        script: Path = self.home / "fake_tick.sh"
+        tool_argument: Path = self.home / f"tool_argument_{slot}.txt"
+        tool_argument.write_text(f"true && sleep 30 && eval '{escaped_command}' < /dev/null && pwd -P >| /dev/null")
+        script: Path = self.home / f"fake_tick_{slot}.sh"
         script.write_text(f'bash -c "$(cat \'{tool_argument}\')" &\nwait\n')
-        self._slot_lock_file = (self.state / "locks" / f"slot{slot}.lock").open("w")
+        slot_lock_file = (self.state / "locks" / f"slot{slot}.lock").open("w")
+        self._slot_lock_files.append(slot_lock_file)
         log_file = (self.state / "logs" / f"tick-20261126T013000Z-slot{slot}.log").open("w")
-        self.tick_process = subprocess.Popen(
+        tick_process = subprocess.Popen(
             ["bash", "-c", f'exec -a claude bash -p "{script}" "This tick runs on claude-opus-5-5: never claim" '
                            "--model claude-opus-5-5"],
-            stdout=log_file, stderr=subprocess.DEVNULL, pass_fds=(self._slot_lock_file.fileno(),),
+            stdout=log_file, stderr=subprocess.DEVNULL, pass_fds=(slot_lock_file.fileno(),),
             start_new_session=True,
         )
         log_file.close()
-        pid: int = self.tick_process.pid
+        self.tick_processes.append(tick_process)
+        pid: int = tick_process.pid
         (self.state / "locks" / f"claim.{issue}").write_text(f"{issue} {pid} 2026-11-26T01:30:00Z\n")
         (self.state / "locks" / "claim.2001").write_text(f"2001 {pid} 2026-11-25T01:00:00Z\n")
         deadline: float = time.time() + 5
@@ -205,16 +209,16 @@ class FixtureHarness:
 
     def close(self) -> None:
         """
-        Stops the fake tick and removes the home.
+        Stops the fake ticks and removes the home.
         """
-        if self.tick_process is not None:
+        for tick_process in self.tick_processes:
             try:
-                os.killpg(self.tick_process.pid, signal.SIGKILL)
+                os.killpg(tick_process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            self.tick_process.wait(timeout=5)
-        if self._slot_lock_file is not None:
-            self._slot_lock_file.close()
+            tick_process.wait(timeout=5)
+        for slot_lock_file in self._slot_lock_files:
+            slot_lock_file.close()
         self.temporary_directory.cleanup()
 
     def _write_script(self, name: str, text: str) -> None:
@@ -342,6 +346,7 @@ class ParserTest(unittest.TestCase):
 class RedactionTest(unittest.TestCase):
     SHAPES: ClassVar[list[JsonDict]] = json.loads((FIXTURES / "secret_shapes.json").read_text())
     KEPT: ClassVar[list[JsonDict]] = json.loads((FIXTURES / "kept_shapes.json").read_text())
+    BYPASS: ClassVar[list[JsonDict]] = json.loads((FIXTURES / "bypass_shapes.json").read_text())
 
     def test_every_secret_shape_is_masked(self) -> None:
         for shape in self.SHAPES:
@@ -360,6 +365,42 @@ class RedactionTest(unittest.TestCase):
                 self.assertNotIn(shape["secret"], summary)
                 self.assertIn(CommandRedactor.MASK, summary)
 
+    def test_quoting_bypass_shapes_are_masked_in_the_summary(self) -> None:
+        for shape in self.BYPASS:
+            for max_arguments in (4, 12):
+                with self.subTest(shape["shape"], max_arguments=max_arguments):
+                    summary: str = CommandRedactor.summarize(shape["command"], max_arguments=max_arguments,
+                                                             max_argument_chars=200)
+                    masked_words: str = " ".join(CommandRedactor.redact_command(shape["command"]))
+                    self.assertIn(CommandRedactor.MASK, masked_words)
+                    for secret in shape["secrets"]:
+                        self.assertNotIn(secret, summary)
+                        self.assertNotIn(secret, masked_words)
+
+    def test_quoting_bypass_shapes_are_masked_in_an_argv_summary(self) -> None:
+        for shape in self.BYPASS:
+            if shape["argv"] is None:
+                continue
+            with self.subTest(shape["shape"]):
+                summary: str = CommandRedactor.summarize_argv(shape["argv"], max_arguments=12)
+                masked_words: str = " ".join(CommandRedactor.redact_command(shlex.join(shape["argv"])))
+                self.assertIn(CommandRedactor.MASK, masked_words)
+                for secret in shape["secrets"]:
+                    self.assertNotIn(secret, summary)
+                    self.assertNotIn(secret, masked_words)
+
+    def test_every_word_after_a_quoting_failure_is_masked(self) -> None:
+        self.assertEqual(CommandRedactor.redact_command('tool --name "a b'), ["tool", "--name", CommandRedactor.MASK])
+        self.assertEqual(CommandRedactor.redact_command("tool 'a"), ["tool", CommandRedactor.MASK])
+        self.assertEqual(CommandRedactor.redact_command("tool --token=x --password y z"),
+                         ["tool", "--token=[redacted]", "--password", "[redacted]", "z"])
+
+    def test_scripts_nested_past_the_depth_limit_are_masked_whole(self) -> None:
+        script: str = "tool --name plain"
+        for _ in range(CommandRedactor.MAX_SCRIPT_DEPTH + 1):
+            script = shlex.join(["bash", "-c", script])
+        self.assertNotIn("plain", " ".join(CommandRedactor.redact_command(script)))
+
     def test_plain_values_are_kept(self) -> None:
         for kept in self.KEPT:
             with self.subTest(kept["text"]):
@@ -374,7 +415,7 @@ class RedactionTest(unittest.TestCase):
             "P=/a/b; for i in $(seq 1 9); do sleep 60; done; grep -E ' rc=' $P/runs/status"), "sleep 60 +1 more")
         self.assertEqual(CommandRedactor.summarize(
             "timeout 560 bash -c \"until grep -q 'RS6 start' $P/runs/status; do sleep 20; done\"; date -u"),
-            "timeout 560 bash -c 'grep -q RS6 start \u2026 +1 more' +1 more")
+            "timeout 560 bash -c 'grep -q RS6 \u2026 +1 more' +1 more")
         self.assertEqual(CommandRedactor.summarize("date -u; echo done"), "date -u +1 more")
         self.assertEqual(CommandRedactor.summarize("cat /very/long/path/to/some/evidence/folder/with/a/file.log"),
                          "cat \u2026/file.log")
@@ -434,6 +475,29 @@ class SecretSurfaceTest(unittest.TestCase):
                 self.assertNotIn(secret, snapshot_json)
                 self.assertNotIn(html.escape(secret, quote=True), page)
                 self.assertNotIn(secret, page)
+
+
+    def test_no_quoting_bypass_reaches_the_json_or_the_page(self) -> None:
+        shapes: list[JsonDict] = json.loads((FIXTURES / "bypass_shapes.json").read_text())
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        pid_by_shape: dict[str, int] = {
+            shape["shape"]: harness.start_fake_tick(issue=3000 + index, slot=index + 1, tool_command=shape["command"])
+            for index, shape in enumerate(shapes)
+        }
+        collector: Collector = harness.collector()
+        snapshot = collector.snapshot()
+        snapshot_json: str = json.dumps(snapshot, default=str)
+        page: str = HtmlRenderer().render(snapshot, 30, "access")
+        doing_by_pid: dict[int, str] = {tick["pid"]: tick["doing"] for tick in snapshot["ticks"]}
+        for shape in shapes:
+            with self.subTest(shape["shape"]):
+                doing: str = doing_by_pid[pid_by_shape[shape["shape"]]]
+                self.assertTrue(doing)
+                for secret in shape["secrets"]:
+                    self.assertNotIn(secret, doing)
+                    self.assertNotIn(secret, snapshot_json)
+                    self.assertNotIn(secret, page)
 
 
 class TickMappingTest(unittest.TestCase):

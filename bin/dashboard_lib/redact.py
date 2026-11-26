@@ -11,26 +11,33 @@ class CommandRedactor:
     """
     Masks secret-looking values and summarises commands.
 
-    `redact` masks, in any text: `KEY=value` and `--flag value` where the name holds TOKEN, KEY, SECRET, PASS,
-    AUTH or CRED (any case); `Authorization:` header values and `Bearer` credentials; URL userinfo with a
+    Secret-looking values: `KEY=value` and `--flag value` / `--flag=value` where the name holds TOKEN, KEY, SECRET,
+    PASS, AUTH or CRED (any case); `Authorization:` header values and `Bearer` credentials; URL userinfo with a
     password, and any userinfo of an http(s) URL; GitHub, GitLab, Slack, AWS and `sk-` token shapes; hex runs of
     32 characters or more; and base64-like runs of 32 or more mixing upper case, lower case and digits.
 
-    `summarize` redacts first, then keeps only the first command that does real work (leading `cd`, `export`,
-    assignment-only and similar steps skipped): its executable's base name and its first few arguments, each
-    shortened. No raw command line leaves it.
+    `redact` masks them in free text (a log line) that is shown as it is. `summarize` works on what the shell
+    would see: it tokenizes first, the way the shell dequotes, and masks each dequoted word, a secret-named flag
+    together with the word after it. A word that is itself a script (a `-c` argument, any word holding spaces or
+    quotes) is tokenized and masked again, to a fixed depth past which it is masked whole. When the quoting does
+    not parse, everything from the failure on is masked. Only then does it shorten the result to the working
+    command's executable and a few arguments. No raw command line leaves it.
     """
 
     MASK: ClassVar[str] = "[redacted]"
     SECRET_WORDS: ClassVar[str] = r"(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED)"
+    SECRET_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(rf"(?i){SECRET_WORDS}")
+    SECRET_FLAG_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(rf"(?i)^--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*$")
+    NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*|--?[A-Za-z0-9][A-Za-z0-9-]*)$")
+    ESCAPED_OR_QUOTED_VALUE: ClassVar[str] = r"\\\"[^\"]*?\\\"|\\'[^']*?\\'|\"[^\"]*\"|'[^']*'"
     SECRET_ASSIGNMENT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?i)\b([A-Za-z0-9_]*{SECRET_WORDS}[A-Za-z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s;&|'\"]+)"
+        rf"(?i)\b([A-Za-z0-9_]*{SECRET_WORDS}[A-Za-z0-9_]*)=({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|]+)"
     )
     SECRET_FLAG_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?i)(?<![\w-])(--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*)(=|\s+)(\"[^\"]*\"|'[^']*'|[^\s;&|'\"-][^\s;&|'\"]*)"
+        rf"(?i)(?<![\w-])(--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*)(=|\s+)({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|-][^\s;&|]*)"
     )
     AUTHORIZATION_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?i)\b(authorization\s*:\s*)(?:(?:bearer|token|basic)\s+)?[^\s'\"]+"
+        r"(?i)\b(authorization\s*:\s*)(?:(?:bearer|token|basic|digest)\s+)?[^\s'\"]+"
     )
     BEARER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+")
     URL_PASSWORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
@@ -43,6 +50,9 @@ class CommandRedactor:
     )
     HEX_RUN_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
     BASE64_RUN_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"[A-Za-z0-9+/_-]{32,}={0,2}")
+    AUTH_SCHEMES: ClassVar[frozenset[str]] = frozenset({"bearer", "token", "basic", "digest"})
+    SCRIPT_CHARACTERS: ClassVar[frozenset[str]] = frozenset(" \t\n'\"\\;|&")
+    MAX_SCRIPT_DEPTH: ClassVar[int] = 4
     PREAMBLE_COMMANDS: ClassVar[frozenset[str]] = frozenset(
         {"cd", "export", "source", ".", "set", "unset", "true", "false", ":", "local", "umask", "shopt", "break",
          "continue", "exit", "return", "wait", "shift", "trap"}
@@ -62,10 +72,10 @@ class CommandRedactor:
     @staticmethod
     def redact(text: str) -> str:
         """
-        Masks every secret-looking value in a text.
+        Masks every secret-looking value in free text shown as it is, quotes and escapes included.
 
         Args:
-            text: Any text: a command line, a log line.
+            text: A log line or any other text that is not dequoted before display.
 
         Returns:
             The text with each secret replaced by MASK.
@@ -96,106 +106,14 @@ class CommandRedactor:
         Returns:
             `exe arg ...`, `+N more` when further commands follow; empty for an empty command.
         """
-        return CommandRedactor._summarize_redacted(CommandRedactor.redact(command), max_arguments, max_argument_chars,
-                                                   allow_nested=True)
-
-    @staticmethod
-    def _summarize_redacted(text: str, max_arguments: int, max_argument_chars: int, allow_nested: bool) -> str:
-        """
-        Summarises an already redacted command line.
-
-        Args:
-            text: The redacted command line.
-            max_arguments: Arguments kept after the executable.
-            max_argument_chars: Longest argument kept whole.
-            allow_nested: Summarise a `-c` script argument once more, one level deep.
-
-        Returns:
-            The summary.
-        """
-        commands: list[list[str]] = CommandRedactor._simple_commands(text)
-        if not commands:
-            return ""
-        chosen_index: int = 0
-        fallback_index: int | None = None
-        for index, words in enumerate(commands):
-            executable: str = os.path.basename(words[0])
-            if executable in CommandRedactor.PREAMBLE_COMMANDS or words[0].startswith("$") \
-                    or words[0].startswith(CommandRedactor.SUBSTITUTION_PLACEHOLDER):
-                continue
-            if fallback_index is None:
-                fallback_index = index
-            if executable not in CommandRedactor.LOW_SIGNAL_COMMANDS:
-                chosen_index = index
-                break
-        else:
-            chosen_index = fallback_index if fallback_index is not None else 0
-        words: list[str] = commands[chosen_index]
-        arguments: list[str] = []
-        index: int = 1
-        while index < len(words):
-            word: str = words[index]
-            following: str = words[index + 1] if index + 1 < len(words) else ""
-            if CommandRedactor._is_redirection(word):
-                index += 2
-                continue
-            if word.isdigit() and CommandRedactor._is_redirection(following):
-                index += 1
-                continue
-            if allow_nested and words[index - 1] == "-c" and " " in word.strip():
-                nested: str = CommandRedactor._summarize_redacted(word, 2, max_argument_chars, allow_nested=False)
-                arguments.append(f"'{nested}'")
-            else:
-                arguments.append(CommandRedactor._shorten(word, max_argument_chars))
-            index += 1
-        summary: str = " ".join([os.path.basename(words[0]) or words[0]] + arguments[:max_arguments])
-        if len(arguments) > max_arguments:
-            summary += " \u2026"
-        remaining_commands: int = len(commands) - chosen_index - 1
-        if remaining_commands > 0:
-            summary += f" +{remaining_commands} more"
-        return summary.replace(CommandRedactor.SUBSTITUTION_PLACEHOLDER, "$(\u2026)")
-
-    @staticmethod
-    def _simple_commands(text: str) -> list[list[str]]:
-        """
-        Splits a command line into simple commands: command substitutions collapsed to a placeholder, split at
-        control operators, leading assignments and `do`/`then`/`if`/`while`-style keywords dropped, and loop
-        headers (`for`, `case`, `done`, ...) left out.
-
-        Args:
-            text: The command line.
-
-        Returns:
-            Each simple command's words, executable first.
-        """
-        collapsed: str = text
-        while True:
-            replaced: str = CommandRedactor.SUBSTITUTION_PATTERN.sub(CommandRedactor.SUBSTITUTION_PLACEHOLDER,
-                                                                      collapsed)
-            if replaced == collapsed:
-                break
-            collapsed = replaced
-        commands: list[list[str]] = [[]]
-        for token in CommandRedactor._tokens(collapsed):
-            if CommandRedactor._is_punctuation(token) and not CommandRedactor._is_redirection(token):
-                if commands[-1]:
-                    commands.append([])
-                continue
-            commands[-1].append(token)
-        simple_commands: list[list[str]] = []
-        for words in commands:
-            while words and (words[0] in CommandRedactor.LEADING_KEYWORDS
-                             or CommandRedactor.ASSIGNMENT_PATTERN.match(words[0])):
-                words = words[1:]
-            if words and words[0] not in CommandRedactor.HEADER_KEYWORDS:
-                simple_commands.append(words)
-        return simple_commands
+        return CommandRedactor._summarize_words(CommandRedactor.redact_command(command), max_arguments,
+                                                max_argument_chars, allow_nested=True)
 
     @staticmethod
     def summarize_argv(argv: tuple[str, ...] | list[str], max_arguments: int = 2) -> str:
         """
-        Summarises a process's argv the same way, a script run by an interpreter named by the script.
+        Summarises a process's argv, already split into words, the same way; a script run by an interpreter is
+        named by the script.
 
         Args:
             argv: The process arguments.
@@ -208,31 +126,213 @@ class CommandRedactor:
         if len(words) > 1 and os.path.basename(words[0]) in ("bash", "sh", "python3", "python") \
                 and not words[1].startswith("-"):
             words = words[1:]
-        return CommandRedactor.summarize(shlex.join(words), max_arguments=max_arguments)
+        return CommandRedactor._summarize_words(CommandRedactor._redact_words(words, depth=0), max_arguments, 32,
+                                                allow_nested=True)
 
     @staticmethod
-    def _tokens(text: str) -> list[str]:
+    def redact_command(command: str, depth: int = 0) -> list[str]:
         """
-        Splits a command line into words and control operators.
+        Tokenizes a command line as the shell would and masks each dequoted word.
+
+        Args:
+            command: A shell command line.
+            depth: How many scripts deep this command sits.
+
+        Returns:
+            Its masked words and operators; MASK stands for everything from a quoting failure on.
+        """
+        collapsed: str = command
+        while True:
+            replaced: str = CommandRedactor.SUBSTITUTION_PATTERN.sub(CommandRedactor.SUBSTITUTION_PLACEHOLDER,
+                                                                      collapsed)
+            if replaced == collapsed:
+                break
+            collapsed = replaced
+        words, parsed_whole = CommandRedactor._split_words(collapsed)
+        redacted: list[str] = CommandRedactor._redact_words(words, depth)
+        if not parsed_whole:
+            redacted.append(CommandRedactor.MASK)
+        return redacted
+
+    @staticmethod
+    def _redact_words(words: list[str], depth: int) -> list[str]:
+        """
+        Masks a list of dequoted words: a secret-named flag hides the word after it, `Authorization:` and
+        `Bearer` hide the credential after them, and every other word is masked on its own.
+
+        Args:
+            words: Dequoted words and operators.
+            depth: How many scripts deep they sit.
+
+        Returns:
+            The masked words.
+        """
+        redacted: list[str] = []
+        hide_next: bool = False
+        credential_follows: bool = False
+        for word in words:
+            if CommandRedactor._is_punctuation(word):
+                redacted.append(word)
+                hide_next = credential_follows = False
+                continue
+            if hide_next:
+                redacted.append(CommandRedactor.MASK)
+                hide_next = False
+                continue
+            if credential_follows:
+                if word.lower() in CommandRedactor.AUTH_SCHEMES:
+                    redacted.append(word)
+                    continue
+                redacted.append(CommandRedactor.MASK)
+                credential_follows = False
+                continue
+            if CommandRedactor.SECRET_FLAG_WORD_PATTERN.match(word):
+                redacted.append(word)
+                hide_next = True
+                continue
+            if word.lower() in ("authorization:", "bearer"):
+                redacted.append(word)
+                credential_follows = True
+                continue
+            redacted.append(CommandRedactor._redact_word(word, depth))
+        return redacted
+
+    @staticmethod
+    def _redact_word(word: str, depth: int) -> str:
+        """
+        Masks one dequoted word: a secret-named `name=value` loses its whole value, a word that is a script is
+        tokenized and masked in turn, and any other word goes through the free-text masks.
+
+        Args:
+            word: One dequoted word.
+            depth: How many scripts deep it sits.
+
+        Returns:
+            The masked word.
+        """
+        name, equals, _ = word.partition("=")
+        if equals and CommandRedactor.NAME_PATTERN.match(name) and CommandRedactor.SECRET_NAME_PATTERN.search(name):
+            return f"{name}={CommandRedactor.MASK}"
+        if any(character in CommandRedactor.SCRIPT_CHARACTERS for character in word):
+            if depth >= CommandRedactor.MAX_SCRIPT_DEPTH:
+                return CommandRedactor.MASK
+            return " ".join(CommandRedactor.redact_command(word, depth + 1))
+        return CommandRedactor.redact(word)
+
+    @staticmethod
+    def _split_words(text: str) -> tuple[list[str], bool]:
+        """
+        Splits a command line into dequoted words and control operators, as the shell does.
 
         Args:
             text: The command line.
 
         Returns:
-            Shell words (quotes removed) and operator tokens; plain whitespace split when the quoting is unbalanced.
+            The words read, and whether the whole text parsed; on a quoting failure, only the words before it.
         """
         lexer: shlex.shlex = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
+        words: list[str] = []
         try:
-            return list(lexer)
+            while True:
+                token: str | None = lexer.get_token()
+                if token is None or token == lexer.eof:
+                    return words, True
+                words.append(token)
         except ValueError:
-            return text.split()
+            return words, False
+
+    @staticmethod
+    def _summarize_words(words: list[str], max_arguments: int, max_argument_chars: int, allow_nested: bool) -> str:
+        """
+        Summarises masked words: picks the working command and keeps its executable and first arguments.
+
+        Args:
+            words: Masked words and operators from redact_command.
+            max_arguments: Arguments kept after the executable.
+            max_argument_chars: Longest argument kept whole.
+            allow_nested: Summarise a `-c` script argument once more, one level deep.
+
+        Returns:
+            The summary.
+        """
+        commands: list[list[str]] = CommandRedactor._simple_commands(words)
+        if not commands:
+            return ""
+        chosen_index: int = 0
+        fallback_index: int | None = None
+        for index, command_words in enumerate(commands):
+            executable: str = os.path.basename(command_words[0])
+            if executable in CommandRedactor.PREAMBLE_COMMANDS or command_words[0].startswith("$") \
+                    or command_words[0].startswith(CommandRedactor.SUBSTITUTION_PLACEHOLDER):
+                continue
+            if fallback_index is None:
+                fallback_index = index
+            if executable not in CommandRedactor.LOW_SIGNAL_COMMANDS:
+                chosen_index = index
+                break
+        else:
+            chosen_index = fallback_index if fallback_index is not None else 0
+        chosen: list[str] = commands[chosen_index]
+        arguments: list[str] = []
+        index: int = 1
+        while index < len(chosen):
+            word: str = chosen[index]
+            following: str = chosen[index + 1] if index + 1 < len(chosen) else ""
+            if CommandRedactor._is_redirection(word):
+                index += 2
+                continue
+            if word.isdigit() and CommandRedactor._is_redirection(following):
+                index += 1
+                continue
+            if allow_nested and chosen[index - 1] == "-c" and " " in word.strip():
+                nested: str = CommandRedactor._summarize_words(CommandRedactor.redact_command(word), 2,
+                                                               max_argument_chars, allow_nested=False)
+                arguments.append(f"'{nested}'")
+            else:
+                arguments.append(CommandRedactor._shorten(word, max_argument_chars))
+            index += 1
+        summary: str = " ".join([os.path.basename(chosen[0]) or chosen[0]] + arguments[:max_arguments])
+        if len(arguments) > max_arguments:
+            summary += " …"
+        remaining_commands: int = len(commands) - chosen_index - 1
+        if remaining_commands > 0:
+            summary += f" +{remaining_commands} more"
+        return summary.replace(CommandRedactor.SUBSTITUTION_PLACEHOLDER, "$(…)")
+
+    @staticmethod
+    def _simple_commands(words: list[str]) -> list[list[str]]:
+        """
+        Groups masked words into simple commands: split at control operators, leading assignments and
+        `do`/`then`/`if`/`while`-style keywords dropped, and loop headers (`for`, `case`, `done`, ...) left out.
+
+        Args:
+            words: Masked words and operators.
+
+        Returns:
+            Each simple command's words, executable first.
+        """
+        commands: list[list[str]] = [[]]
+        for word in words:
+            if CommandRedactor._is_punctuation(word) and not CommandRedactor._is_redirection(word):
+                if commands[-1]:
+                    commands.append([])
+                continue
+            commands[-1].append(word)
+        simple_commands: list[list[str]] = []
+        for command_words in commands:
+            while command_words and (command_words[0] in CommandRedactor.LEADING_KEYWORDS
+                                     or CommandRedactor.ASSIGNMENT_PATTERN.match(command_words[0])):
+                command_words = command_words[1:]
+            if command_words and command_words[0] not in CommandRedactor.HEADER_KEYWORDS:
+                simple_commands.append(command_words)
+        return simple_commands
 
     @staticmethod
     def _is_punctuation(token: str) -> bool:
         """
         Args:
-            token: A token from _tokens.
+            token: A word or operator.
 
         Returns:
             True for an operator token: only `();<>|&` characters.
@@ -243,7 +343,7 @@ class CommandRedactor:
     def _is_redirection(token: str) -> bool:
         """
         Args:
-            token: A token from _tokens.
+            token: A word or operator.
 
         Returns:
             True for a redirection operator, which belongs to its command and takes the next word as its target.
