@@ -266,5 +266,57 @@
    "totalCount": 0,
    "nodes": []
   }
+ },
+ {
+  "number": 2503,
+  "title": "chore: tidy the low-priority probe names",
+  "url": "https://github.com/example/repo/issues/2503",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:low"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ },
+ {
+  "number": 2504,
+  "title": "design: a new round on the face law",
+  "url": "https://github.com/example/repo/issues/2504",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:fable"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 1,
+   "nodes": [
+    {
+     "createdAt": "2026-11-26T00:50:00Z"
+    }
+   ]
+  }
  }
 ]

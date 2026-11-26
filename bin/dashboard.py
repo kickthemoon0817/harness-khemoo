@@ -3,11 +3,11 @@
 Serves the harness status dashboard on 127.0.0.1: machines, GPU slots and leases, live ticks, the issue queue,
 landings and health signals, as an auto-refreshing page (`/`) and as JSON (`/api/state`).
 
-    dashboard.py [--harness-home DIR] [--port 8787] [--data-dir DIR] [--queue-label ai:plan]
+    dashboard.py [--harness-home DIR] [--port 8787] [--data-dir DIR] [--queue-label LABEL]
     dashboard.py --once            print one snapshot as JSON and exit
 
-GH_TOKEN and GH_REPO are read from <harness home>/config/harness.env (only those two keys); the token reaches
-`gh` through its environment and is never shown. bin/dashboard.sh starts this detached.
+From <harness home>/config/harness.env it reads GH_TOKEN, GH_REPO and the label keys the scripts use, and no other
+key; the token reaches `gh` through its environment and is never shown. bin/dashboard.sh starts this detached.
 """
 import argparse
 import json
@@ -126,7 +126,11 @@ class DashboardApp:
     Reads the options and the two GitHub keys, then runs the collector and the server until stopped.
     """
 
-    ENV_KEYS: ClassVar[frozenset[str]] = frozenset({"GH_TOKEN", "GH_REPO"})
+    LABEL_KEYS: ClassVar[dict[str, str]] = {
+        "ISSUE_LABEL": "queue", "WIP_LABEL": "wip", "SIGNOFF_LABEL": "signoff", "OPERATOR_LABEL": "operator",
+        "READY_LABEL": "ready", "FABLE_LABEL": "fable", "FIRST_LABEL": "first", "LOW_LABEL": "low",
+    }
+    ENV_KEYS: ClassVar[frozenset[str]] = frozenset({"GH_TOKEN", "GH_REPO", *LABEL_KEYS})
 
     def __init__(self, options: argparse.Namespace) -> None:
         """
@@ -142,7 +146,7 @@ class DashboardApp:
             harness_home=harness_home,
             data_dir=Path(options.data_dir).resolve() if options.data_dir else harness_home / "state" / "dashboard",
             repo=repo,
-            labels=QueueLabels(all_issues=options.all_label, queue=options.queue_label),
+            labels=self._labels(env_values, options),
             usage_cache=Path(options.usage_cache).expanduser(),
             gh_binary=options.gh,
             history_hours=options.history_hours,
@@ -195,6 +199,25 @@ class DashboardApp:
         return 0
 
     @staticmethod
+    def _labels(env_values: dict[str, str], options: argparse.Namespace) -> QueueLabels:
+        """
+        Takes each label from harness.env where it is set, the scripts' default where not, and the queue label
+        from --queue-label when given.
+
+        Args:
+            env_values: The keys read from harness.env.
+            options: The command-line options.
+
+        Returns:
+            The label names.
+        """
+        overrides: dict[str, str] = {field_name: env_values[key] for key, field_name in DashboardApp.LABEL_KEYS.items()
+                                     if env_values.get(key)}
+        if options.queue_label:
+            overrides["queue"] = options.queue_label
+        return QueueLabels(all_issues=options.all_label, **overrides)
+
+    @staticmethod
     def parse_options(arguments: list[str]) -> argparse.Namespace:
         """
         Args:
@@ -212,9 +235,9 @@ class DashboardApp:
         parser.add_argument("--data-dir", default=os.environ.get("DASHBOARD_DATA_DIR"),
                             help="the dashboard's own history and cache (default: <home>/state/dashboard)")
         parser.add_argument("--repo", default=None, help="owner/name; default GH_REPO from config/harness.env")
-        parser.add_argument("--queue-label", default=os.environ.get("ISSUE_LABEL", "ai"),
-                            help="the label claimable.sh counts (the harness's ISSUE_LABEL; default $ISSUE_LABEL "
-                                 "or ai)")
+        parser.add_argument("--queue-label", default=None,
+                            help="the label claimable.sh counts (default: ISSUE_LABEL from config/harness.env, "
+                                 "else ai)")
         parser.add_argument("--all-label", default="ai", help="label of every issue the queue panels list")
         parser.add_argument("--usage-cache", default=os.environ.get("USAGE_CACHE", "~/.claude/usage-cache.json"))
         parser.add_argument("--gh", default="gh", help="gh executable")

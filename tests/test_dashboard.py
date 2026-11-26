@@ -18,6 +18,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
@@ -28,7 +29,7 @@ import dashboard  # noqa: E402
 from dashboard_lib.collector import Collector, DashboardConfig  # noqa: E402
 from dashboard_lib.github import GitHubClient  # noqa: E402
 from dashboard_lib.harness_env import HarnessEnvReader  # noqa: E402
-from dashboard_lib.models import ClaimRecord, LeaseSlot  # noqa: E402
+from dashboard_lib.models import ClaimRecord, JsonDict, LeaseSlot  # noqa: E402
 from dashboard_lib.parsers import StateParsers  # noqa: E402
 from dashboard_lib.procs import ProcessScanner  # noqa: E402
 from dashboard_lib.queue import IssueQueue, QueueLabels  # noqa: E402
@@ -67,6 +68,9 @@ class FixtureHarness:
             TARGET_REPO=/nowhere
             export GH_TOKEN="{self.FAKE_TOKEN}"
             GH_REPO=example/repo   # the target
+            ISSUE_LABEL=ai:plan
+            FIRST_LABEL=ai:first
+            LOW_LABEL="ai:low"
             OTHER_SECRET=do-not-read
         """))
         self._write_script("lease.sh", f"""\
@@ -100,7 +104,8 @@ class FixtureHarness:
             if "search/issues" in arguments:
                 print(json.dumps({{"items": [{{"number": 2490}}]}}))
             elif "issues(" in query:
-                nodes = json.load(open(fixtures + "/issues.json"))
+                name = "/issues_first.json" if "label=ai:first" in arguments else "/issues.json"
+                nodes = json.load(open(fixtures + name))
                 print(json.dumps({{"data": {{"repository": {{"issues": {{"totalCount": len(nodes),
                     "pageInfo": {{"hasNextPage": False, "endCursor": None}}, "nodes": nodes}}}}}}}}))
             elif "search(" in query:
@@ -167,17 +172,18 @@ class FixtureHarness:
         fields.update(overrides)
         return DashboardConfig(**fields)
 
-    def collector(self, **overrides: Any) -> Collector:
+    def collector(self, clock: Callable[[], float] | None = None, **overrides: Any) -> Collector:
         """
         Args:
+            clock: The collector's clock; pinned to PINNED_EPOCH when None.
             **overrides: DashboardConfig fields to change.
 
         Returns:
-            A collector on this home with the clock pinned.
+            A collector on this home.
         """
         config: DashboardConfig = self.config(**overrides)
         github: GitHubClient = GitHubClient("example/repo", self.FAKE_TOKEN, config.gh_binary)
-        return Collector(config, github, clock=lambda: self.PINNED_EPOCH)
+        return Collector(config, github, clock=clock or (lambda: self.PINNED_EPOCH))
 
     def calls(self) -> list[str]:
         """
@@ -375,6 +381,7 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(numbers["running"], [2464])
         self.assertEqual(sorted(numbers["claimable"]), [2490, 2495, 2502])
         self.assertEqual(numbers["claimable"][0], 2495)
+        self.assertEqual(sorted(numbers["held"]), [2503, 2504])
         self.assertEqual(sorted(numbers["operator"]), [2063, 2467])
         self.assertEqual(numbers["signoff"], [2200])
         self.assertEqual(sorted(numbers["other"]), [1240, 2388, 2501])
@@ -384,9 +391,36 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(reasons[2501], "claimed by live pid 4242")
         self.assertEqual(reasons[2490], "resumable: no live claimant")
         self.assertEqual(reasons[2464], "tick pid 18907")
+        self.assertEqual(reasons[2503], "held: ai:low waits while a ai:first issue is claimable")
+        self.assertEqual(reasons[2504], "held: a new ai:fable round waits while a ai:first issue is claimable")
         last_comment = {issue.number: issue.last_comment_at for members in groups.values() for issue in members}
         self.assertEqual(last_comment[2464], "2026-11-26T01:27:15Z")
         self.assertIsNone(last_comment[2495])
+
+    def test_first_gate(self) -> None:
+        def issue(number: int, *labels: str, body: str = "") -> JsonDict:
+            return {"number": number, "title": f"t{number}", "body": body,
+                    "labels": {"nodes": [{"name": name} for name in ("ai", "ai:plan", *labels)]}}
+
+        def split(issues: list[JsonDict], first_only: list[JsonDict] | None = None) -> tuple[list[int], list[int]]:
+            groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(issues, {}, {}, {}, first_only)
+            return (sorted(member.number for member in groups["claimable"]),
+                    sorted(member.number for member in groups["held"]))
+
+        self.assertEqual(split([issue(1), issue(2, "ai:low")]), ([1], [2]))
+        self.assertEqual(split([issue(2, "ai:low"), issue(3, "ai:low")]), ([2, 3], []))
+        self.assertEqual(split([issue(4, "ai:fable"), issue(2, "ai:low")]), ([4], [2]))
+        self.assertEqual(split([issue(4, "ai:fable"), issue(5, "ai:fable", "ai:first")]), ([5], [4]))
+        outside_first = {"number": 9, "title": "t9", "body": "", "labels": {"nodes": [{"name": "ai:first"}]}}
+        self.assertEqual(split([issue(4, "ai:fable"), issue(2, "ai:low")], [outside_first]), ([], [2, 4]))
+        self.assertEqual(split([issue(4, "ai:fable")], [outside_first]), ([], [4]))
+        parked_first = {"number": 9, "title": "t9", "body": "",
+                        "labels": {"nodes": [{"name": "ai:first"}, {"name": "ai:operator"}]}}
+        self.assertEqual(split([issue(4, "ai:fable")], [parked_first]), ([4], []))
+        listed_outside_queue = {"number": 8, "title": "t8", "body": "",
+                                "labels": {"nodes": [{"name": "ai"}, {"name": "ai:first"}]}}
+        self.assertEqual(split([issue(4, "ai:fable"), listed_outside_queue]), ([], [4]))
+        self.assertEqual(split([issue(2, "ai:low"), issue(1, body="Depends on: #77")]), ([2], []))
 
     def test_unknown_dependency_counts_as_open(self) -> None:
         issues = [{"number": 1, "title": "t", "body": "Depends on: #77", "labels": {"nodes": [{"name": "ai"}]}}]
@@ -396,6 +430,82 @@ class QueueTest(unittest.TestCase):
     def test_parse_dependencies_reads_every_line(self) -> None:
         self.assertEqual(IssueQueue.parse_dependencies("Depends on: #1, #2\ntext\nDepends on (later): #3"),
                          (1, 2, 3))
+
+
+class ClaimableParityTest(unittest.TestCase):
+    """
+    Runs the real bin/claimable.sh, behind a fake gh, on the same issues the queue panel groups, and requires the
+    same claimable count.
+    """
+
+    FAKE_GH: ClassVar[str] = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        arguments = sys.argv[1:]
+        fixtures = os.environ["PARITY_FIXTURES"]
+        if arguments[:2] == ["issue", "list"]:
+            label = arguments[arguments.index("--label") + 1]
+            path = os.path.join(fixtures, label.replace(":", "_") + ".json")
+            print(open(path).read() if os.path.exists(path) else "[]")
+        elif arguments[:2] == ["issue", "view"] and "state" in arguments:
+            print("CLOSED" if os.path.exists(os.path.join(fixtures, "closed." + arguments[2])) else "OPEN")
+    """)
+    SCENARIOS: ClassVar[list[tuple[str, list[tuple[int, tuple[str, ...], str]], tuple[int, ...]]]] = [
+        ("plain then low", [(1, ("ai", "ai:plan"), ""), (2, ("ai", "ai:plan", "ai:low"), "")], ()),
+        ("only low", [(2, ("ai", "ai:plan", "ai:low"), ""), (3, ("ai", "ai:plan", "ai:low"), "")], ()),
+        ("new round and low", [(4, ("ai", "ai:plan", "ai:fable"), ""), (2, ("ai", "ai:plan", "ai:low"), "")], ()),
+        ("new round behind first", [(4, ("ai", "ai:plan", "ai:fable"), ""),
+                                    (5, ("ai", "ai:plan", "ai:fable", "ai:first"), "")], ()),
+        ("first outside every ai issue", [(4, ("ai", "ai:plan", "ai:fable"), ""), (2, ("ai", "ai:plan", "ai:low"), ""),
+                                          (9, ("ai:first",), "")], ()),
+        ("parked first outside", [(4, ("ai", "ai:plan", "ai:fable"), ""), (9, ("ai:first", "ai:operator"), "")], ()),
+        ("listed first outside the queue", [(4, ("ai", "ai:plan", "ai:fable"), ""), (8, ("ai", "ai:first"), "")], ()),
+        ("blocked plain leaves low", [(2, ("ai", "ai:plan", "ai:low"), ""),
+                                      (1, ("ai", "ai:plan"), "Depends on: #77")], ()),
+        ("met dependency holds low", [(2, ("ai", "ai:plan", "ai:low"), ""),
+                                      (1, ("ai", "ai:plan"), "Depends on: #78")], (78,)),
+        ("first round and low", [(5, ("ai", "ai:plan", "ai:fable", "ai:first"), ""),
+                                 (2, ("ai", "ai:plan", "ai:low"), "")], ()),
+        ("blocked first outside", [(4, ("ai", "ai:plan", "ai:fable"), ""),
+                                   (9, ("ai:first",), "Depends on: #77")], ()),
+    ]
+
+    def test_dashboard_count_matches_claimable_sh(self) -> None:
+        for name, issues, closed in self.SCENARIOS:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root: Path = Path(directory)
+                (root / "fake").mkdir()
+                (root / "fx").mkdir()
+                (root / "state" / "locks").mkdir(parents=True)
+                fake_gh: Path = root / "fake" / "gh"
+                fake_gh.write_text(self.FAKE_GH)
+                fake_gh.chmod(0o755)
+                listed: dict[str, list[JsonDict]] = {}
+                graphql_nodes: list[JsonDict] = []
+                first_only: list[JsonDict] = []
+                for number, labels, body in issues:
+                    for label in labels:
+                        listed.setdefault(label, []).append(
+                            {"number": number, "body": body, "labels": [{"name": label} for label in labels]})
+                    node: JsonDict = {"number": number, "title": f"t{number}", "body": body,
+                                      "labels": {"nodes": [{"name": label} for label in labels]}}
+                    if "ai" in labels:
+                        graphql_nodes.append(node)
+                    elif "ai:first" in labels:
+                        first_only.append(node)
+                for label, members in listed.items():
+                    (root / "fx" / (label.replace(":", "_") + ".json")).write_text(json.dumps(members))
+                for number in closed:
+                    (root / "fx" / f"closed.{number}").touch()
+                completed = subprocess.run(
+                    [str(REPO_ROOT / "bin" / "claimable.sh")], capture_output=True, text=True, timeout=60,
+                    env=dict(os.environ, PATH=f"{root / 'fake'}:{os.environ['PATH']}", HARNESS_HOME=str(root),
+                             PARITY_FIXTURES=str(root / "fx"), GH_REPO="o/r", ISSUE_LABEL="ai:plan"),
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(
+                    graphql_nodes, {number: "CLOSED" for number in closed}, {}, {}, first_only)
+                self.assertEqual(len(groups["claimable"]), int(completed.stdout.strip()))
 
 
 class CollectorAndPageTest(unittest.TestCase):
@@ -441,8 +551,14 @@ class CollectorAndPageTest(unittest.TestCase):
         queue = snapshot["queue"]
         self.assertEqual(queue["counts"]["running"], 1)
         self.assertEqual(queue["claimable_count"], 3)
-        self.assertEqual(queue["claimable_sh"]["value"], 2)
-        self.assertEqual(queue["allocator_claimable"], "2")
+        self.assertEqual(sorted(issue["number"] for issue in queue["groups"]["held"]), [2503, 2504])
+        listed = [issue["number"] for members in queue["groups"].values() for issue in members]
+        self.assertNotIn(2600, listed)
+        self.assertEqual((queue["claimable_sh"]["value"], queue["claimable_sh"]["unverified"]), (2, False))
+        self.assertEqual(queue["allocator_claimable"],
+                         {"value": "2", "at": "2026-11-26T01:32:06Z", "unverified": False})
+        self.assertEqual(snapshot["harness"]["waiting_count"], 3)
+        self.assertFalse(snapshot["harness"]["waiting_count_from_failing_read"])
         self.assertIsNone(queue["error"])
         self.assertEqual([pull["number"] for pull in snapshot["landings"]], [2496, 2499])
 
@@ -479,7 +595,8 @@ class CollectorAndPageTest(unittest.TestCase):
         page: str = HtmlRenderer().render(self.snapshot, 30)
         for expected in ("Harness status", '<meta http-equiv="refresh" content="30">', "worv@worker-a.local",
                          "moved last (3 bad probes)", "GPU slots and leases", "whole card", "operator priority",
-                         "Running ticks", "#2464", "Opus 5.5", "Claimable", "claimable.sh (ai:plan): 2",
+                         "Running ticks", "#2464", "Opus 5.5", "Claimable", "from this read (ai:plan)",
+                         "claimable.sh 2", "held back by the first-before-low gate: 2", "#2503",
                          "Waiting on the operator", "Waiting for sign-off", "#2200", "Landings", "#2499",
                          "Stalls", "lock_wait", "Allocator", "spawn", "usage", "<svg", "polyline",
                          "prefers-color-scheme:dark", "work waiting"):
@@ -522,6 +639,41 @@ class CollectorAndPageTest(unittest.TestCase):
         harness = self.collector.snapshot()["harness"]
         self.assertEqual((harness["paused"], harness["paused_reason"]), (True, "state/paused present"))
 
+    def test_counts_taken_while_the_own_read_fails_are_unverified(self) -> None:
+        clock_epoch: list[float] = [1795656600.0]
+        collector: Collector = self.harness.collector(clock=lambda: clock_epoch[0])
+        collector.refresh_github_in_place()
+        clock_epoch[0] = 1795656900.0
+        (self.harness.home / "gh-fail").touch()
+        collector.refresh_github_in_place()
+        clock_epoch[0] = 1795657000.0
+        collector.refresh_claimable_in_place()
+        snapshot = collector.snapshot()
+        queue = snapshot["queue"]
+        self.assertTrue(queue["allocator_claimable"]["unverified"])
+        self.assertTrue(queue["claimable_sh"]["unverified"])
+        self.assertEqual(snapshot["harness"]["waiting_count"], 3)
+        self.assertTrue(snapshot["harness"]["waiting_count_from_failing_read"])
+        unverified_by_time = {line["time"]: line["claimable_unverified"] for line in snapshot["health"]["allocator"]}
+        self.assertTrue(unverified_by_time["2026-11-26T01:32:06Z"])
+        self.assertFalse(unverified_by_time["2026-11-26T01:00:13Z"])
+        self.assertEqual(queue["github_outages"], [{"from": "2026-11-26T01:30:00Z", "to": None}])
+        page: str = HtmlRenderer().render(snapshot, 30)
+        self.assertIn("claimable unverified", page)
+        self.assertIn("at the last good read", page)
+
+        (self.harness.home / "gh-fail").unlink()
+        clock_epoch[0] = 1795657200.0
+        collector.refresh_github_in_place()
+        clock_epoch[0] = 1795657260.0
+        collector.refresh_claimable_in_place()
+        snapshot = collector.snapshot()
+        self.assertTrue(snapshot["queue"]["allocator_claimable"]["unverified"])
+        self.assertFalse(snapshot["queue"]["claimable_sh"]["unverified"])
+        self.assertFalse(snapshot["harness"]["waiting_count_from_failing_read"])
+        self.assertEqual(snapshot["queue"]["github_outages"],
+                         [{"from": "2026-11-26T01:30:00Z", "to": "2026-11-26T01:40:00Z"}])
+
     def test_restart_serves_the_saved_github_read(self) -> None:
         restarted: Collector = self.harness.collector()
         restarted._load_github_cache_in_place()
@@ -542,7 +694,7 @@ class HttpServerTest(unittest.TestCase):
         self.addCleanup(harness.close)
         options = dashboard.DashboardApp.parse_options([
             "--harness-home", str(harness.home), "--data-dir", str(harness.home / "data"), "--port", "0",
-            "--queue-label", "ai:plan", "--gh", str(harness.home / "bin" / "gh"),
+            "--gh", str(harness.home / "bin" / "gh"),
             "--usage-cache", str(harness.home / "usage-cache.json"), "--remote-interval", "0",
         ])
         app = dashboard.DashboardApp(options)
@@ -573,6 +725,19 @@ class HttpServerTest(unittest.TestCase):
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, json.dumps(state))
         self.assertEqual(server.scrub(f"x {FixtureHarness.FAKE_TOKEN} y"), "x [redacted] y")
 
+    def test_labels_come_from_the_env_file_and_the_flag_overrides_the_queue_label(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        base: list[str] = ["--harness-home", str(harness.home), "--data-dir", str(harness.home / "data")]
+        labels = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config.labels
+        self.assertEqual((labels.queue, labels.first, labels.low, labels.wip, labels.fable),
+                         ("ai:plan", "ai:first", "ai:low", "ai:wip", "ai:fable"))
+        overridden = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base + ["--queue-label", "ai"]))
+        self.assertEqual(overridden.config.labels.queue, "ai")
+        self.assertEqual(dashboard.DashboardApp.ENV_KEYS, frozenset({
+            "GH_TOKEN", "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL", "READY_LABEL",
+            "FABLE_LABEL", "FIRST_LABEL", "LOW_LABEL"}))
+
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -582,8 +747,8 @@ class HttpServerTest(unittest.TestCase):
         environment: dict[str, str] = dict(os.environ, HARNESS_HOME=str(harness.home),
                                            DASHBOARD_DATA_DIR=str(harness.home / "data"))
         script: str = str(REPO_ROOT / "bin" / "dashboard.sh")
-        options: list[str] = ["--port", str(port), "--gh", str(harness.home / "bin" / "gh"), "--queue-label",
-                              "ai:plan", "--usage-cache", str(harness.home / "usage-cache.json"),
+        options: list[str] = ["--port", str(port), "--gh", str(harness.home / "bin" / "gh"),
+                              "--usage-cache", str(harness.home / "usage-cache.json"),
                               "--remote-interval", "0", "--claimable-interval", "0"]
         self.addCleanup(subprocess.run, [script, "stop"], env=environment, capture_output=True)
         started = subprocess.run([script, *options], env=environment, capture_output=True, text=True, timeout=30)
@@ -606,7 +771,7 @@ class HttpServerTest(unittest.TestCase):
         self.addCleanup(harness.close)
         completed = subprocess.run(
             [sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), "--harness-home", str(harness.home),
-             "--data-dir", str(harness.home / "data"), "--queue-label", "ai:plan", "--gh",
+             "--data-dir", str(harness.home / "data"), "--gh",
              str(harness.home / "bin" / "gh"), "--usage-cache", str(harness.home / "usage-cache.json"),
              "--remote-interval", "0", "--once"],
             capture_output=True, text=True, timeout=60,

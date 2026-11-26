@@ -158,7 +158,7 @@ It listens on 127.0.0.1 only, reloads every 30 s, and serves the same data as JS
 It needs Python 3 and nothing else.
 
 ```bash
-bin/dashboard.sh --queue-label ai:plan     # the harness's ISSUE_LABEL; prints the URL
+bin/dashboard.sh                           # prints the URL
 bin/dashboard.sh status                    # pid and URL
 bin/dashboard.sh stop
 HARNESS_HOME=/path/to/live/harness DASHBOARD_PORT=8790 bin/dashboard.sh   # read another checkout
@@ -166,16 +166,18 @@ HARNESS_HOME=/path/to/live/harness DASHBOARD_PORT=8790 bin/dashboard.sh   # read
 
 `bin/dashboard.py --help` lists the options: the cadences, the sparkline window, and `--once`, which
 prints one JSON snapshot and exits. The dashboard writes only its own history, GitHub cache, pid file
-and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). It reads `GH_TOKEN` and `GH_REPO` from
-`config/harness.env` and no other key. The token reaches `gh` only through its environment and is
-removed from every response. Every GitHub call is a read.
+and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). From `config/harness.env` it reads `GH_TOKEN`,
+`GH_REPO` and the label keys (`ISSUE_LABEL`, `WIP_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`,
+`READY_LABEL`, `FABLE_LABEL`, `FIRST_LABEL`, `LOW_LABEL`) and no other key; `--queue-label`
+overrides `ISSUE_LABEL`. The token reaches `gh` only through its environment and is removed from
+every response. Every GitHub call is a read.
 
 | Panel | Reads | Cadence |
 |---|---|---|
 | Machines: load against cores, memory, card use and memory, card processes, containers | this host: `/proc`, `nvidia-smi`, `docker ps`, kept in `state/dashboard/local_history.tsv`; remote hosts: `state/host_health.tsv` and `.streaks` (status, upload, history), plus a read-only ssh probe for memory, card size, processes and containers (`--remote-interval 0` turns it off) | 30 s local, 2 min ssh |
 | GPU slots and leases | `bin/lease.sh status` | each page load |
 | Running ticks | `claude -p` processes whose stdout is a `state/logs/tick-*.log`: slot from the slot lock they hold, model from `--model`, issue from the newest `state/locks/claim.<issue>` naming the pid, else a lease the pid holds, else a cached GitHub search for its claim comment; "Now" is the tick's youngest tool call | each page load |
-| Issue queue and landings | one GraphQL read of the open `ai` issues, their `Depends on` states and the last day's merged PRs; claimable follows `bin/claimable.sh`'s rules, and `bin/claimable.sh` itself runs every 5 min for its count | 1 min |
+| Issue queue and landings | GraphQL reads of the open `ai` issues, any `FIRST_LABEL` issue outside them, their `Depends on` states and the last day's merged PRs. Claimable follows `bin/claimable.sh`'s rules, its first-before-low gate included, and the panel lists what the gate holds back. The count is the dashboard's own; `bin/claimable.sh`'s (run every 5 min) and the allocator's stand beside it, marked unverified when taken while the dashboard's own read was failing, since `claimable.sh` prints 1 when `gh` fails | 1 min |
 | Stalls, allocator | the tails of `state/stalls.log` and `state/logs/allocator.log` | each page load |
 | Usage | `~/.claude/usage-cache.json`, placed against the allocator's cut points (`bin/usage-lib.sh` defaults) | each page load |
 

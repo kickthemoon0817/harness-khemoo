@@ -32,8 +32,6 @@ class HtmlRenderer:
         "running": "Running", "claimable": "Claimable", "operator": "Waiting on the operator",
         "signoff": "Waiting for sign-off", "other": "Everything else",
     }
-    FLAG_LABELS: ClassVar[tuple[str, ...]] = ("ai:first", "ai:fable", "ai:low", "ai:long", "ai:ready", "ai:wip",
-                                              "ai:group", "ai:operator", "ai:signoff")
     STYLE: ClassVar[str] = """
 :root{color-scheme:light;--page:#f9f9f9;--surface:#ffffff;--ink:#191919;--ink2:#666666;--hair:#e7e7e7;
 --axis:#c2c2c2;--border:rgba(11,11,11,.10);--series:#257de0;--series-fill:rgba(37,125,224,.13);--track:#e3eefb;
@@ -167,10 +165,12 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             width_text += (f" &middot; allocator allowed {harness['last_allowed']} at "
                            f"{self._clock(harness.get('last_allowed_at'))}")
         waiting_pill: str = ""
+        from_failing_read: str = " at the last good read" if harness.get("waiting_count_from_failing_read") else ""
         if harness.get("work_waiting"):
-            waiting_pill = self._pill("warning", f"work waiting: {harness.get('waiting_count')} claimable, slots idle")
+            waiting_pill = self._pill("warning", f"work waiting: {harness.get('waiting_count')} claimable"
+                                                 f"{from_failing_read}, slots idle")
         elif harness.get("waiting_count"):
-            waiting_pill = self._pill("info", f"{harness.get('waiting_count')} claimable")
+            waiting_pill = self._pill("info", f"{harness.get('waiting_count')} claimable{from_failing_read}")
         models: list[str] = [StateParsers.model_label(model) for model in harness.get("tick_models", [])]
         cooling: str = "".join(
             self._pill("warning", f"{self._e(model['label'])} cooling {self._duration(model['remaining_s'])}")
@@ -547,7 +547,9 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
 
     def _queue_section(self, snapshot: JsonDict) -> str:
         """
-        Renders one panel per issue group, sign-off stacked under claimable since both are usually short.
+        Renders one panel per issue group, sign-off stacked under claimable since both are usually short. The
+        claimable panel leads with the dashboard's own count, sets claimable.sh's and the allocator's beside it,
+        and lists under it what the first-before-low gate holds back.
 
         Args:
             snapshot: The snapshot.
@@ -557,23 +559,21 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         """
         queue: JsonDict = snapshot.get("queue", {})
         groups: JsonDict = queue.get("groups", {})
+        labels: JsonDict = snapshot.get("harness", {}).get("labels", {})
         now: float = float(snapshot.get("generated_epoch") or 0)
         panels: dict[str, str] = {}
         for name, title in self.QUEUE_TITLES.items():
             issues: list[JsonDict] = groups.get(name, [])
             extra: str = ""
-            if name == "claimable":
-                claimable_sh: JsonDict = queue.get("claimable_sh", {})
-                label: str = self._e(snapshot.get("harness", {}).get("queue_label", ""))
-                if claimable_sh.get("value") is not None:
-                    extra += (f" &middot; claimable.sh ({label}): {claimable_sh['value']}, "
-                              f"{self._duration(claimable_sh.get('age_s'))} ago")
-                elif claimable_sh.get("error"):
-                    extra += f' &middot; <span class="err">claimable.sh: {self._e(claimable_sh["error"])}</span>'
-                if queue.get("allocator_claimable") is not None:
-                    extra += f" &middot; allocator: {self._e(queue['allocator_claimable'])}"
-            rows: str = "".join(self._issue_row(issue, now) for issue in issues) or \
+            rows: str = "".join(self._issue_row(issue, now, labels) for issue in issues) or \
                 '<tr><td class="empty" colspan="2">none</td></tr>'
+            if name == "claimable":
+                extra = self._claimable_counts(queue, snapshot.get("harness", {}).get("queue_label", ""))
+                held: list[JsonDict] = groups.get("held", [])
+                if held:
+                    rows += (f'<tr><td colspan="2" class="note"><b>held back by the first-before-low gate: '
+                             f'{len(held)}</b></td></tr>')
+                    rows += "".join(self._issue_row(issue, now, labels) for issue in held)
             panels[name] = (
                 f'<article class="panel"><h2>{title} <span class="sub">{len(issues)}{extra}</span></h2>'
                 '<div class="scroll"><table><colgroup><col><col style="width:60px"></colgroup>'
@@ -588,23 +588,52 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
                 f'<div class="grid queue">{panels["running"]}<div class="stack">{panels["claimable"]}'
                 f'{panels["signoff"]}</div>{panels["operator"]}{panels["other"]}</div></section>')
 
-    def _issue_row(self, issue: JsonDict, now: float) -> str:
+    def _claimable_counts(self, queue: JsonDict, queue_label: str) -> str:
         """
-        Renders one issue: number and title, then its flag labels and why it is in its group, then the age of
-        its last comment.
+        Words claimable.sh's and the allocator's counts beside the dashboard's own, each marked unverified when the
+        dashboard's own GitHub read was failing as it was taken: claimable.sh prints 1 when its own read fails.
+
+        Args:
+            queue: The snapshot's queue view.
+            queue_label: The label claimable.sh counts.
+
+        Returns:
+            The header text after the count.
+        """
+        unverified: str = self._pill("warning", "unverified")
+        text: str = f" from this read ({self._e(queue_label)})"
+        claimable_sh: JsonDict = queue.get("claimable_sh") or {}
+        if claimable_sh.get("value") is not None:
+            text += (f" &middot; claimable.sh {claimable_sh['value']}, {self._duration(claimable_sh.get('age_s'))} ago"
+                     f"{' ' + unverified if claimable_sh.get('unverified') else ''}")
+        elif claimable_sh.get("error"):
+            text += f' &middot; <span class="err">claimable.sh: {self._e(claimable_sh["error"])}</span>'
+        allocator: JsonDict | None = queue.get("allocator_claimable")
+        if allocator:
+            text += (f" &middot; allocator {self._e(allocator.get('value'))} at {self._clock(allocator.get('at'))}"
+                     f"{' ' + unverified if allocator.get('unverified') else ''}")
+        return text
+
+    def _issue_row(self, issue: JsonDict, now: float, labels: JsonDict) -> str:
+        """
+        Renders one issue: number and title, then its labels other than the queue's own and why it is in its
+        group, then the age of its last comment.
 
         Args:
             issue: The issue.
             now: The current epoch.
+            labels: The harness's label names (QueueLabels fields).
 
         Returns:
             The table row.
         """
-        labels: list[str] = issue.get("labels", [])
-        flags: str = "".join(f'<span class="chip{" strong" if label in ("ai:first", "ai:fable") else ""}">'
-                             f'{self._e(label.removeprefix("ai:"))}</span>'
-                             for label in labels if label in self.FLAG_LABELS and label not in
-                             ("ai:wip", "ai:operator", "ai:signoff"))
+        all_label: str = labels.get("all_issues", "ai")
+        structural: frozenset[str] = frozenset(labels.get(key, "") for key in
+                                               ("all_issues", "queue", "wip", "operator", "signoff"))
+        strong: frozenset[str] = frozenset(labels.get(key, "") for key in ("first", "fable"))
+        flags: str = "".join(f'<span class="chip{" strong" if label in strong else ""}">'
+                             f'{self._e(label.removeprefix(all_label + ":"))}</span>'
+                             for label in issue.get("labels", []) if label not in structural)
         last_comment: str | None = issue.get("last_comment_at") or issue.get("updated_at")
         age: str = self._duration(now - self._epoch(last_comment)) if last_comment else "-"
         title: str = self._e(issue.get("title", ""))
@@ -678,6 +707,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             summary: str = " ".join(f"{key}={self._e(fields[key])}" for key in
                                     ("five", "week", "pct", "allowed", "busy", "claimable", "young", "ready",
                                      "spawning") if key in fields)
+            if line.get("claimable_unverified"):
+                summary += " " + self._pill("warning", "claimable unverified")
             rows.append(
                 f'<tr><td class="sub">{self._duration(now - self._epoch(line.get("time")))}</td>'
                 f'<td><span class="chip strong">{self._e(line.get("kind", ""))}</span>'

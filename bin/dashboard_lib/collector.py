@@ -150,6 +150,8 @@ exit 0
         self._local_history: list[tuple[float | None, ...]] = []
         self._dependency_cache: dict[int, tuple[str, float]] = {}
         self._github_issue_by_pid: dict[int, int] = {}
+        self._github_outages: list[tuple[float, float | None]] = []
+        self._last_github_success: float | None = None
         self._pid_lookup_attempts: dict[int, float] = {}
         self._processes: dict[int, ProcessInfo] = {}
         self.local_history_path: Path = config.data_dir / "local_history.tsv"
@@ -292,10 +294,16 @@ exit 0
             self._store_failure("github", "GH_REPO is not set", started)
             return
         try:
-            issues: list[JsonDict] = self.github.fetch_open_issues(self.config.labels.all_issues)
+            labels: QueueLabels = self.config.labels
+            issues: list[JsonDict] = self.github.fetch_open_issues(labels.all_issues)
             open_numbers: frozenset[int] = frozenset(int(issue["number"]) for issue in issues)
+            first_only_issues: list[JsonDict] = [
+                issue for issue in self.github.fetch_open_issues(labels.first)
+                if int(issue["number"]) not in open_numbers
+            ] if labels.first != labels.all_issues else []
             wanted_dependencies: list[int] = sorted(
-                {dependency for issue in issues for dependency in IssueQueue.parse_dependencies(issue.get("body") or "")}
+                {dependency for issue in issues + first_only_issues
+                 for dependency in IssueQueue.parse_dependencies(issue.get("body") or "")}
                 - open_numbers
             )
             stale_dependencies: list[int] = [
@@ -310,12 +318,15 @@ exit 0
             self._look_up_unmapped_ticks_in_place(started)
             dependency_states: dict[int, str] = {number: self._dependency_cache[number][0]
                                                  for number in wanted_dependencies if number in self._dependency_cache}
-            payload: JsonDict = {"issues": issues, "dependency_states": dependency_states, "landings": landings}
+            payload: JsonDict = {"issues": issues, "first_only_issues": first_only_issues,
+                                 "dependency_states": dependency_states, "landings": landings}
             self._store("github", SourceResult(payload, started, duration_s=self.clock() - started,
                                                attempted_at=started))
+            self._record_github_outcome_in_place(started, succeeded=True)
             self._save_github_cache(payload, started)
         except (GitHubError, KeyError, TypeError, ValueError) as error:
             self._store_failure("github", self._describe_error(error), started)
+            self._record_github_outcome_in_place(started, succeeded=False)
 
     def refresh_claimable_in_place(self) -> None:
         """
@@ -329,7 +340,8 @@ exit 0
         environment: dict[str, str] = self.github.child_environment({
             "GH_REPO": self.github.repo, "HARNESS_HOME": str(self.config.harness_home),
             "ISSUE_LABEL": labels.queue, "WIP_LABEL": labels.wip, "SIGNOFF_LABEL": labels.signoff,
-            "OPERATOR_LABEL": labels.operator, "READY_LABEL": labels.ready,
+            "OPERATOR_LABEL": labels.operator, "READY_LABEL": labels.ready, "FIRST_LABEL": labels.first,
+            "LOW_LABEL": labels.low, "FABLE_LABEL": labels.fable,
         })
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
@@ -383,18 +395,29 @@ exit 0
         github_payload: JsonDict = github_result.data if github_result and github_result.data else {}
         groups: dict[str, list[QueueIssue]] = self.queue.classify(
             github_payload.get("issues", []), github_payload.get("dependency_states", {}),
-            live_claim_pid_by_issue, tick_pid_by_issue,
+            live_claim_pid_by_issue, tick_pid_by_issue, github_payload.get("first_only_issues", []),
         )
         issue_titles: dict[int, tuple[str, str]] = {
             int(issue["number"]): (issue.get("title", ""), issue.get("url", ""))
             for issue in github_payload.get("issues", [])
         }
         claimable_count: int = len(groups["claimable"])
+        waiting_count: int = claimable_count
         claimable_sh_result: SourceResult | None = self._result("claimable_sh")
-        waiting_count: int = claimable_sh_result.data if claimable_sh_result and isinstance(
-            claimable_sh_result.data, int) else claimable_count
+        claimable_sh_view: JsonDict = self._source_value_view(claimable_sh_result, now)
+        claimable_sh_view["unverified"] = claimable_sh_result is not None \
+            and claimable_sh_result.fetched_at is not None \
+            and self._during_github_outage(claimable_sh_result.fetched_at, now)
         last_allocator: AllocatorLine | None = next(
             (line for line in reversed(allocator_lines) if "allowed" in line.fields), None)
+        last_claimable_line: AllocatorLine | None = next(
+            (line for line in reversed(allocator_lines) if "claimable" in line.fields), None)
+        allocator_views: list[JsonDict] = [
+            dict(asdict(line), claimable_unverified="claimable" in line.fields
+                 and self._during_github_outage(StateParsers.parse_iso_epoch(line.time), now))
+            for line in allocator_lines[-self.config.allocator_lines:]
+        ]
+        github_failing: bool = github_result is None or github_result.error is not None
 
         lease_view: JsonDict = self._lease_view(lease_status, lease_result, tick_pids, now)
         machines: list[JsonDict] = self._machine_views(lease_status, waiting_count, now)
@@ -422,7 +445,9 @@ exit 0
                 "last_allowed_at": last_allocator.time if last_allocator else None,
                 "work_waiting": work_waiting,
                 "waiting_count": waiting_count,
+                "waiting_count_from_failing_read": github_failing,
                 "queue_label": self.config.labels.queue,
+                "labels": asdict(self.config.labels),
             },
             "usage": usage,
             "machines": machines,
@@ -439,8 +464,15 @@ exit 0
                 "groups": {name: [asdict(issue) for issue in issues] for name, issues in groups.items()},
                 "counts": {name: len(issues) for name, issues in groups.items()},
                 "claimable_count": claimable_count,
-                "claimable_sh": self._source_value_view(claimable_sh_result, now),
-                "allocator_claimable": last_allocator.fields.get("claimable") if last_allocator else None,
+                "claimable_sh": claimable_sh_view,
+                "allocator_claimable": {
+                    "value": last_claimable_line.fields["claimable"],
+                    "at": last_claimable_line.time,
+                    "unverified": self._during_github_outage(StateParsers.parse_iso_epoch(last_claimable_line.time),
+                                                             now),
+                } if last_claimable_line else None,
+                "github_outages": [{"from": self._iso(start), "to": self._iso(end)}
+                                   for start, end in self._github_outages[-5:]],
                 "fetched_at": self._iso(github_result.fetched_at) if github_result and github_result.fetched_at
                 else None,
                 "age_s": self._age(github_result.fetched_at if github_result else None, now),
@@ -449,7 +481,7 @@ exit 0
             "landings": github_payload.get("landings", []),
             "health": {
                 "stalls": [asdict(stall) for stall in StateParsers.parse_stalls(stalls_text, self.config.stall_lines)],
-                "allocator": [asdict(line) for line in allocator_lines[-self.config.allocator_lines:]],
+                "allocator": allocator_views,
             },
             "sources": self._sources_view(now),
         }
@@ -963,6 +995,44 @@ exit 0
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return
         self._store("github", SourceResult(payload, fetched_at, error=None, attempted_at=fetched_at))
+        self._last_github_success = fetched_at
+
+    def _record_github_outcome_in_place(self, attempted_at: float, succeeded: bool) -> None:
+        """
+        Tracks when the dashboard's own GitHub read was failing.
+
+        An outage runs from the last read that worked (or one cadence before the first failure, when none has)
+        to the next read that works; while it lasts, a count another reader took from GitHub may be claimable.sh's
+        fallback rather than a real count.
+
+        Args:
+            attempted_at: When the read started.
+            succeeded: Whether it worked.
+        """
+        with self._results_lock:
+            open_outage: bool = bool(self._github_outages) and self._github_outages[-1][1] is None
+            if succeeded:
+                if open_outage:
+                    self._github_outages[-1] = (self._github_outages[-1][0], attempted_at)
+                self._last_github_success = attempted_at
+            elif not open_outage:
+                start: float = self._last_github_success if self._last_github_success is not None \
+                    else attempted_at - self.config.github_interval_s
+                self._github_outages.append((start, None))
+                del self._github_outages[:-20]
+
+    def _during_github_outage(self, epoch: float, now: float) -> bool:
+        """
+        Args:
+            epoch: A time.
+            now: The current time, the end of an outage still open.
+
+        Returns:
+            True when the dashboard's own GitHub read was failing at that time.
+        """
+        with self._results_lock:
+            outages: list[tuple[float, float | None]] = list(self._github_outages)
+        return any(start < epoch < (end if end is not None else now + 1) for start, end in outages)
 
     def _run_periodically(self, interval_s: float, refresh: Callable[[], None]) -> None:
         """
