@@ -15,6 +15,8 @@ S="$H/state"; W="$H/bin/stall_watch.sh"
 printf '#!/usr/bin/env bash\nwhile :; do sleep 1; done\n' > "$H/fake/rsync"; chmod +x "$H/fake/rsync"
 export HARNESS_HOME="$H" HARNESS_STATE="$S" HARNESS_PATH="$PATH"
 export STALL_LOCK_GLOBS="$H/lk/worv-dev-build-remote*.lock $H/lk/worv-fast-set-remote*.lock"
+# Run queues are read only where a case puts them, never the live evidence tree.
+export STALL_QUEUE_LOGS="$H/none/*/lease.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 stalls() { cat "$S/stalls.log" 2>/dev/null; }
