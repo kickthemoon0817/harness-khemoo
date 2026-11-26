@@ -281,5 +281,43 @@
    "fl2alpha",
    "fl2beta"
   ]
+ },
+ {
+  "shape": "secret flag value that starts with a dash",
+  "command": "tool --token -qd1alpha --verbose",
+  "argv": [
+   "tool",
+   "--token",
+   "-qd1alpha",
+   "--verbose"
+  ],
+  "secrets": [
+   "qd1alpha"
+  ]
+ },
+ {
+  "shape": "secret flag value that starts with two dashes",
+  "command": "tool --password --qd2alpha",
+  "argv": [
+   "tool",
+   "--password",
+   "--qd2alpha"
+  ],
+  "secrets": [
+   "qd2alpha"
+  ]
+ },
+ {
+  "shape": "header value that starts with a dash",
+  "command": "curl -H 'X-Api-Key: -qd3alpha' https://example.invalid",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key: -qd3alpha",
+   "https://example.invalid"
+  ],
+  "secrets": [
+   "qd3alpha"
+  ]
  }
 ]

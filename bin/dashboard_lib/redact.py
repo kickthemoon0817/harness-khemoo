@@ -38,7 +38,8 @@ class CommandRedactor:
         rf"(?i)\b([A-Za-z0-9_]*{SECRET_WORDS}[A-Za-z0-9_]*)=({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|]+)"
     )
     SECRET_FLAG_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?i)(?<![\w-])(--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*)(=|\s+)({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|-][^\s;&|]*)"
+        rf"(?i)(?<![\w-])(--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*)(=|\s+)"
+        rf"({ESCAPED_OR_QUOTED_VALUE}|(?!--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*(?:[\s=]|$))[^\s;&|][^\s;&|]*)"
     )
     SECRET_HEADER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         rf"(?i)(?<![\w-])([A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*\s*:\s*)(?:(?:bearer|token|basic|digest)\s+)?"
@@ -170,8 +171,10 @@ class CommandRedactor:
         """
         Masks a list of dequoted words.
 
-        A secret-named flag (`--token`) masks every word after it up to the next flag or operator; a flag met
-        there is taken as a flag, so `--token --password secret` still masks `secret`. A header word whose name
+        A secret-named flag (`--token`) masks every word after it up to the next flag or operator. The first word
+        after it is masked whatever its shape, since a secret value may start with a dash, unless that word is
+        itself a secret-named flag, which is then taken as a flag: `--token --password secret` masks `secret`, and
+        `--token -abc` masks `-abc`. A header word whose name
         holds a secret word (`Authorization:`, `X-Api-Key:`, `Cookie:`), `Bearer`, or `Authorization:Bearer`
         masks the words after it up to the next flag or operator but `;`, keeping an auth scheme that comes right
         after a bare header name; a header word carrying its value (`X-Api-Key:abc`) loses that value too. Every
@@ -187,29 +190,40 @@ class CommandRedactor:
         redacted: list[str] = []
         masking: str = ""
         scheme_may_follow: bool = False
+        value_owed: bool = False
         for word in words:
             if CommandRedactor._is_punctuation(word):
                 redacted.append(word)
                 if not (masking == "header" and word == ";"):
                     masking = ""
+                    value_owed = False
                 scheme_may_follow = False
                 continue
-            if masking and not CommandRedactor.FLAG_WORD_PATTERN.match(word):
-                if scheme_may_follow and word.lower() in CommandRedactor.AUTH_SCHEMES:
-                    redacted.append(word)
+            if masking:
+                if value_owed:
+                    taken_as_flag = CommandRedactor.SECRET_FLAG_WORD_PATTERN.match(word) is not None
                 else:
-                    redacted.append(CommandRedactor.MASK)
-                scheme_may_follow = False
-                continue
+                    taken_as_flag = CommandRedactor.FLAG_WORD_PATTERN.match(word) is not None
+                if not taken_as_flag:
+                    if scheme_may_follow and word.lower() in CommandRedactor.AUTH_SCHEMES:
+                        redacted.append(word)
+                    else:
+                        redacted.append(CommandRedactor.MASK)
+                        value_owed = False
+                    scheme_may_follow = False
+                    continue
             masking = ""
             scheme_may_follow = False
+            value_owed = False
             if CommandRedactor.SECRET_FLAG_WORD_PATTERN.match(word):
                 redacted.append(word)
                 masking = "flag"
+                value_owed = True
                 continue
             if word.lower() == "bearer":
                 redacted.append(word)
                 masking = "header"
+                value_owed = True
                 continue
             header_match: re.Match[str] | None = CommandRedactor.HEADER_WORD_PATTERN.match(word)
             if header_match and CommandRedactor.SECRET_NAME_PATTERN.search(header_match.group(1)) \
@@ -219,8 +233,10 @@ class CommandRedactor:
                 if not value:
                     redacted.append(word)
                     scheme_may_follow = True
+                    value_owed = True
                 elif value.lower() in CommandRedactor.AUTH_SCHEMES:
                     redacted.append(word)
+                    value_owed = True
                 else:
                     redacted.append(f"{name}:{CommandRedactor.MASK}")
                 continue
