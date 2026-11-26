@@ -25,10 +25,10 @@ hold() { ( exec 9>"$1"; flock 9; exec sleep 300 ) > /dev/null 2>&1 & pids+=($!);
 wait_on() { flock "$1" true > /dev/null 2>&1 & pids+=($!); sleep 0.3; }
 
 out=$($B)
-check "both locks free: the first host" '[ "$out" = "export DOCKER_HOST=ssh://a@one WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-one.lock WORV_BUILDER_IMAGE=worv-builder:isaac6" ]' "$out"
+check "both locks free: the first host" '[ "$out" = "export DOCKER_HOST=ssh://a@one WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-one.lock WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE=" ]' "$out"
 hold "$T/lk/worv-dev-build-remote-one.lock"
 out=$($B)
-check "the first host compiling: the second host, whose lock is free" '[ "$out" = "export DOCKER_HOST=ssh://b@two WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-two.lock WORV_BUILDER_IMAGE=worv-builder:isaac6" ]' "$out"
+check "the first host compiling: the second host, whose lock is free" '[ "$out" = "export DOCKER_HOST=ssh://b@two WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-two.lock WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE=" ]' "$out"
 out=$(HOLD=6 $B)
 check "the free host held whole by a cost read: left out" '[[ "$out" == *"ssh://a@one "* ]]' "$out"
 out=$(HOLD=6 HOLD_MARK=" no-cost" $B)
@@ -67,10 +67,10 @@ rm -f "$T/h/state/locks/cost-wait."*
 kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3; rm -f "$T/h/state/locks/cost-wait."*
 echo "worv-builder:isaac6-manure" > "$T/h/state/local-cpu-lane"
 out=$($B)
-check "with the local lane on and a remote lane free, the remote lane still comes first" '[[ "$out" == *"ssh://a@one "*"WORV_BUILDER_IMAGE=worv-builder:isaac6" ]]' "$out"
+check "with the local lane on and a remote lane free, the remote lane still comes first" '[[ "$out" == *"ssh://a@one "*"WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE=" ]]' "$out"
 hold "$T/lk/worv-dev-build-remote-one.lock"; hold "$T/lk/worv-dev-build-remote-two.lock"
 out=$($B)
-check "both remote lanes compiling: the local lane, its own lock and image" '[ "$out" = "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build.lock WORV_BUILDER_IMAGE=worv-builder:isaac6-manure" ]' "$out"
+check "both remote lanes compiling: the local lane, its own lock and image" '[ "$out" = "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build.lock WORV_BUILDER_IMAGE=worv-builder:isaac6-manure WORV_LOCAL_LANE=1" ]' "$out"
 kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3
 echo "a@one $(date +%s)" > "$T/h/state/locks/cost-wait.2464"; echo "b@two $(date +%s)" > "$T/h/state/locks/cost-wait.2502"
 out=$($B)
