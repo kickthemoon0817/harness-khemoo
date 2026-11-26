@@ -852,7 +852,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             The node HTML.
         """
         util: float | None = device.get("gpu_util_pct")
-        flag: str = self._pill("warning", "card idle, queue waiting") if device.get("idle_with_queue") else ""
+        flag: str = self._pill("warning", device.get("idle_flag") or "card idle, queue waiting") \
+            if device.get("idle_with_queue") else ""
         status: str = self._pill(self.STATUS_LEVELS.get(device.get("status") or "", "idle"),
                                  device.get("status") or "unknown")
         holders: str = ", ".join(self._e(holder) for holder in device.get("holders", [])) or "no lease held"

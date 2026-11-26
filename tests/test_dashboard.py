@@ -1301,6 +1301,11 @@ class FlowBuilderTest(unittest.TestCase):
         ])
         device = {item["key"]: item for item in flow["devices"]}
         self.assertTrue(device["worv@10.0.0.6"]["idle_with_queue"])
+        self.assertEqual(device["worv@10.0.0.6"]["idle_flag"], "card idle, queue waiting")
+        held = self.builder().build(self.inputs(lease_slots=(LeaseSlot(
+            6, "held", "2502", 2502, 62, "2026-11-26T01:00:00Z", 82, ("remote-all",), "worv@10.0.0.6"),)))
+        self.assertEqual({item["key"]: item for item in held["devices"]}["worv@10.0.0.6"]["idle_flag"],
+                         "0 % while held, queue waiting")
         self.assertFalse(device["worv@worker-a.local"]["idle_with_queue"])
         self.assertEqual(device["worv@worker-a.local"]["holders"], ["#2488 slot 4 remote-all no-cost"])
         self.assertEqual(device["worv@worker-a.local"]["compile"], "compile: #2495, 1 waiting")

@@ -358,6 +358,8 @@ class FlowBuilder:
                 "compile": CommandRedactor.redact(compile_text),
                 "compile_waiters": len(lane.waiters) if lane else 0,
                 "idle_with_queue": idle_with_queue,
+                "idle_flag": ("0 % while held, queue waiting" if holders else "card idle, queue waiting")
+                if idle_with_queue else "",
                 "x": self.GAP + index * (width + self.GAP),
                 "y": self.DEVICE_TOP,
                 "w": width,
