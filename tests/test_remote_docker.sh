@@ -233,5 +233,16 @@ printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
 : > "$LOG"; mkdir -p "$T/ws2"; LOCAL_LANE_LOCK="$T/lane.lock" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e WORV_BUILD_JOBS=13 img true 2> "$T/guard.err"
 check "a tick's local run is a lane run: bounded too" 'grep -q "run --cpus=8 --memory=16g --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -e WORV_BUILD_JOBS=6 img true$" "$LOG"' "$(calls)"
 
+
+# An issue the owner lists in local-card-issues may use this host's card.
+LD=unix:///var/run/docker.sock
+echo "2534 999999 2026-11-27T00:00:00Z" > "$G/state/locks/claim.2534"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run -d --gpus all img true 2> "$T/guard.err"; rc=$?
+check "an unlisted issue's tick is still refused a card here" '[ "$rc" = 75 ]' "rc=$rc $(cat "$T/guard.err")"
+echo 2534 > "$G/state/locks/local-card-issues"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run -d --gpus all img true 2> "$T/guard.err"; rc=$?
+check "a listed issue's tick runs its container with the card, as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run -d --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+rm -f "$G/state/locks/local-card-issues" "$G/state/locks/claim.2534"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

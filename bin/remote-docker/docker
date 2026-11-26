@@ -27,7 +27,15 @@ real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -
 # left to their caller. A tick runs as the same user, so this keeps a mistake off the owner's card;
 # it is not a boundary against a process set on crossing it.
 case "${DOCKER_HOST:-}" in ssh://*) ;; *)
-  if "$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" > /dev/null 2>&1; then
+  if tick_pid=$("$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" 2>/dev/null); then
+    # A tick whose issue the owner lists in state/locks/local-card-issues may use this host's card
+    # and daemon as a named holder would.
+    hh="$(cd "$self_dir/../.." && pwd)"
+    allowed=$(grep -lE "^[0-9]+ $tick_pid( |$)" "$hh"/state/locks/claim.* 2>/dev/null | head -1)
+    allowed=${allowed##*.}
+    if [ -n "$allowed" ] && grep -qx "$allowed" "$hh/state/locks/local-card-issues" 2>/dev/null; then
+      exec "$real" "$@"
+    fi
     refuse() { echo "remote-docker: on this host a tick runs only card-less build containers ($1); the local card and containers are the owner's" >&2; exit 75; }
     case "${1:-}" in -*) refuse "global option $1" ;; "") exec "$real" ;; esac
     case "$1" in
