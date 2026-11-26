@@ -34,7 +34,7 @@ held_by_cost_read() {
             for (s in held) {
                 if (h == "local") { remote = 0; for (x in lo) if (s + 0 >= lo[x] && s + 0 <= hi[x]) remote = 1
                                     if (!remote && held[s] ~ / exclusive /) exit 0 }
-                else if (s + 0 >= lo[h] && s + 0 <= hi[h] && held[s] ~ / remote-all /) exit 0
+                else if (s + 0 >= lo[h] && s + 0 <= hi[h] && held[s] ~ / remote-all / && held[s] !~ / no-cost /) exit 0
             }
             exit 1
         }'
