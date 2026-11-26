@@ -11,6 +11,10 @@
 #       minutes while a process waits on one of those locks, or while the allocator's last
 #       line in state/logs/allocator.log counts claimable work; not for a host
 #       bin/host_health.sh has moved last, whose host_degraded alert already says why it idles
+#   <UTC ISO> STALL queue_wait <packet>/<runs> <detail>
+#       a run queue (bin/arm_queue.sh) whose lease log has said BUSY for STALL_QUEUE_MIN (10)
+#       minutes on end, while a remote card that no live lease holds read 0 % on its last probe;
+#       the detail gives the queue's own BUSY reason and the idle cards with their load
 #   <UTC ISO> STALL host_degraded <host> <detail>
 #       bin/host_health.sh has moved the host last; once per demotion
 # A kind and key is alerted again at most every STALL_REALERT_MIN (30) minutes.
@@ -27,6 +31,8 @@ export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 : "${STALL_REALERT_MIN:=30}"
 : "${STALL_LOCK_GLOBS:=/tmp/worv-dev-build-remote*.lock /tmp/worv-fast-set-remote*.lock}"
 : "${STALL_LOG_KEEP:=5000}"
+: "${STALL_QUEUE_MIN:=10}"
+: "${STALL_QUEUE_LOGS:=$HOME/tmp_workspace/artifacts/manure-plan/evidence/*/runs*/lease.log}"
 S="$HARNESS_STATE"
 OUT="$S/stalls.log"
 SEEN="$S/stall_watch.seen"
@@ -185,6 +191,37 @@ if [ -r "$S/host_health.tsv" ] && { [ "$waiters_total" -gt 0 ] || [ "${claimable
       $1 == "time" || $1 < c { next }
       { n[$2]++; mem[$2] = $8; if (!($2 in first) || $1 < first[$2]) first[$2] = $1; if ($7 != "0" || ($6 + 0 > 0 && $5 + 0 >= $6 / 4)) busy[$2] = 1 }
       END { for (h in n) if (!(h in busy) && first[h] <= half) print h, n[h], mem[h] }' "$S/host_health.tsv")
+fi
+
+# queue_wait: a queue's lease log written in the last 3 minutes whose last stamped lines are all
+# BUSY, the first of them STALL_QUEUE_MIN or more ago, while a card no live lease holds is idle.
+if [ -r "$S/host_health.tsv" ]; then
+  held_hosts=""
+  if [ -x "$HARNESS_HOME/bin/lease.sh" ]; then
+    held_hosts=$("$HARNESS_HOME/bin/lease.sh" status < /dev/null 2>/dev/null | awk '
+        /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
+        /^slot [0-9]+ HELD / && /\(alive\)$/ { held[$2] = 1 }
+        END { for (h in lo) for (s in held) if (s + 0 >= lo[h] && s + 0 <= hi[h]) { print h; break } }')
+  fi
+  idle_cards=$(awk -F'\t' -v held=" $(echo $held_hosts) " '
+      $1 != "time" { gpu[$2] = $7; load[$2] = $5; cores[$2] = $6 }
+      END { for (h in gpu) if (gpu[h] == "0" && index(held, " " h " ") == 0) printf "%s (load %s of %s cores) ", h, load[h], cores[h] }' "$S/host_health.tsv")
+  if [ -n "$idle_cards" ]; then
+    for lg in $STALL_QUEUE_LOGS; do
+      [ -f "$lg" ] || continue
+      [ $(( now - $(stat -c %Y "$lg") )) -le 180 ] || continue
+      read -r start reason < <(awk '
+          /^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:]+Z / {
+            if ($2 == "BUSY") { if (!run) { s = $1; run = 1 }; r = $0; sub(/^[^ ]+ BUSY /, "", r) } else run = 0 }
+          END { if (run) print s, r }' "$lg")
+      [ -n "${start:-}" ] || continue
+      t0=$(date -u -d "$start" +%s 2>/dev/null) || continue
+      waited=$(( now - t0 ))
+      [ "$waited" -ge $(( STALL_QUEUE_MIN * 60 )) ] || continue
+      key="$(basename "$(dirname "$(dirname "$lg")")")/$(basename "$(dirname "$lg")")"
+      alert queue_wait "$key" "BUSY $(( waited / 60 )) min on end: $(clip "$reason" 120); idle card(s) no lease holds: ${idle_cards% }"
+    done
+  fi
 fi
 
 # host_degraded: "<host> <ok|demoted> <bad> <good> <since>" a line, from bin/host_health.sh.
