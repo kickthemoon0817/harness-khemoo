@@ -1,0 +1,270 @@
+[
+ {
+  "number": 2464,
+  "title": "feat: give each region of material a persistent rest state",
+  "url": "https://github.com/example/repo/issues/2464",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:wip"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:first"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 12,
+   "nodes": [
+    {
+     "createdAt": "2026-11-26T01:27:15Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2490,
+  "title": "perf: run this material at two substeps",
+  "url": "https://github.com/example/repo/issues/2490",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:wip"
+    },
+    {
+     "name": "ai:plan"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 8,
+   "nodes": [
+    {
+     "createdAt": "2026-11-26T01:09:34Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2467,
+  "title": "perf: pay the host's per-tick bookkeeping per active body",
+  "url": "https://github.com/example/repo/issues/2467",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:wip"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:operator"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 5,
+   "nodes": [
+    {
+     "createdAt": "2026-11-26T01:24:31Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2200,
+  "title": "fix: stop the crate creeping",
+  "url": "https://github.com/example/repo/issues/2200",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:signoff"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 3,
+   "nodes": [
+    {
+     "createdAt": "2026-11-25T10:00:00Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2388,
+  "title": "feat: let the field beside converted material give",
+  "url": "https://github.com/example/repo/issues/2388",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "Goal.\n\nDepends on: #2380, #2063\n",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:low"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 4,
+   "nodes": [
+    {
+     "createdAt": "2026-11-26T00:23:08Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2063,
+  "title": "mpm: field lateral law",
+  "url": "https://github.com/example/repo/issues/2063",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:operator"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 30,
+   "nodes": [
+    {
+     "createdAt": "2026-11-25T06:28:00Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2495,
+  "title": "fix: a free body on material holds only near a node plane",
+  "url": "https://github.com/example/repo/issues/2495",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "Depends on (merged first): #2499\n",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:fable"
+    },
+    {
+     "name": "ai:first"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ },
+ {
+  "number": 1240,
+  "title": "gate: state the pre-step budget",
+  "url": "https://github.com/example/repo/issues/1240",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "Depends on: #1229\n",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 2,
+   "nodes": [
+    {
+     "createdAt": "2026-11-19T06:34:11Z"
+    }
+   ]
+  }
+ },
+ {
+  "number": 2501,
+  "title": "test: a claim held by a live helper",
+  "url": "https://github.com/example/repo/issues/2501",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ },
+ {
+  "number": 2502,
+  "title": "<script>alert(1)</script> escaped title",
+  "url": "https://github.com/example/repo/issues/2502",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:long"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ }
+]

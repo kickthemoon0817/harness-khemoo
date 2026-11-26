@@ -1,0 +1,14 @@
+load 8.12 24
+MemTotal:       65481572 kB
+MemAvailable:   18771028 kB
+--- gpu
+NVIDIA GeForce RTX 5080, 63, 5940, 16303
+--- apps
+3557139, 5868, /isaac-sim/kit/kit
+4100000, 200, python3
+--- cgroup
+3557139 0::/system.slice/docker-5f8691c3def2aa0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b.scope 
+4100000 0::/user.slice/user-1000.slice 
+--- docker
+5f8691c3def2	worv-iter-4	Up 8 minutes (healthy)	worv/isaac_sim:3.0.7
+0123456789ab	isaac_sim_dev	Up 3 weeks (unhealthy)	worv/isaac_sim:3.0.14
