@@ -392,8 +392,8 @@ class RedactionTest(unittest.TestCase):
     def test_every_word_after_a_quoting_failure_is_masked(self) -> None:
         self.assertEqual(CommandRedactor.redact_command('tool --name "a b'), ["tool", "--name", CommandRedactor.MASK])
         self.assertEqual(CommandRedactor.redact_command("tool 'a"), ["tool", CommandRedactor.MASK])
-        self.assertEqual(CommandRedactor.redact_command("tool --token=x --password y z"),
-                         ["tool", "--token=[redacted]", "--password", "[redacted]", "z"])
+        self.assertEqual(CommandRedactor.redact_command("tool --token=x --password y z --next w"),
+                         ["tool", "--token=[redacted]", "--password", "[redacted]", "[redacted]", "--next", "w"])
 
     def test_scripts_nested_past_the_depth_limit_are_masked_whole(self) -> None:
         script: str = "tool --name plain"

@@ -173,5 +173,113 @@
   "secrets": [
    "as7beta"
   ]
+ },
+ {
+  "shape": "Proxy-Authorization header in one quoted word",
+  "command": "curl -H 'Proxy-Authorization: Basic hd1alpha' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Proxy-Authorization: Basic hd1alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd1alpha"
+  ]
+ },
+ {
+  "shape": "Authorization:Bearer with the credential in the next word",
+  "command": "curl -H Authorization:Bearer hd2alpha https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Authorization:Bearer",
+   "hd2alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd2alpha"
+  ]
+ },
+ {
+  "shape": "Authorization:Bearer and credential in one quoted word",
+  "command": "curl -H 'Authorization:Bearer hd2beta' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Authorization:Bearer hd2beta",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd2beta"
+  ]
+ },
+ {
+  "shape": "X-Api-Key header in one quoted word",
+  "command": "curl -H 'X-Api-Key: hd3alpha' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key: hd3alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd3alpha"
+  ]
+ },
+ {
+  "shape": "X-Api-Key header with its value attached",
+  "command": "curl -H X-Api-Key:hd4alpha https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key:hd4alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd4alpha"
+  ]
+ },
+ {
+  "shape": "Cookie header with several pairs",
+  "command": "curl -H 'Cookie: session=ck1alpha; other=ck1beta' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Cookie: session=ck1alpha; other=ck1beta",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "ck1alpha",
+   "ck1beta"
+  ]
+ },
+ {
+  "shape": "secret flag followed by another secret flag",
+  "command": "tool --token --password fl1alpha",
+  "argv": [
+   "tool",
+   "--token",
+   "--password",
+   "fl1alpha"
+  ],
+  "secrets": [
+   "fl1alpha"
+  ]
+ },
+ {
+  "shape": "secret flag followed by two values",
+  "command": "tool --api-key fl2alpha fl2beta --x",
+  "argv": [
+   "tool",
+   "--api-key",
+   "fl2alpha",
+   "fl2beta",
+   "--x"
+  ],
+  "secrets": [
+   "fl2alpha",
+   "fl2beta"
+  ]
  }
 ]

@@ -12,20 +12,24 @@ class CommandRedactor:
     Masks secret-looking values and summarises commands.
 
     Secret-looking values: `KEY=value` and `--flag value` / `--flag=value` where the name holds TOKEN, KEY, SECRET,
-    PASS, AUTH or CRED (any case); `Authorization:` header values and `Bearer` credentials; URL userinfo with a
-    password, and any userinfo of an http(s) URL; GitHub, GitLab, Slack, AWS and `sk-` token shapes; hex runs of
-    32 characters or more; and base64-like runs of 32 or more mixing upper case, lower case and digits.
+    PASS, AUTH, CRED, COOKIE or SESSION (any case); the value of a header whose name holds one of them
+    (`Authorization:`, `Proxy-Authorization:`, `X-Api-Key:`, `Cookie:`) and `Bearer` credentials; URL userinfo
+    with a password, and any userinfo of an http(s) URL; GitHub, GitLab, Slack, AWS and `sk-` token shapes; hex
+    runs of 32 characters or more; and base64-like runs of 32 or more mixing upper case, lower case and digits.
 
     `redact` masks them in free text (a log line) that is shown as it is. `summarize` works on what the shell
-    would see: it tokenizes first, the way the shell dequotes, and masks each dequoted word, a secret-named flag
-    together with the word after it. A word that is itself a script (a `-c` argument, any word holding spaces or
-    quotes) is tokenized and masked again, to a fixed depth past which it is masked whole. When the quoting does
-    not parse, everything from the failure on is masked. Only then does it shorten the result to the working
-    command's executable and a few arguments. No raw command line leaves it.
+    would see: it tokenizes first, the way the shell dequotes, and masks each dequoted word. A secret-named flag
+    masks every word after it up to the next flag or operator; a secret-named header word masks the words after
+    it up to the next flag or operator but `;`, which separates a cookie's pairs, an auth scheme right after it
+    kept. A word that is itself a script (a `-c` argument, any word holding spaces or quotes) is tokenized and
+    masked again, to a fixed depth past which it is masked whole. When the quoting does not parse, everything
+    from the failure on is masked. Each command's masked words then go through `redact` once more, joined, so a
+    pattern that spans words still applies. Only then does it shorten the result to the working command's
+    executable and a few arguments. No raw command line leaves it.
     """
 
     MASK: ClassVar[str] = "[redacted]"
-    SECRET_WORDS: ClassVar[str] = r"(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED)"
+    SECRET_WORDS: ClassVar[str] = r"(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED|COOKIE|SESSION)"
     SECRET_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(rf"(?i){SECRET_WORDS}")
     SECRET_FLAG_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(rf"(?i)^--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*$")
     NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*|--?[A-Za-z0-9][A-Za-z0-9-]*)$")
@@ -36,9 +40,12 @@ class CommandRedactor:
     SECRET_FLAG_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         rf"(?i)(?<![\w-])(--?[A-Za-z0-9-]*{SECRET_WORDS}[A-Za-z0-9-]*)(=|\s+)({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|-][^\s;&|]*)"
     )
-    AUTHORIZATION_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?i)\b(authorization\s*:\s*)(?:(?:bearer|token|basic|digest)\s+)?[^\s'\"]+"
+    SECRET_HEADER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        rf"(?i)(?<![\w-])([A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*\s*:\s*)(?:(?:bearer|token|basic|digest)\s+)?"
+        r"(?!//)[^\s'\"]+"
     )
+    HEADER_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^([A-Za-z0-9_-]+):(\S*)$")
+    FLAG_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^--?[A-Za-z][A-Za-z0-9_-]*(?:=.*)?$")
     BEARER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+")
     URL_PASSWORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@:'\"]+:[^/\s@'\"]*@"
@@ -84,7 +91,7 @@ class CommandRedactor:
         masked: str = CommandRedactor.SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}={mask}", text)
         masked = CommandRedactor.SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}{mask}",
                                                          masked)
-        masked = CommandRedactor.AUTHORIZATION_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
+        masked = CommandRedactor.SECRET_HEADER_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
         masked = CommandRedactor.BEARER_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
         masked = CommandRedactor.URL_PASSWORD_PATTERN.sub(lambda match: f"{match.group(1)}{mask}@", masked)
         masked = CommandRedactor.HTTP_USERINFO_PATTERN.sub(lambda match: f"{match.group(1)}{mask}@", masked)
@@ -152,13 +159,23 @@ class CommandRedactor:
         redacted: list[str] = CommandRedactor._redact_words(words, depth)
         if not parsed_whole:
             redacted.append(CommandRedactor.MASK)
+        joined: str = "\n".join(redacted)
+        backstopped: str = CommandRedactor.redact(joined)
+        if backstopped != joined:
+            redacted = [word for word in backstopped.split("\n") if word]
         return redacted
 
     @staticmethod
     def _redact_words(words: list[str], depth: int) -> list[str]:
         """
-        Masks a list of dequoted words: a secret-named flag hides the word after it, `Authorization:` and
-        `Bearer` hide the credential after them, and every other word is masked on its own.
+        Masks a list of dequoted words.
+
+        A secret-named flag (`--token`) masks every word after it up to the next flag or operator; a flag met
+        there is taken as a flag, so `--token --password secret` still masks `secret`. A header word whose name
+        holds a secret word (`Authorization:`, `X-Api-Key:`, `Cookie:`), `Bearer`, or `Authorization:Bearer`
+        masks the words after it up to the next flag or operator but `;`, keeping an auth scheme that comes right
+        after a bare header name; a header word carrying its value (`X-Api-Key:abc`) loses that value too. Every
+        other word is masked on its own.
 
         Args:
             words: Dequoted words and operators.
@@ -168,31 +185,44 @@ class CommandRedactor:
             The masked words.
         """
         redacted: list[str] = []
-        hide_next: bool = False
-        credential_follows: bool = False
+        masking: str = ""
+        scheme_may_follow: bool = False
         for word in words:
             if CommandRedactor._is_punctuation(word):
                 redacted.append(word)
-                hide_next = credential_follows = False
+                if not (masking == "header" and word == ";"):
+                    masking = ""
+                scheme_may_follow = False
                 continue
-            if hide_next:
-                redacted.append(CommandRedactor.MASK)
-                hide_next = False
-                continue
-            if credential_follows:
-                if word.lower() in CommandRedactor.AUTH_SCHEMES:
+            if masking and not CommandRedactor.FLAG_WORD_PATTERN.match(word):
+                if scheme_may_follow and word.lower() in CommandRedactor.AUTH_SCHEMES:
                     redacted.append(word)
-                    continue
-                redacted.append(CommandRedactor.MASK)
-                credential_follows = False
+                else:
+                    redacted.append(CommandRedactor.MASK)
+                scheme_may_follow = False
                 continue
+            masking = ""
+            scheme_may_follow = False
             if CommandRedactor.SECRET_FLAG_WORD_PATTERN.match(word):
                 redacted.append(word)
-                hide_next = True
+                masking = "flag"
                 continue
-            if word.lower() in ("authorization:", "bearer"):
+            if word.lower() == "bearer":
                 redacted.append(word)
-                credential_follows = True
+                masking = "header"
+                continue
+            header_match: re.Match[str] | None = CommandRedactor.HEADER_WORD_PATTERN.match(word)
+            if header_match and CommandRedactor.SECRET_NAME_PATTERN.search(header_match.group(1)) \
+                    and not header_match.group(2).startswith("//"):
+                name, value = header_match.group(1), header_match.group(2)
+                masking = "header"
+                if not value:
+                    redacted.append(word)
+                    scheme_may_follow = True
+                elif value.lower() in CommandRedactor.AUTH_SCHEMES:
+                    redacted.append(word)
+                else:
+                    redacted.append(f"{name}:{CommandRedactor.MASK}")
                 continue
             redacted.append(CommandRedactor._redact_word(word, depth))
         return redacted
