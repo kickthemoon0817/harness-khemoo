@@ -163,6 +163,7 @@ rm -f "$G/state/locks/cost-wait."* "$G/state/locks/claim."*
 
 # This host's card is the owner's: a tick on the local daemon runs only card-less build containers.
 LD=unix:///var/run/docker.sock
+export LOCAL_LANE_LOCK="$T/lane.lock"
 # Bind sources must sit under the user's tmp_workspace, so these cases mount a scratch dir there.
 LW=$(mktemp -d -p "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace" .remote-docker-test.XXXXXX); mkdir -p "$LW/ro"
 trap 'rm -rf "$T" "$LW"' EXIT
@@ -198,7 +199,7 @@ local_refused "a tick's docker rm is refused" rm -f owner_container
 local_refused "a tick's image rm is refused" image rm worv-builder:isaac6
 local_refused "a tick's volume rm is refused" volume rm worv-dev-ccache
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/./ro:/r:ro" -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc 'echo --gpus all' 2> "$T/guard.err"; rc=$?
-check "iter.sh's build run goes through with runc and the card hidden, the command untouched" '[ "$rc" = 0 ] && [ "$(calls)" = "docker DOCKER_HOST=$LD run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -v $LW/ro:/r:ro -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc echo --gpus all" ]' "rc=$rc $(cat "$T/guard.err") $(calls)"
+check "iter.sh's build run goes through with runc and the card hidden, the command untouched" '[ "$rc" = 0 ] && [ "$(calls)" = "docker DOCKER_HOST=$LD run --cpus=8 --memory=16g --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -v $LW/ro:/r:ro -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc echo --gpus all" ]' "rc=$rc $(cat "$T/guard.err") $(calls)"
 : > "$LOG"; mkdir -p "$LW/rw"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/ro:/r:ro" -v "$LW/rw:/w" --entrypoint bash img -lc true 2> "$T/guard.err"; rc=$?
 check "after a local run each writable bind is handed back to the user, a read-only one is not" '[ "$rc" = 0 ] && [ "$(grep -c "entrypoint chown" "$LOG")" = 1 ] && grep -q "run --rm --runtime=runc --network none -v $LW/rw:/w --entrypoint chown worv-builder:isaac6 -R $(id -u):$(id -g) /w" "$LOG"' "rc=$rc $(calls)"
 mkdir -p "$T/rcfake"; printf '#!/usr/bin/env bash\necho "docker DOCKER_HOST=${DOCKER_HOST:-} $*" >> "$LOG"\ncase "$*" in *"entrypoint chown"*) exit 0 ;; esac\nexit 3\n' > "$T/rcfake/docker"; chmod +x "$T/rcfake/docker"
@@ -213,6 +214,24 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
 check "outside a tick the local daemon is left to its caller" '[ "$rc" = 0 ] && grep -q "run --rm --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
 rm -rf "$LW"
+
+
+# The local lane's caps: the harness's own local runs are bounded and taken one at a time.
+LD=unix:///var/run/docker.sock
+printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
+: > "$LOG"; WORV_LOCAL_LANE=1 LOCAL_LANE_LOCK="$T/lane.lock" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e WORV_BUILD_JOBS=13 --entrypoint bash img -lc true 2> "$T/guard.err"; rc=$?
+check "a lane run is bounded: cpus, memory and the compile's jobs" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run --cpus=8 --memory=16g --rm -e WORV_BUILD_JOBS=6 --entrypoint bash img -lc true$" "$LOG"' "rc=$rc $(calls)"
+: > "$LOG"; WORV_LOCAL_LANE=1 LOCAL_LANE_LOCK="$T/lane.lock" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e WORV_BUILD_JOBS=4 img true 2> "$T/guard.err"
+check "a compile already under the cap keeps its jobs" 'grep -q "WORV_BUILD_JOBS=4 img true$" "$LOG"' "$(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e WORV_BUILD_JOBS=13 img true 2> "$T/guard.err"
+check "the owner's own local run through the shim is left as given" 'grep -q "^docker DOCKER_HOST=$LD run --rm -e WORV_BUILD_JOBS=13 img true$" "$LOG"' "$(calls)"
+( exec 7>"$T/lane.lock"; flock 7; exec sleep 3 ) > /dev/null 2>&1 & lp=$!; sleep 0.3
+start=$(date +%s.%N); WORV_LOCAL_LANE=1 LOCAL_LANE_LOCK="$T/lane.lock" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; waited=$(echo "$(date +%s.%N) - $start" | bc)
+check "a lane run waits while another lane run holds the lane" 'awk -v w="$waited" "BEGIN { exit !(w > 2.0) }"' "waited=$waited"
+kill $lp 2>/dev/null
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+: > "$LOG"; mkdir -p "$T/ws2"; LOCAL_LANE_LOCK="$T/lane.lock" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e WORV_BUILD_JOBS=13 img true 2> "$T/guard.err"
+check "a tick's local run is a lane run: bounded too" 'grep -q "run --cpus=8 --memory=16g --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -e WORV_BUILD_JOBS=6 img true$" "$LOG"' "$(calls)"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

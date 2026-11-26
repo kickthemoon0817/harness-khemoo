@@ -48,7 +48,7 @@ run_on=""
 # hosts, bin/build_host.sh names a remote host and that host's compile lock and builder image.
 if [ -s "$HARNESS_STATE/local-cpu-lane" ]; then
     read -r BUILDER_IMAGE _ < "$HARNESS_STATE/local-cpu-lane"
-    export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build.lock WORV_BUILDER_IMAGE="$BUILDER_IMAGE"
+    export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build.lock WORV_BUILDER_IMAGE="$BUILDER_IMAGE" WORV_LOCAL_LANE=1
     run_on=local
 elif [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ]; then
     lane=$(BUILD_HOST_REMOTE_ONLY=1 "$HARNESS_HOME/bin/build_host.sh") || exit 1

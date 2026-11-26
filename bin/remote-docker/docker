@@ -74,8 +74,9 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
       esac
     done
     cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
+    lane=1
   else
-    cmd=("$real" "$@"); opts=()
+    cmd=("$real" "$@"); opts=(); lane=${WORV_LOCAL_LANE:-}
     if [ "${1:-}" = run ]; then
       shift
       while [ "$#" -gt 0 ]; do
@@ -90,9 +91,24 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
     fi
     [ "${#cmd[@]}" -gt 0 ] || exec "$real" "$@"
   fi
+  # The harness's own runs here (a tick's, or a lane run marked WORV_LOCAL_LANE=1 by
+  # bin/build_host.sh or bin/slow_set.sh) share the owner's machine: one at a time under
+  # LOCAL_LANE_LOCK, each bounded by LOCAL_LANE_CPUS and LOCAL_LANE_MEMORY, a compile's jobs by
+  # LOCAL_LANE_MAX_JOBS. The owner's own runs through this shim are left as given.
+  if [ "$lane" = 1 ] && [ "${cmd[1]:-}" = run ]; then
+    max_jobs=${LOCAL_LANE_MAX_JOBS:-6}
+    for ((k = 2; k < ${#cmd[@]}; k++)); do
+      case "${cmd[$k]}" in
+        WORV_BUILD_JOBS=*) j=${cmd[$k]#WORV_BUILD_JOBS=}; [[ "$j" =~ ^[0-9]+$ ]] && [ "$j" -gt "$max_jobs" ] && cmd[$k]="WORV_BUILD_JOBS=$max_jobs" ;;
+      esac
+    done
+    cmd=("${cmd[0]}" run --cpus="${LOCAL_LANE_CPUS:-8}" --memory="${LOCAL_LANE_MEMORY:-16g}" "${cmd[@]:2}")
+    exec 7>"${LOCAL_LANE_LOCK:-/tmp/worv-local-lane.lock}" && flock 7
+  fi
   # A container writes as root, so each writable bind under the user's tmp_workspace is handed back
   # to the user once a foreground run ends; the next host-side step writes there.
   "${cmd[@]}"; rc=$?
+  exec 7>&- 2>/dev/null
   ws=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
   for ((k = 0; k + 1 < ${#opts[@]}; k++)); do
     [ "${opts[$k]}" = -v ] || continue

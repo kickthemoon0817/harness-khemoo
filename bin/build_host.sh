@@ -60,7 +60,7 @@ for h in "${cands[@]}"; do
   if [ -z "$best_wait" ] || [ "$w" -lt "$best_wait" ]; then best=$h; best_wait=$w; fi
 done
 if [ "$best" = local ]; then
-  echo "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$(lock_of local) WORV_BUILDER_IMAGE=$local_image"
+  echo "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$(lock_of local) WORV_BUILDER_IMAGE=$local_image WORV_LOCAL_LANE=1"
 else
-  echo "export DOCKER_HOST=ssh://$best WORV_DEV_BUILD_LOCK=$(lock_of "$best") WORV_BUILDER_IMAGE=worv-builder:isaac6"
+  echo "export DOCKER_HOST=ssh://$best WORV_DEV_BUILD_LOCK=$(lock_of "$best") WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE="
 fi
