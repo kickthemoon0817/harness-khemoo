@@ -199,6 +199,11 @@ local_refused "a tick's image rm is refused" image rm worv-builder:isaac6
 local_refused "a tick's volume rm is refused" volume rm worv-dev-ccache
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/./ro:/r:ro" -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc 'echo --gpus all' 2> "$T/guard.err"; rc=$?
 check "iter.sh's build run goes through with runc and the card hidden, the command untouched" '[ "$rc" = 0 ] && [ "$(calls)" = "docker DOCKER_HOST=$LD run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void --rm -v $LW/ro:/r:ro -v worv-dev-ccache:/ccache -e NVIDIA_VISIBLE_DEVICES=void -e CCACHE_DIR=/ccache -e WORV_EXTRA_CXXFLAGS --entrypoint bash img -lc echo --gpus all" ]' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; mkdir -p "$LW/rw"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/ro:/r:ro" -v "$LW/rw:/w" --entrypoint bash img -lc true 2> "$T/guard.err"; rc=$?
+check "after a local run each writable bind is handed back to the user, a read-only one is not" '[ "$rc" = 0 ] && [ "$(grep -c "entrypoint chown" "$LOG")" = 1 ] && grep -q "run --rm --runtime=runc --network none -v $LW/rw:/w --entrypoint chown worv-builder:isaac6 -R $(id -u):$(id -g) /w" "$LOG"' "rc=$rc $(calls)"
+mkdir -p "$T/rcfake"; printf '#!/usr/bin/env bash\necho "docker DOCKER_HOST=${DOCKER_HOST:-} $*" >> "$LOG"\ncase "$*" in *"entrypoint chown"*) exit 0 ;; esac\nexit 3\n' > "$T/rcfake/docker"; chmod +x "$T/rcfake/docker"
+: > "$LOG"; PATH="$T/rcfake:$PATH" DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -v "$LW/rw:/w" --entrypoint bash img -lc false 2> "$T/guard.err"; rc=$?
+check "a failed local run still hands its bind back and keeps its exit code" '[ "$rc" = 3 ] && grep -q "entrypoint chown" "$LOG"' "rc=$rc $(calls)"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" image inspect img 2> "$T/guard.err"; rc=$?
 check "a tick's image inspect passes through unchanged" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD image inspect img$" "$LOG"' "rc=$rc $(calls)"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" ps -q 2> "$T/guard.err"; rc=$?

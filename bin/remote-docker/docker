@@ -73,9 +73,37 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
         *) break ;;
       esac
     done
-    exec "$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@"
+    cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
+  else
+    cmd=("$real" "$@"); opts=()
+    if [ "${1:-}" = run ]; then
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -d|--detach|--detach=true) cmd=(); break ;;
+          -v|--volume) opts+=(-v "${2:-}"); shift 2 ;;
+          --volume=*) opts+=(-v "${1#--volume=}"); shift ;;
+          -*) shift ;;
+          *) break ;;
+        esac
+      done
+    fi
+    [ "${#cmd[@]}" -gt 0 ] || exec "$real" "$@"
   fi
-  exec "$real" "$@" ;;
+  # A container writes as root, so each writable bind under the user's tmp_workspace is handed back
+  # to the user once a foreground run ends; the next host-side step writes there.
+  "${cmd[@]}"; rc=$?
+  ws=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
+  for ((k = 0; k + 1 < ${#opts[@]}; k++)); do
+    [ "${opts[$k]}" = -v ] || continue
+    spec=${opts[$((k + 1))]}; src=${spec%%:*}
+    [[ "$src" == /* ]] || continue
+    case "$spec" in *:ro|*:ro,*) continue ;; esac
+    src=$(realpath -m "$src"); [[ "$src" == "$ws"/* ]] && [ -d "$src" ] || continue
+    "$real" run --rm --runtime=runc --network none -v "$src:/w" --entrypoint chown \
+        "${REMOTE_DOCKER_CHOWN_IMAGE:-worv-builder:isaac6}" -R "$(id -u):$(id -g)" /w >/dev/null 2>&1
+  done
+  exit "$rc" ;;
 esac
 target=${DOCKER_HOST#ssh://}
 sub=""
