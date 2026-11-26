@@ -41,5 +41,26 @@ check "with one host held whole, the other even when it has more waiters" '[[ "$
 out=$(BUILD_LOCK_NAMES="" $B)
 check "a host without a name gets its lock from its address" '[[ "$out" == *"worv-dev-build-remote-two.lock" ]]' "$out"
 
+
+# A waiting cost read keeps compiles off the card it waits for.
+kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3
+echo "b@two $(date +%s)" > "$T/h/state/locks/cost-wait.2464"
+hold "$T/lk/worv-dev-build-remote-one.lock"
+out=$($B)
+check "a cost read waiting for a host keeps compiles off it, even behind a taken lock" '[[ "$out" == *"ssh://a@one "* ]]' "$out"
+echo "b@two $(( $(date +%s) - 600 ))" > "$T/h/state/locks/cost-wait.2464"
+out=$($B)
+check "a wait marker not refreshed for COST_WAIT_FRESH_S is ignored" '[[ "$out" == *"ssh://b@two "* ]]' "$out"
+kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3
+{ printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+  printf 't\ta@one\t0.2\t80\t2.0\t16\t0\t20\tok\n'; printf 't\tb@two\t0.2\t80\t20.0\t24\t0\t20\tok\n'; } > "$T/h/state/host_health.tsv"
+echo "any $(date +%s)" > "$T/h/state/locks/cost-wait.2502"; rm -f "$T/h/state/locks/cost-wait.2464"
+out=$($B)
+check "a wait for any card keeps the quietest unheld host free of compiles" '[[ "$out" == *"ssh://b@two "* ]]' "$out"
+echo "a@one $(date +%s)" > "$T/h/state/locks/cost-wait.2464"; echo "b@two $(date +%s)" > "$T/h/state/locks/cost-wait.2502"
+out=$($B)
+check "with every host waited for, they are all candidates again" '[[ "$out" == *"ssh://a@one "* ]]' "$out"
+rm -f "$T/h/state/locks/cost-wait."*
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
