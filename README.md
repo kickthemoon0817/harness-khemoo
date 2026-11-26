@@ -75,9 +75,15 @@ harness-only --on` alone is replaced on the next probe.
 has a waiter or the allocator's last line counts claimable work; `host_degraded`, once per
 demotion. A kind and key repeats at most every 30 minutes. It reads local state only.
 
+**Leftover pull requests.** `bin/pr_sweep.sh` (cron, every 30 minutes) closes each open pull request on an
+`ai/<n>-…` branch whose issue #<n> is closed, with a comment saying so. An issue that lands on another pull
+request, or that the operator closes, otherwise leaves its own one open. The branch stays, so a closed pull
+request can be reopened. `--dry-run` names them without closing; each close is logged to `state/logs/pr_sweep.log`.
+
 ```
 */3 * * * * /home/you/harness/bin/host_health.sh
 */5 * * * * /home/you/harness/bin/stall_watch.sh
+*/30 * * * * /home/you/harness/bin/pr_sweep.sh
 ```
 
 ## Quickstart
@@ -123,6 +129,7 @@ in-flight ticks finish on their own.
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
+| `bin/pr_sweep.sh` | cron every 30 min: closes open `ai/<n>-…` pull requests whose issue is closed |
 | `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
 
 ## Scenario arm queues
