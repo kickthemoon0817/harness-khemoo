@@ -15,6 +15,8 @@ S="$H/state"; W="$H/bin/stall_watch.sh"
 printf '#!/usr/bin/env bash\nwhile :; do sleep 1; done\n' > "$H/fake/rsync"; chmod +x "$H/fake/rsync"
 export HARNESS_HOME="$H" HARNESS_STATE="$S" HARNESS_PATH="$PATH"
 export STALL_LOCK_GLOBS="$H/lk/worv-dev-build-remote*.lock $H/lk/worv-fast-set-remote*.lock"
+# Run queues are read only where a case puts them, never the live evidence tree.
+export STALL_QUEUE_LOGS="$H/none/*/lease.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 stalls() { cat "$S/stalls.log" 2>/dev/null; }
@@ -143,6 +145,42 @@ printf '#!/usr/bin/env bash\necho "remote card: idle@five (slots 6-7)"\necho "sl
 qrun
 check "an idle card a live lease holds (a kit booting) is not counted idle" '! qstalls' "$(qstalls)"
 rm -f "$H/bin/lease.sh"
+
+
+# card_held_idle reads the whole-card holds and the probe rows.
+CH="$H/ch"; mkdir -p "$CH"
+chrun() { : > "$CH/stalls.log"; rm -f "$CH/stall_watch.seen"; HARNESS_STATE="$CH" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"; }
+chprobes() {  # <gpu % at the newest probe> : probes every 3 min over 30 min, 0 % but the newest
+  { printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+    for m in 30 27 24 21 18 15 12 9 6 3; do printf '%s\theld@w\t0.2\t80\t9.0\t16\t0\t30\tok\n' "$(iso "$m")"; done
+    printf '%s\theld@w\t0.2\t80\t9.0\t16\t%s\t30\tok\n' "$(iso 0)" "$1"; } > "$CH/host_health.tsv"
+}
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote-all no-cost render (alive)"\n' "$(iso 70)" > "$H/bin/lease.sh"; chmod +x "$H/bin/lease.sh"
+chprobes 0; chrun
+line=$(grep ' STALL card_held_idle ' "$CH/stalls.log")
+check "a card held whole at 0 % for the whole window raises card_held_idle with its holder" '[[ "$line" == *"STALL card_held_idle held@w #2511 holds it whole (no-cost) since "*"card 0 % on all "*" probes of the last 20 min"* ]]' "$(cat "$CH/stalls.log")"
+chprobes 64; chrun
+check "a held card that works on the newest probe raises nothing" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote-all no-cost render (alive)"\n' "$(iso 5)" > "$H/bin/lease.sh"
+chprobes 0; chrun
+check "a hold younger than the window raises nothing" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+printf '#!/usr/bin/env bash\necho "remote card: held@w (slots 4-5)"\necho "slot 4 HELD 2511 1 %s domain=80 remote (alive)"\n' "$(iso 70)" > "$H/bin/lease.sh"
+chprobes 0; chrun
+check "a single-slot hold is not a whole-card hold" '! grep -q card_held_idle "$CH/stalls.log"' "$(cat "$CH/stalls.log")"
+rm -f "$H/bin/lease.sh"
+
+
+# While Nucleus has been down 10+ minutes, the idle alarms stay quiet.
+NQ="$H/nq"; mkdir -p "$NQ/nucleus"
+{ printf 'time\thost\tconnect_s\tupload_mb_s\tload1\tnproc\tgpu_util_pct\tgpu_mem_used_mb\tstatus\n'
+  for m in 30 27 24 21 18 15 12 9 6 3 0; do printf '%s\tidle@a\t0.2\t80\t0.1\t16\t0\t20\tok\n' "$(iso "$m")"; done; } > "$NQ/host_health.tsv"
+mkdir -p "$NQ/logs"; echo "20261126T000000Z five=0% week=1% allowed=10 busy=0 claimable=3 -> spawning 3" > "$NQ/logs/allocator.log"
+HARNESS_STATE="$NQ" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"
+check "an idle card with work waiting raises gpu_idle when Nucleus is up" 'grep -q "STALL gpu_idle idle@a" "$NQ/stalls.log"' "$(cat "$NQ/stalls.log" 2>/dev/null)"
+: > "$NQ/stalls.log"; rm -f "$NQ/stall_watch.seen"
+echo "ok_since= last=$(date +%s) result=fail fail_since=$(( $(date +%s) - 900 ))" > "$NQ/nucleus/status"
+HARNESS_STATE="$NQ" STALL_LOCK_GLOBS="$H/none/*.lock" "$W"
+check "the same idle card raises nothing while Nucleus has been down 15 minutes" '! grep -q "gpu_idle" "$NQ/stalls.log"' "$(cat "$NQ/stalls.log")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

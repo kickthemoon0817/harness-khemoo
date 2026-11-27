@@ -113,7 +113,11 @@ REMOTE_CARD_HOSTS="${REMOTE_CARD_HOSTS:-$(grep -v '^[[:space:]]*$' "$REMOTE_FILE
 HARNESS_ONLY_FILE="$LOCKS/harness-first-remote-only"
 HARNESS_ONLY_SCOPE=""
 HARNESS_HOSTS=""
-if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+# An issue the owner lists in local-card-issues (one number a line) may take this host's card too:
+# harness-only scope does not apply to its acquires.
+LOCAL_CARD_ISSUES_FILE="$LOCKS/local-card-issues"
+if [ -e "$HARNESS_ONLY_FILE" ] && [ "${1:-}" = acquire ] && [[ "${2:-}" =~ ^[0-9]+$ ]] \
+    && ! grep -qx "${2:-}" "$LOCAL_CARD_ISSUES_FILE" 2>/dev/null; then
   REMOTE_CARD_HOSTS=$(grep -v '^[[:space:]]*$' "$REMOTE_FILE" 2>/dev/null)
   while IFS= read -r hh; do
     [ -n "$hh" ] && printf '%s\n' "$REMOTE_CARD_HOSTS" | grep -qxF "$hh" && HARNESS_HOSTS+="$hh"$'\n'
@@ -146,7 +150,12 @@ LOCAL_OFF_FILE="$LOCKS/local-card-off"
 local_off() { [ -n "$REMOTE_CARD_HOST" ] && { [ -e "$LOCAL_OFF_FILE" ] || [ -n "$HARNESS_ONLY_SCOPE" ]; }; }
 # The slots a whole-card or device run looks at: the card that runs it.
 card_slots() { if local_off; then host_slots "$(host_index "$REMOTE_CARD_HOST")"; else seq 1 "$GPU_SLOTS"; fi; }
-remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
+# The daemon a grant's runs go to: the remote card's over ssh, or this host's own for a requester
+# the harness keeps off this host (bin/remote-env.sh), whose DOCKER_HOST names no socket.
+grant_env() {
+  if local_off; then echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"
+  elif [ -n "${WORV_LOCAL_OFF_DOCKER_HOST:-}" ]; then echo " DOCKER_HOST=unix:///var/run/docker.sock"; fi
+}
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
 DEVICE_FILE="$LOCKS/device.lease"
@@ -363,6 +372,7 @@ drop_whole_card() {
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
+    case "$issue" in -*) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote [--no-cost]|--device]: an issue number comes first, not $issue" >&2; exit 2 ;; esac
     stated="${3:-}"
     if [ "$stated" = "--device" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
@@ -395,7 +405,7 @@ case "${1:-}" in
       fi
       echo "$issue $pid $(date -u +%FT%TZ) domain=0 device" > "$DEVICE_FILE"
       echo "ACQUIRED device file=$DEVICE_FILE (card ${used}/${total} MiB used)$(local_off && echo " remote=$REMOTE_CARD_HOST")"
-      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(remote_env)"
+      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(grant_env)"
       exit 0
     fi
     if [ "$stated" = "--all-remote" ]; then
@@ -417,7 +427,7 @@ case "${1:-}" in
           f=$(slot_file "$s")
           echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all${no_cost} render" > "$f"
         done
-        rm -f "$LOCKS/slot-wait.$issue"
+        rm -f "$LOCKS/slot-wait.$issue" "$LOCKS/cost-wait.$issue"
         f=$(slot_file "$s0")
         echo "ACQUIRED slot=$s0 file=$f container=worv-iter-$s0 domain=$(( 76 + s0 )) cache=$CACHE_BASE/cache-slot$s0 remote=$h exclusive=all-remote"
         echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=worv-iter-$s0 ROS_DOMAIN_ID=$(( 76 + s0 )) WORV_ITER_CACHE_ROOT=$CACHE_BASE/cache-slot$s0 DOCKER_HOST=ssh://$h PATH=$H/bin/remote-docker:\$PATH"
@@ -432,9 +442,19 @@ case "${1:-}" in
         done
         [ "$own" = 1 ] && grant_remote_all "$i" "$(remote_host "$i")"
       done
+      # An issue the operator named ahead of this one (`lease.sh prioritize`) whose cost read is
+      # waiting (a cost-wait marker its runner refreshed) gets the first free card it can use; a
+      # fresh grant to this issue leaves that card to it and may take another.
+      prio=""; prio_want=""; reserved=""
+      if [ -s "$OPERATOR_FILE" ]; then
+        for n in $(cat "$OPERATOR_FILE"); do
+          [ "$n" = "$issue" ] && break
+          f="$LOCKS/cost-wait.$n"; [ -s "$f" ] || continue
+          read -r w t _ < "$f"
+          if [[ "${t:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - t )) -le "${COST_WAIT_FRESH_S:-120}" ]; then prio=$n; prio_want=$w; break; fi
+        done
+      fi
       for i in $(host_order); do
-        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
-        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
         free=1
         for s in $(host_slots "$i"); do
           f=$(slot_file "$s"); hp=""
@@ -442,9 +462,18 @@ case "${1:-}" in
           if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then free=0; break; fi
         done
         [ "$free" = 1 ] || continue
+        if [ -n "$prio" ] && [ -z "$reserved" ] && { [ "$prio_want" = any ] || [ "$prio_want" = "$(remote_host "$i")" ]; }; then
+          reserved=$i; continue
+        fi
+        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
+        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
         REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
         grant_remote_all "$i" "$(remote_host "$i")"
       done
+      # A cost read left waiting names the card it waits for (or any), so bin/build_host.sh keeps
+      # compiles off that card until it is quiet. The runner asks every 30 s and refreshes it.
+      [ -n "$no_cost" ] || echo "${LEASE_WANT_HOST:-any} $(date +%s)" > "$LOCKS/cost-wait.$issue"
+      [ -n "$reserved" ] && { echo "BUSY the free card $(remote_host "$reserved") is left to issue $prio, which has priority"; exit 1; }
       echo "BUSY no remote card is free, alone and quiet"; exit 1
     fi
     if [ "$stated" = "--all" ]; then
@@ -513,7 +542,7 @@ case "${1:-}" in
           && echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) held-for-all" > "$rf"
       done
       echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}$(local_off && echo " remote=$REMOTE_CARD_HOST")"
-      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(remote_env)"
+      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(grant_env)"
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
@@ -624,7 +653,7 @@ case "${1:-}" in
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d${render:+ render}" > "$f"
     rm -f "$LOCKS/slot-wait.$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
-    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(grant_env)"
     ;;
   prioritize)
     exec 8>"$K"; flock 8

@@ -86,6 +86,7 @@ request can be reopened. `--dry-run` names them without closing; each close is l
 */3 * * * * /home/you/harness/bin/host_health.sh
 */5 * * * * /home/you/harness/bin/stall_watch.sh
 */30 * * * * /home/you/harness/bin/pr_sweep.sh
+* * * * * /home/you/harness/bin/card_dispatch.sh
 ```
 
 ## Quickstart
@@ -132,6 +133,7 @@ in-flight ticks finish on their own.
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
 | `bin/pr_sweep.sh` | cron every 30 min: closes open `ai/<n>-…` pull requests whose issue is closed |
+| `bin/card_dispatch.sh` | cron every minute: unpins a queue waiting 5+ min on a busy card when another card is free, idle and quiet (`PULL` lines in `state/stalls.log`) |
 | `bin/build_host.sh` | prints the `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` exports for the host whose compile lock is free |
 | `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
 | `bin/dashboard.sh` | starts the status dashboard (`bin/dashboard.py`, `bin/dashboard_lib/`) on 127.0.0.1 and prints its URL |

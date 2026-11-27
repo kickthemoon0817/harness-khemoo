@@ -30,7 +30,12 @@
 #                          (files or folders: /tmp/census.csv,/tmp/worv_support_probe)
 #   --want-host HOST       keep only a grant on this remote host (user@host, or local), and ask a
 #                          whole-card grant for that host alone (LEASE_WANT_HOST); a grant
-#                          elsewhere is released and the poll goes on (default any)
+#                          elsewhere is released and the poll goes on (default any). Before each
+#                          ask the runner reads <runs>/want-host, if present, in its place:
+#                          bin/card_dispatch.sh writes `any` there to pull a pinned queue onto a
+#                          free card
+#   --bar-read             the queue reads the 150 ms bar, so its --want-host stays: no override
+#                          moves it to another card
 #   --lease-margin S       stop polling for a lease S seconds before the deadline (default 600)
 #   --arm-seconds S        an arm's seconds when its line leaves them empty (default 540)
 #   --arm-timeout S        the runner's timeout per arm (default 1200)
@@ -72,13 +77,14 @@ nap() { sleep "$1" & wait $!; }
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 issue="" packet="" qfile="" acquire_args="" deadline="${DEADLINE:-}" runs=runs collect="" want=any
-lease_margin=600 arm_seconds=540 arm_timeout=1200 runner=scenario base="" settle=0 host_load="" nucleus=""
+lease_margin=600 arm_seconds=540 arm_timeout=1200 runner=scenario base="" settle=0 host_load="" nucleus="" bar_read=""
 base_exts="worv.core.runtime worv.core.scene worv.core.utils worv.comm.base worv.comm.ros2 worv.env.manure worv.robots.catalog worv.robots.locomotion worv.robots.attachments worv.robots.teleport"
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --host-load) host_load=1; shift; continue ;;
     --nucleus-check) nucleus=1; shift; continue ;;
+    --bar-read) bar_read=1; shift; continue ;;
   esac
   [ $# -ge 2 ] || die "$1 needs a value (--help for usage)"
   case "$1" in
@@ -201,6 +207,10 @@ poll_lease() {
   local out rc host
   while :; do
     if stopped; then echo "STOP while waiting$1 $(ts)" >> "$ST"; return 1; fi
+    if [ -z "$bar_read" ] && [ -s "$OUT/want-host" ]; then
+      read -r w _ < "$OUT/want-host"
+      if [ -n "$w" ] && [ "$w" != "$want" ]; then echo "$(ts) want-host override: $want -> $w" >> "$LEASE_LOG"; want=$w; fi
+    fi
     if [ "$want" = any ] || [ "$want" = local ]; then out=$("$L" acquire "$issue" "${acq[@]}" 2>&1); rc=$?
     else out=$(LEASE_WANT_HOST=$want "$L" acquire "$issue" "${acq[@]}" 2>&1); rc=$?; fi
     echo "$(ts) $out" >> "$LEASE_LOG"
@@ -374,7 +384,7 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
-echo "holder $$ start $(ts) queue=$qfile want=$want deadline=$deadline" >> "$LEASE_LOG"
+echo "holder $$ start $(ts) queue=$qfile want=$want bar=${bar_read:-0} deadline=$deadline" >> "$LEASE_LOG"
 poll_lease "" || exit 4
 
 ended_early=""
