@@ -242,6 +242,10 @@ check "an unlisted issue's tick is still refused a card here" '[ "$rc" = 75 ]' "
 echo 2534 > "$G/state/locks/local-card-issues"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run -d --gpus all img true 2> "$T/guard.err"; rc=$?
 check "a listed issue's tick runs its container with the card, as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run -d --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e NVIDIA_VISIBLE_DEVICES=void -e WORV_BUILD_JOBS=13 img true 2> "$T/guard.err"; rc=$?
+check "a listed issue's card-less run is a lane run: bounded" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run --cpus=8 --memory=16g --rm -e NVIDIA_VISIBLE_DEVICES=void -e WORV_BUILD_JOBS=6 img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" exec worv-iter-ros2cli mkdir -p /tmp/x 2> "$T/guard.err"; rc=$?
+check "a listed issue's tick runs other commands as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD exec worv-iter-ros2cli mkdir -p /tmp/x$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 rm -f "$G/state/locks/local-card-issues" "$G/state/locks/claim.2534"
 
 
