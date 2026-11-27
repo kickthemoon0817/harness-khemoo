@@ -17,6 +17,9 @@ cat > "$H/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "$2" > "$FAKE_PROMPT"
 printf '%s\n' "${FROM_HOOK:-unset} ${FROM_EXPORTS:-unset}" > "$FAKE_ENV"
+printf '%s\n' "rules=${PUBLIC_RECORD_RULES:-unset} pr=${PUBLIC_RECORD_PR_SECTIONS:-unset}" \
+    "issue=${PUBLIC_RECORD_ISSUE_SECTIONS:-unset} repo=${GH_REPO:-unset} wip=${WIP_LABEL:-unset}" \
+    "low=${LOW_LABEL:-unset} token=${GH_TOKEN:-unset}" > "$FAKE_LINT_ENV"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
@@ -50,7 +53,7 @@ EOF
       printf '%s\n' "$@"; } > "$I/harness.env"
 }
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.txt" FAKE_ENV="$H/env.txt" \
-    FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" \
+    FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" FAKE_LINT_ENV="$H/lint-env.txt" \
     FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_NO_CRON="$H/no-cron"
 LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
@@ -139,6 +142,15 @@ check "the core rules follow, with keys substituted literally" \
 check "the installation section comes last" \
     '[ "$(sed -n 5p "$FAKE_PROMPT")" = "## This installation" ] && tail -1 "$FAKE_PROMPT" | grep -qF "Fake installation rules for o/r&x|y\\z: work only issues labelled \`ai\`."' "$(cat "$FAKE_PROMPT")"
 check "hooks/env.sh exports and TICK_EXPORTS reach the tick" '[ "$(cat "$FAKE_ENV")" = "sourced exported" ]' "$(cat "$FAKE_ENV" 2>/dev/null)"
+
+# The lint's settings, GH_REPO and the labels reach every tick; GH_TOKEN never does.
+write_env "PUBLIC_RECORD_RULES=$H/rules.json" "PUBLIC_RECORD_PR_SECTIONS='Summary,Why'" \
+    "PUBLIC_RECORD_ISSUE_SECTIONS=Summary" "WIP_LABEL=bot:wip" "LOW_LABEL=bot:low" "GH_TOKEN=secret-token"
+GH_TOKEN=env-token launch
+check "the lint's settings and the labels reach the tick, GH_TOKEN does not" \
+    '[ "$(cat "$FAKE_LINT_ENV")" = "$(printf "%s\n" "rules=$H/rules.json pr=Summary,Why" "issue=Summary repo=o/r&x|y\\z wip=bot:wip" "low=bot:low token=unset")" ]' \
+    "$(cat "$FAKE_LINT_ENV" 2>/dev/null)"
+write_env
 
 # A failed queue count is an error in the log, and still counts one issue so a tick runs.
 touch "$FAKE_QUEUE_FAILS"

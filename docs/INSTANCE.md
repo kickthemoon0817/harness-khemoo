@@ -23,10 +23,13 @@ name in `TICK_EXPORTS`. An empty `GH_REPO` is derived from the `origin` remote o
 repository. A name in `TICK_EXPORTS` that is not a valid variable name is reported on stderr and
 skipped.
 
-`tick.sh` also exports `TARGET_REPO` and `WORKTREE_ROOT`. No other config key reaches a tick's
-environment unless `TICK_EXPORTS` lists it. That includes `GH_TOKEN` and the `PUBLIC_RECORD_*` keys
-that the lint reads. `pr_sweep.sh` and `worktree_gc.sh` export every key, because cron gives them no
-environment and `gh` reads `GH_TOKEN`.
+`tick.sh` also exports `TARGET_REPO`, `WORKTREE_ROOT`, the lint's `PUBLIC_RECORD_RULES`,
+`PUBLIC_RECORD_PR_SECTIONS` and `PUBLIC_RECORD_ISSUE_SECTIONS`, and the label keys (`ISSUE_LABEL`,
+`WIP_LABEL`, `READY_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`, `LONG_LABEL`, `FIRST_LABEL`, `LOW_LABEL`,
+`LANE_LABEL`). None of them is secret. No other config key reaches a tick's environment unless
+`TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
+`TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
+`worktree_gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines, keeps
 only the keys it uses, and does no `$` expansion.

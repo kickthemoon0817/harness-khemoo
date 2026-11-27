@@ -82,7 +82,11 @@ if [ "${1:-}" != check ]; then
     [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] \
         || log_changed "hooks/env.sh failed (exit $rc); ticks run without it"
 fi
-export TARGET_REPO WORKTREE_ROOT
+# What the core prompt, the lint and a tick's gh calls read; none of it is secret. GH_TOKEN never
+# reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
+export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
+    ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL
+export -n GH_TOKEN
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
 compute_want() {
@@ -152,7 +156,7 @@ harness_paused() {
 queue_depth() {  # $1 = the label to count
     local out rc err token=()
     err=$(mktemp)
-    # gh reads the config's token, which the count command gets though a tick does not.
+    # gh reads the config's token; the count command gets it, a tick never does.
     [ -n "${GH_TOKEN:-}" ] && token=(GH_TOKEN="$GH_TOKEN")
     if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
         # shellcheck disable=SC2086
