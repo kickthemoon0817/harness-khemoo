@@ -30,5 +30,5 @@ sentence a newcomer can act on; cite the repository document that defines it whe
 
 ## Harness words that stay out of the record
 
-tick, slot, lease, lane, worktree, budget, "the next tick", the harness's file names and its
-state. Say the condition they imply, or nothing.
+tick, slot, lane, worktree, budget, "the next tick", the harness's file names and its state. Say
+the condition they imply, or nothing.

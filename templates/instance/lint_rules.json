@@ -1,0 +1,23 @@
+{
+  "version_words": ["SDK"],
+  "labels": ["ai:plan"],
+  "rules": [
+    {
+      "id": "scratch-path",
+      "pattern": "\\bscratch-runs/",
+      "hint": "the harness's scratch tree: cite the repository path of what it holds, at a commit"
+    },
+    {
+      "id": "device-slot",
+      "pattern": "\\bdevice slot ?\\d\\b",
+      "hint": "device bookkeeping: state the condition instead ('with no other process on the device')",
+      "prose": true
+    },
+    {
+      "id": "shorthand-target",
+      "pattern": "\\bT[1-9]\\b",
+      "hint": "name the target the first time: 'T1 (cold start under two seconds)'",
+      "blocking": false
+    }
+  ]
+}

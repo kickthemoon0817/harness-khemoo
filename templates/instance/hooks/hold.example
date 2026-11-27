@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Copy to hooks/hold and make it executable to hold the harness while something it needs is down.
+# Exit 0 means held: the launcher starts nothing and runners chain nothing, and the first line of
+# stdout is logged as the reason. Any other exit, or running past HOLD_TIMEOUT_S, means not held.
+# A tick already running finishes its own claim.
+set -u
+if ! curl -fsS --max-time 3 https://staging.example.com/health >/dev/null 2>&1; then
+    echo "staging down"
+    exit 0
+fi
+exit 1
