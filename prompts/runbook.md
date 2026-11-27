@@ -89,7 +89,7 @@ read-only.
    holding the line `harness tick pid <PID> pausing`, the worktree and the exact resume recipe —
    the launcher counts an issue whose claimants have all withdrawn, paused or died as claimable
    again, so a successor spawns for it and resumes from that block.
-   saying so and END THE TICK immediately — do not audit, do not start a kit session.
+   Then END THE TICK immediately — do not audit, do not start a kit session.
    PAUSE MEANS END: the pausing comment is the last thing a tick does before its summary. Nothing
    runs after it — no suite, no re-check, no extra probe. If more work is worth doing, it is the
    next tick's, from the recipe.

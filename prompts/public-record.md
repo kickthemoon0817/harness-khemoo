@@ -39,7 +39,8 @@ resume: build, then RS1–RS6 identity against parent-8cc9dd2e8
 ```
 
 The lint skips that block in a comment and blocks it in an issue or PR body. A `harness tick` or
-`pid N` line anywhere else in a comment is a blocking finding.
+`pid N` line anywhere else in a comment is a blocking finding. The lint also skips fenced code
+blocks, so quoted output does not block; what a fence quotes is still held to the table above.
 
 ## A PR body
 
@@ -81,7 +82,8 @@ and any reading that is a recorded value and not a bar.
 ```
 
 A PR that only changes docs or tests still carries every section; the ones that do not apply say
-so in one line.
+so in one line. The lint requires each of them except Principle checks, which belongs to a project
+whose runbook names principles; that project adds it to `PUBLIC_RECORD_PR_SECTIONS`.
 
 ## An issue body
 
@@ -114,6 +116,9 @@ line keeps that exact form: the launcher reads it.
 An issue a script files (a red suite) says what is red, at which commit, the command that reproduces
 it, the merges since the last green, and how to bisect, in repository terms. The script's own log
 path goes under a Harness trace block in a comment, never in the body.
+
+The lint requires `## Summary` and `## Ask`, the two sections every issue above carries; the
+others depend on the kind of issue.
 
 ## A comment
 
