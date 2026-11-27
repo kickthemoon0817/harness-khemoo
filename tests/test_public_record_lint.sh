@@ -9,7 +9,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # The core rules alone, whatever instance the checkout holds.
 mkdir -p "$T/no-instance"
 export HARNESS_INSTANCE_DIR="$T/no-instance"
-unset PUBLIC_RECORD_RULES
+unset PUBLIC_RECORD_RULES WORKTREE_ROOT HARNESS_HOME HARNESS_STATE
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 
@@ -122,6 +122,23 @@ check "the instance's prose rule blocks outside a fence" '[ "$rc" -eq 1 ] && gre
 rm "$T/no-instance/lint_rules.json"
 out=$(printf 'Built against SDK 106.5.0.2.\n' | python3 "$LINT" --kind comment - 2>&1); rc=$?
 check "without the rules file its version word is an address again" '[ "$rc" -eq 1 ] && grep -q "BLOCK host-address" <<<"$out"' "$out"
+
+out=$(printf 'x\n' | python3 "$LINT" --kind comment - 2>&1 >/dev/null); rc=$?
+check "an instance without lint_rules.json says only the core rules applied" \
+    '[ "$rc" -eq 0 ] && grep -q "only the core rules applied" <<<"$out"' "rc=$rc $out"
+out=$(printf 'x\n' | HARNESS_INSTANCE_DIR="$T/absent" python3 "$LINT" --kind comment - 2>&1 >/dev/null); rc=$?
+check "no instance dir at all prints no warning" '[ "$rc" -eq 0 ] && [ -z "$out" ]' "rc=$rc $out"
+
+# The harness's own trees: whatever the operator named them, a path under one blocks, fenced or not.
+roots='WORKTREE_ROOT=/srv/wt HARNESS_HOME=/opt/harness HARNESS_STATE=/var/harness-state'
+for path in /srv/wt/app-1234/src/a.py /opt/harness/bin/x /var/harness-state/logs/t.log; do
+    out=$(printf 'The run printed:\n```\nwrote %s\n```\n' "$path" | env $roots python3 "$LINT" --kind comment - 2>&1); rc=$?
+    check "a path under a harness root blocks inside a fence: $path" '[ "$rc" -eq 1 ] && grep -q "BLOCK harness-path" <<<"$out"' "$out"
+done
+out=$(printf 'Compared /srv/wtx/a and the repository path src/wt/a.py.\n' | env $roots python3 "$LINT" --kind comment - 2>&1); rc=$?
+check "a path that only shares a root's prefix is clean" '[ "$rc" -eq 0 ]' "$out"
+out=$(printf 'Wrote /srv/wt/app-1234/a.py.\n' | python3 "$LINT" --kind comment - 2>&1); rc=$?
+check "with no roots set the rule is off" '[ "$rc" -eq 0 ]' "$out"
 
 cat >"$T/custom.json" <<'JSON'
 {"version_words": ["Runtime"],

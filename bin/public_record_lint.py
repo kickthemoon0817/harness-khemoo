@@ -22,8 +22,11 @@ PUBLIC_RECORD_ISSUE_SECTIONS (comma-separated heading names) override the sectio
 The harness labels the warning names come from WIP_LABEL, READY_LABEL, SIGNOFF_LABEL, OPERATOR_LABEL,
 LONG_LABEL, LANE_LABEL, FIRST_LABEL and LOW_LABEL.
 
+Any path under WORKTREE_ROOT, HARNESS_HOME or HARNESS_STATE, each when set, blocks.
+
 The installation's rules load from PUBLIC_RECORD_RULES, else from $HARNESS_INSTANCE_DIR/lint_rules.json
-when it exists (HARNESS_INSTANCE_DIR defaults to the checkout's instance/). The file is a JSON object:
+(HARNESS_INSTANCE_DIR defaults to the checkout's instance/); an instance dir without that file is named
+on stderr on every run. The file is a JSON object:
 
     {"version_words": ["SDK"],            words a dotted quad may follow as a version, not an address
      "labels": ["ai:plan"],               more harness labels to warn on
@@ -86,9 +89,23 @@ class Rule:
     prose: bool = False
 
 
-def core_rules(version_words: Sequence[str], labels: Sequence[str]) -> tuple[Rule, ...]:
-    """Returns the rules every installation gets, blocking ones first."""
-    rules: list[Rule] = [
+def core_rules(version_words: Sequence[str], labels: Sequence[str],
+               harness_roots: Sequence[str] = ()) -> tuple[Rule, ...]:
+    """Returns the rules every installation gets, blocking ones first.
+
+    Args:
+        version_words: Words a dotted quad may follow as a version.
+        labels: Harness labels to warn on in prose.
+        harness_roots: The worktree root, the harness checkout and its state; any path under one blocks.
+    """
+    rules: list[Rule] = []
+    roots: list[str] = [root.rstrip("/") for root in harness_roots if root.rstrip("/")]
+    if roots:
+        alternatives: str = "|".join(re.escape(root) for root in sorted(set(roots), key=len, reverse=True))
+        rules.append(Rule("harness-path", re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w.-])"),
+                          "a path in the harness's own trees: name the path inside the repository at a commit",
+                          True))
+    rules += [
         Rule("host-path", re.compile(r"(?<![\w./-])(?:/home/\w+|~/|\$HOME\b|/mnt/\w+)"),
              "a path on this host: name the path inside the repository at a commit, or say the file is not in "
              "the repository", True),
@@ -211,11 +228,11 @@ class PublicRecordLint:
         self._warnings: tuple[Rule, ...] = tuple(rule for rule in rules if not rule.blocking)
 
     @staticmethod
-    def compose_rules(version_words: Sequence[str], labels: Sequence[str],
-                      installation_rules: Sequence[Rule]) -> tuple[Rule, ...]:
+    def compose_rules(version_words: Sequence[str], labels: Sequence[str], installation_rules: Sequence[Rule],
+                      harness_roots: Sequence[str] = ()) -> tuple[Rule, ...]:
         """Returns the core rules with the installation's added, one with a core rule's id replacing it."""
         replacing: dict[str, Rule] = {rule.rule_id: rule for rule in installation_rules}
-        core: tuple[Rule, ...] = core_rules((*DEFAULT_VERSION_WORDS, *version_words), (*labels,))
+        core: tuple[Rule, ...] = core_rules((*DEFAULT_VERSION_WORDS, *version_words), (*labels,), harness_roots)
         core_ids: set[str] = {rule.rule_id for rule in core}
         return (tuple(replacing.get(rule.rule_id, rule) for rule in core)
                 + tuple(rule for rule in installation_rules if rule.rule_id not in core_ids))
@@ -432,15 +449,18 @@ class PublicRecordLint:
         return missing
 
     @staticmethod
-    def rules_path() -> str | None:
-        """Returns the installation's rules file: PUBLIC_RECORD_RULES, else the instance's when it exists."""
+    def rules_path() -> tuple[str | None, str]:
+        """Returns the installation's rules file and the instance dir it was looked for in.
+
+        The file is PUBLIC_RECORD_RULES when set, else the instance's lint_rules.json when it exists.
+        """
+        home: str = os.environ.get("HARNESS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        instance: str = os.environ.get("HARNESS_INSTANCE_DIR") or os.path.join(home, "instance")
         explicit: str = os.environ.get("PUBLIC_RECORD_RULES", "")
         if explicit:
-            return explicit
-        home: str = os.environ.get("HARNESS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        candidate: str = os.path.join(os.environ.get("HARNESS_INSTANCE_DIR") or os.path.join(home, "instance"),
-                                      "lint_rules.json")
-        return candidate if os.path.isfile(candidate) else None
+            return explicit, instance
+        candidate: str = os.path.join(instance, "lint_rules.json")
+        return (candidate if os.path.isfile(candidate) else None), instance
 
     @staticmethod
     def main(argv: Sequence[str]) -> int:
@@ -478,7 +498,12 @@ class PublicRecordLint:
                              if (label := os.environ.get(name, default))]
         version_words: tuple[str, ...] = ()
         installation_rules: tuple[Rule, ...] = ()
-        rules_file: str | None = PublicRecordLint.rules_path()
+        rules_file, instance = PublicRecordLint.rules_path()
+        if rules_file is None and os.path.isdir(instance):
+            # An instance without its rules is likely a missed copy, and the lint then passes what
+            # the project's rules would block, so say so on every run.
+            print(f"public_record_lint: no lint_rules.json in {instance}; only the core rules applied",
+                  file=sys.stderr)
         if rules_file is not None:
             try:
                 version_words, extra_labels, installation_rules = load_rules_file(rules_file)
@@ -488,7 +513,9 @@ class PublicRecordLint:
             labels += extra_labels
         lint: PublicRecordLint = PublicRecordLint(
             args.repo, pr_sections, issue_sections,
-            PublicRecordLint.compose_rules(version_words, labels, installation_rules))
+            PublicRecordLint.compose_rules(version_words, labels, installation_rules,
+                                           [os.environ.get(name, "") for name in
+                                            ("WORKTREE_ROOT", "HARNESS_HOME", "HARNESS_STATE")]))
         kind: str
         body: str
         try:
