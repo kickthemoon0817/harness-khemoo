@@ -100,7 +100,7 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
     cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
     lane=1
   else
-    cmd=("$real" "$@"); opts=(); lane=${WORV_LOCAL_LANE:-}; [ -n "$listed_lane" ] && lane=1
+    cmd=("$real" "$@"); orig=("$@"); opts=(); lane=${WORV_LOCAL_LANE:-}; [ -n "$listed_lane" ] && lane=1
     if [ "${1:-}" = run ]; then
       shift
       while [ "$#" -gt 0 ]; do
@@ -113,7 +113,8 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
         esac
       done
     fi
-    [ "${#cmd[@]}" -gt 0 ] || exec "$real" "$@"
+    # A detached run is not waited on, bounded or handed back: it goes to docker whole.
+    [ "${#cmd[@]}" -gt 0 ] || exec "$real" "${orig[@]}"
   fi
   # The harness's own runs here (a tick's, or a lane run marked WORV_LOCAL_LANE=1 by
   # bin/build_host.sh or bin/slow_set.sh) share the owner's machine: one at a time under
