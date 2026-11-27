@@ -1,0 +1,22 @@
+[
+ {
+  "number": 2499,
+  "title": "test: refresh the device record",
+  "url": "https://github.com/example/repo/pull/2499",
+  "mergedAt": "2026-11-26T01:20:00Z",
+  "baseRefName": "ai/manure-mpm",
+  "author": {
+   "login": "someone"
+  }
+ },
+ {
+  "number": 2496,
+  "title": "docs: add the reading of the offers",
+  "url": "https://github.com/example/repo/pull/2496",
+  "mergedAt": "2026-11-26T01:24:00Z",
+  "baseRefName": "ai/manure-mpm",
+  "author": {
+   "login": "someone"
+  }
+ }
+]

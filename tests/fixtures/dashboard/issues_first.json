@@ -1,0 +1,47 @@
+[
+ {
+  "number": 2495,
+  "title": "fix: a free body on material holds only near a node plane",
+  "url": "https://github.com/example/repo/issues/2495",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "Depends on (merged first): #2499\n",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai"
+    },
+    {
+     "name": "ai:plan"
+    },
+    {
+     "name": "ai:fable"
+    },
+    {
+     "name": "ai:first"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ },
+ {
+  "number": 2600,
+  "title": "fix: a take-first issue outside the queue label",
+  "url": "https://github.com/example/repo/issues/2600",
+  "updatedAt": "2026-11-26T01:00:00Z",
+  "body": "",
+  "labels": {
+   "nodes": [
+    {
+     "name": "ai:first"
+    }
+   ]
+  },
+  "comments": {
+   "totalCount": 0,
+   "nodes": []
+  }
+ }
+]

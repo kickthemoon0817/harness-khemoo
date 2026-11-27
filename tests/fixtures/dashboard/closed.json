@@ -1,0 +1,14 @@
+[
+ {
+  "number": 2492,
+  "title": "test: the whole doctest set",
+  "url": "https://github.com/example/repo/issues/2492",
+  "closedAt": "2026-11-26T01:00:00Z"
+ },
+ {
+  "number": 2310,
+  "title": "old close outside the window",
+  "url": "https://github.com/example/repo/issues/2310",
+  "closedAt": "2026-11-25T10:00:00Z"
+ }
+]

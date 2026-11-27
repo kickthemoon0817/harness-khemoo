@@ -17,8 +17,9 @@ crontab -r
 until [ "$(pgrep -cf '^claude -p')" -eq 0 ]; do sleep 20; done
 ```
 
-A tick running a long verification can take up to its budget (~60 min) to finish. That is
-normal, not a hang.
+A tick running a long verification can take up to its budget (set in the tick prompt) to
+finish. That is normal, not a hang. Runners chain ticks while work is queued; a commented-out
+cron line or a `state/paused` file stops each chain at its next tick boundary.
 
 ## Reading the state
 
@@ -82,10 +83,20 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
 
 - **Read the tick logs.** They are written for a human and contain the honest scope of each
   claim ("compile-verified only", "gate skipped because…"). Skimming PR titles is not the same.
+- **Audit the public record.** `bin/public_record_lint.py --audit prs --last 20 --base <branch>`
+  (and `--audit issues --label <label>`) tables the last bodies with their blocking findings. A
+  body with a blocking finding was posted around the lint, or by a hand that skipped it; the fix
+  is a rewrite of that body, and a runbook line if the cause is a rule that asks for host detail.
+  `--pr N` and `--issue N` lint one body; the issue bodies you write yourself are held to the
+  same contract, because ticks copy their shape.
 - **Keep the runbook current.** When you rule on something — a convention's meaning, a merge
   policy, an excluded approach — write it into the runbook. A correction that lives only in
   chat will be re-litigated by the next tick.
 - **Re-scope deliberately.** Discovery, fixing, and porting want different priorities. Say
   which phase you are in at the top of the runbook.
 - **Watch the weekly window, not just the 5-hour one.** The 5-hour recovers on its own; the
-  weekly is what actually ends a long run.
+  weekly is what actually ends a long run. The harness stops each window short of 90 %
+  (`USAGE_CEILING_PCT`); `bin/usage_ok.sh` prints the reading.
+- **Pausing.** `touch state/paused` (or comment out the `tick.sh` cron line): the launcher
+  starts nothing and runners chain nothing. A tick already running finishes its claim, so
+  stop one that must not go on by its PID.

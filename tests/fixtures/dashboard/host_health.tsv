@@ -1,0 +1,8 @@
+time	host	connect_s	upload_mb_s	load1	nproc	gpu_util_pct	gpu_mem_used_mb	status
+2026-11-26T01:30:01Z	ci@worker-a.local	0.12	65.68	4.03	16	0	551	ok
+2026-11-26T01:30:01Z	ci@192.0.2.6	0.17	21.82	8.14	24	0	20	ok
+2026-11-26T01:33:01Z	ci@worker-a.local	0.15	65.69	4.98	16	32	5942	ok
+2026-11-26T01:33:01Z	ci@192.0.2.6	0.16	timeout	8.17	24	0	20	slow
+not a row
+2026-11-26T01:36:01Z	ci@worker-a.local	0.14	64.10	5.50	16	63	5940	ok
+2026-11-26T01:36:01Z	ci@192.0.2.6	-	-	-	-	-	-	down

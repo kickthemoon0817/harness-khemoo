@@ -32,9 +32,19 @@ Ordered cheapest-first because it runs every couple of minutes:
 
 ### Runner (`tick.sh runner <max> <delay>`)
 
-Sleeps for its stagger, takes the first free slot via `flock`, and runs one `claude -p`
+Sleeps for its stagger, takes the first free slot via `flock`, and runs a `claude -p`
 invocation with the tick prompt. If no slot is free it exits silently — losing the race is a
 normal outcome, not an error.
+
+A runner keeps its slot and chains: when a tick ends, it re-reads usage and the queue and starts
+the next tick at once on a fresh context, so work finished early is followed immediately rather
+than at the next cron firing. It stops when the queue is empty, usage no longer allows its slot, a
+tick ended in under `CHAIN_MIN_TICK_S` (nothing claimable, or an error), after `MAX_CHAIN` ticks,
+or when the harness is paused (cron line commented out, or `state/paused`).
+
+Each tick runs on the best model in the priority list (`state/tick-model`, else `TICK_MODELS`)
+that is not cooling down. A tick that dies on a model's usage limit marks that model in
+`state/model-cooldown/` for `MODEL_COOLDOWN_S` and re-runs at once on the next model.
 
 The stagger exists because two ticks starting in the same second will read the same unclaimed
 issue list and claim the same issue. Staggering is cheaper and more robust than a distributed
@@ -49,10 +59,14 @@ the process exits, so a crashed tick never leaks a slot.
 
 ### Allocator
 
-Maps `max(fiveHourPercent, weeklyPercent)` to a cap. Using the *worse* window means a healthy
-5-hour window cannot mask an exhausted weekly one. The bands step down rather than cut off, so
-the harness degrades to one careful tick before stopping entirely at 95%, leaving the last
-slice of budget for the human.
+Keeps both rate-limit windows under `USAGE_CEILING_PCT` (90 %), leaving the last tenth of each
+for the human. Each window maps to its own cap and the smaller one wins, so a healthy 5-hour
+window cannot mask an exhausted weekly one. A window steps down to half width, then one slot,
+then none, and stops well under the ceiling, because the ticks already running keep spending
+until they end: the 5-hour window fills several times faster, so it stops at 80 % and the
+weekly one at 88 %. With no fresh reading nothing starts. The ceiling itself is held inside
+the ticks: each runs `bin/usage_ok.sh` before starting work and pauses two points under it, so
+its wind-down stays under the ceiling too.
 
 Reading percentages rather than counting tokens keeps the harness honest about usage it did
 not cause — the human's own sessions consume the same budget.
@@ -81,7 +95,8 @@ entire history in the GitHub UI, and any tick can resume any other tick's work f
 |---|---|
 | Tick crashes | Kernel releases the slot; PID-liveness frees the claim and lease |
 | Network outage | Ticks exit with `exit=1`; cron retries; nothing corrupted |
-| Rate limit exhausted | Allocator reaches 0 and stops spawning; in-flight ticks finish |
+| Rate limit exhausted | Allocator reaches 0 and stops spawning; in-flight ticks finish; chains stop at the next boundary |
+| One model's limit reached | The tick re-runs on the next model; that model cools down; the launcher spawns nothing while every model cools |
 | Two ticks race one issue | Stagger plus label claim; the loser picks the next issue |
 | Resource orphaned | Next tick detects a dead lease PID, cleans up, reclaims |
 | Launcher missed | Stateless recompute; the next firing catches up |
@@ -93,4 +108,6 @@ entire history in the GitHub UI, and any tick can resume any other tick's work f
 **No inter-tick messaging** — ticks coordinate through issue labels; anything richer would
 create states a human cannot inspect.
 **No retry logic in the harness** — a failed tick just ends; the next firing re-derives what to
-do. Retries hide problems that logs should surface.
+do. Retries hide problems that logs should surface. The one exception is a model's usage limit,
+which says nothing about the work: that tick re-runs once per remaining model, and the trailer
+in its log names the model each attempt used.

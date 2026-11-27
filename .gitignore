@@ -1,2 +1,5 @@
 config/harness.env
 state/
+__pycache__/
+
+.claude/
