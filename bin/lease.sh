@@ -150,7 +150,12 @@ LOCAL_OFF_FILE="$LOCKS/local-card-off"
 local_off() { [ -n "$REMOTE_CARD_HOST" ] && { [ -e "$LOCAL_OFF_FILE" ] || [ -n "$HARNESS_ONLY_SCOPE" ]; }; }
 # The slots a whole-card or device run looks at: the card that runs it.
 card_slots() { if local_off; then host_slots "$(host_index "$REMOTE_CARD_HOST")"; else seq 1 "$GPU_SLOTS"; fi; }
-remote_env() { local_off && echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"; }
+# The daemon a grant's runs go to: the remote card's over ssh, or this host's own for a requester
+# the harness keeps off this host (bin/remote-env.sh), whose DOCKER_HOST names no socket.
+grant_env() {
+  if local_off; then echo " DOCKER_HOST=ssh://$REMOTE_CARD_HOST PATH=$H/bin/remote-docker:\$PATH"
+  elif [ -n "${WORV_LOCAL_OFF_DOCKER_HOST:-}" ]; then echo " DOCKER_HOST=unix:///var/run/docker.sock"; fi
+}
 # A device doctest run takes no kit slot: it holds this file, and the card's
 # memory, read at the acquire, says whether it fits beside the running kits.
 DEVICE_FILE="$LOCKS/device.lease"
@@ -400,7 +405,7 @@ case "${1:-}" in
       fi
       echo "$issue $pid $(date -u +%FT%TZ) domain=0 device" > "$DEVICE_FILE"
       echo "ACQUIRED device file=$DEVICE_FILE (card ${used}/${total} MiB used)$(local_off && echo " remote=$REMOTE_CARD_HOST")"
-      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(remote_env)"
+      echo "export MANURE_GATE_LEASE_FILE=$DEVICE_FILE$(grant_env)"
       exit 0
     fi
     if [ "$stated" = "--all-remote" ]; then
@@ -537,7 +542,7 @@ case "${1:-}" in
           && echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) held-for-all" > "$rf"
       done
       echo "ACQUIRED slot=$primary file=$f container=$c domain=$d exclusive=all${cr:+ cache=$cr}$(local_off && echo " remote=$REMOTE_CARD_HOST")"
-      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(remote_env)"
+      echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(grant_env)"
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
@@ -648,7 +653,7 @@ case "${1:-}" in
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d${render:+ render}" > "$f"
     rm -f "$LOCKS/slot-wait.$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
-    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}"
+    echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(grant_env)"
     ;;
   prioritize)
     exec 8>"$K"; flock 8
