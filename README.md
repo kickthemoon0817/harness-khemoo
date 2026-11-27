@@ -162,6 +162,12 @@ an empty folder there is the tick's mkdir claim, a missing one is claimed, a ful
 the baseline runner, files to collect, host load sampling and the head check.
 `tests/test_arm_queue.sh` runs it against fake lease, iter, docker, card and host commands.
 
+## Tests
+
+Each `tests/test_*.sh` builds a scratch harness home with fake commands and prints one `PASS`
+or `FAIL` line a case; `tests/test_evidence_trim.py` runs under `python3`. The suites need Linux
+with bash 4+, `flock`, `lslocks`, `bc` and `zstd`, and GNU `stat -c` and `date -d`.
+
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — why the design is shaped this way

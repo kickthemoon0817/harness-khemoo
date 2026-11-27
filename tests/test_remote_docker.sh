@@ -166,9 +166,12 @@ LD=unix:///var/run/docker.sock
 export LOCAL_LANE_LOCK="$T/lane.lock"
 # The host has room for every lane run unless a case says otherwise.
 printf 'MemTotal: 65000000 kB\nMemAvailable: 60000000 kB\n' > "$T/meminfo.roomy"; export LOCAL_LANE_MEMINFO="$T/meminfo.roomy"
-# Bind sources must sit under the user's tmp_workspace, so these cases mount a scratch dir there.
-LW=$(mktemp -d -p "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace" .remote-docker-test.XXXXXX); mkdir -p "$LW/ro"
-trap 'rm -rf "$T" "$LW"' EXIT
+# Bind sources must sit under the user's tmp_workspace; a fake passwd home under $T keeps these
+# cases off the real one.
+mkdir -p "$T/home/tmp_workspace"
+printf '#!/usr/bin/env bash\necho "user:x:%s:%s::%s:/bin/bash"\n' "$(id -u)" "$(id -g)" "$T/home" > "$T/fake/getent"
+chmod +x "$T/fake/getent"
+LW=$(mktemp -d -p "$T/home/tmp_workspace" .remote-docker-test.XXXXXX); mkdir -p "$LW/ro"
 local_refused() {  # <name> <args…>
   local name=$1; shift
   : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" "$@" 2> "$T/guard.err"; rc=$?
