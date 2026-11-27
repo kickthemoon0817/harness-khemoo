@@ -34,7 +34,7 @@ check "the other one is closed too" 'grep -q "PATCH repos/org/repo/pulls/2030 -f
 check "a pull request whose issue is open is left alone" '! grep -q "2472" "$CALLS"' "$(cat "$CALLS")"
 check "each close is logged with its issue" '[ "$(grep -c "closed PR #" "$T/h/state/logs/pr_sweep.log")" = 2 ] && grep -q "closed PR #2386 (ai/2382-converted-push): #2382 closed" "$T/h/state/logs/pr_sweep.log"' "$(cat "$T/h/state/logs/pr_sweep.log")"
 
-: > "$CALLS"; printf '%s\n' "1 ai/manure" "2 ai/9999-gone" > "$FX/prs"
+: > "$CALLS"; printf '%s\n' "1 ai/docs" "2 ai/9999-gone" > "$FX/prs"
 bash "$here/bin/pr_sweep.sh"
 check "a branch without an issue number, or an issue that cannot be read, is left alone" '[ ! -s "$CALLS" ]' "$(cat "$CALLS")"
 
