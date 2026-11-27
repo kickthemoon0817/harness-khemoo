@@ -800,7 +800,11 @@ fleet --version | --help
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
 - Without `--json`, when stdout is a terminal, `logs` and `dispatch --wait` replace every control
   character in the output other than tab, LF and CR (ESC and the rest of C0, DEL, and C1
-  U+0080–U+009F) with U+FFFD, so a remote agent cannot drive the terminal with escape sequences.
+  U+0080–U+009F), every bidi control (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C) and
+  every zero-width character (U+200B–U+200D, U+2060, U+FEFF) with U+FFFD, so a remote agent
+  cannot drive the terminal with escape sequences or make text read differently from what it
+  is. Strings a device reports in tables and error messages get the same treatment, without the
+  tab, LF and CR exception.
   `--raw` writes the output unchanged. When stdout is not a terminal (a pipe or a file), the
   output is always written unchanged, so logs keep the agent's exact bytes.
 - `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits
