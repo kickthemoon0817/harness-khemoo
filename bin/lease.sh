@@ -274,7 +274,7 @@ note_wait() {
 # a 16 GB card), while a rendering kit fits beside an identity kit (5.1 GB).
 # render_busy says another tick's rendering kit is live on the card a grant is
 # for, so a render wait holds no place in that card's line: the local card's
-# here, the remote card's inside remote_grant.
+# here, each remote card's inside remote_grant.
 render_busy=0
 slots_render_live() {
   local s f hp
@@ -297,7 +297,7 @@ slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
 # exits 0, or returns 1. A remote slot's cache stays under /tmp on that host.
 remote_grant() {
   [ -n "$REMOTE_CARD_HOSTS" ] || return 1
-  local s f hp take="" host="" first i n free_r stale_r kits_r render_r
+  local s f hp take="" host="" first i free_r stale_r kits_r render_r render_busy
   # This tick's own remote slot first, on whichever host holds it.
   for s in $(remote_slots); do
     f=$(slot_file $s); [ -s "$f" ] || continue
@@ -305,9 +305,13 @@ remote_grant() {
     if [ "$hp" = "$pid" ] && kill -0 "$hp" 2>/dev/null; then take=$s; host=$(slot_host $s); break; fi
   done
   if [ -z "$take" ]; then
-    first=$(slot_first_issue)
-    [ -n "$first" ] && [ "$first" != "$issue" ] && return 1
     for i in $(host_order); do
+      # Each host keeps its own line: a render wait holds no place on a host
+      # whose rendering kit is live.
+      render_busy=0
+      slots_render_live $(host_slots $i) && render_busy=1
+      first=$(slot_first_issue)
+      [ -n "$first" ] && [ "$first" != "$issue" ] && continue
       free_r=""; stale_r=""; kits_r=0; render_r=0
       for s in $(host_slots $i); do
         f=$(slot_file $s); hp=""
