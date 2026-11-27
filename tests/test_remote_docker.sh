@@ -246,6 +246,8 @@ echo 2534 > "$G/state/locks/local-card-issues"
 check "a listed issue's tick runs its container with the card, as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run -d --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -e NVIDIA_VISIBLE_DEVICES=void -e WORV_BUILD_JOBS=13 img true 2> "$T/guard.err"; rc=$?
 check "a listed issue's card-less run is a lane run: bounded" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run --cpus=8 --memory=12g --rm -e NVIDIA_VISIBLE_DEVICES=void -e WORV_BUILD_JOBS=4 img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" run --rm -d --name worv-iter-ros2cli -e NVIDIA_VISIBLE_DEVICES=void img sleep 1 2> "$T/guard.err"; rc=$?
+check "a listed issue's detached card-less run reaches docker whole" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run --rm -d --name worv-iter-ros2cli -e NVIDIA_VISIBLE_DEVICES=void img sleep 1$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 : > "$LOG"; DOCKER_HOST=$LD "$G/bin/remote-docker/docker" exec worv-iter-ros2cli mkdir -p /tmp/x 2> "$T/guard.err"; rc=$?
 check "a listed issue's tick runs other commands as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD exec worv-iter-ros2cli mkdir -p /tmp/x$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 rm -f "$G/state/locks/local-card-issues" "$G/state/locks/claim.2534"
@@ -273,6 +275,14 @@ waited=$(echo "$(date +%s.%N) - $start" | bc)
 check "a lane run waits while the host lacks its memory, then runs" 'awk -v w="$waited" "BEGIN { exit !(w > 1.5) }" && grep -q "waits for 16384 MiB available on this host (3906 MiB now)" "$T/guard.err" && grep -q "run --cpus=8 --memory=12g --rm img true$" "$LOG"' "waited=$waited $(cat "$T/guard.err") $(calls)"
 : > "$LOG"; WORV_LOCAL_LANE=1 LOCAL_LANE_LOCK="$T/lane.lock" LOCAL_LANE_MEMINFO="$T/meminfo" DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"
 check "a lane run with the memory available starts at once, silently" '! [ -s "$T/guard.err" ] && grep -q "run --cpus=8 --memory=12g --rm img true$" "$LOG"' "$(cat "$T/guard.err")"
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+
+# A detached run outside a tick reaches docker whole, the alias mount included.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
+printf '[aliases]\n"omniverse://a/" = "omniverse://b/"\n' > "$G/state/ov-aliases.toml"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm -d --name k -v /x:/y img true 2> "$T/guard.err"; rc=$?
+check "a detached run keeps run, the alias mount and every option before -d" '[ "$rc" = 0 ] && grep -q "run -v $G/state/ov-aliases.toml:/root/.nvidia-omniverse/config/omniverse.toml:ro --rm -d --name k -v /x:/y img true$" "$LOG"' "rc=$rc $(calls)"
+rm -f "$G/state/ov-aliases.toml"
 printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
 
 echo "pass=$pass fail=$fail"
