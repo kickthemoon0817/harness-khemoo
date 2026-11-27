@@ -13,8 +13,8 @@ Each remote host is its own lane, with its own locks. The single remote lock nam
 
 | host | compile lock (`WORV_DEV_BUILD_LOCK=`) | suite lock (`flock`) |
 |---|---|---|
-| `<gpu-host-a>` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
-| `<gpu-host-b>` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
+| `<gpu-host-a>` | `/tmp/worv-dev-build-remote-<lock-name-a>.lock` | `/tmp/worv-fast-set-remote-<lock-name-a>.lock` |
+| `<gpu-host-b>` | `/tmp/worv-dev-build-remote-<lock-name-b>.lock` | `/tmp/worv-fast-set-remote-<lock-name-b>.lock` |
 
 **Which host compiles (operator, 2026-11-26).** Before each `tools/dev/iter.sh build`, run `eval "$($HARNESS_HOME/bin/build_host.sh)"`. It exports `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` for the first host whose compile lock is free, and leaves out a host that a cost read holds whole. It also leaves out the card a waiting cost read asks for, so that card can go quiet (a wait for any card keeps the quieter unheld host free). When every lock is taken, it picks the host with the fewest waiters. The build's outputs copy back here, so the arms may run on either card. Never queue a compile behind another host's compile while the other lane is free. With `state/local-cpu-lane` present, this host is a third lane, after the remote ones: its export line names `DOCKER_HOST=unix:///var/run/docker.sock`, the host's own dev build lock (shared with the owner's builds) and the builder image the file names. Every line sets `WORV_BUILDER_IMAGE`, so eval it again before each compile. The local lane is for compiles and card-less host tests; a device run, AOT or anything with a card stays on a remote host. CPU-only suites belong on it, so the remote cards stay free for runs that need one: the scheduled slow and fast sets run there, and a device-record run's host stage runs there too, before it takes a remote card for the device stage alone.
 

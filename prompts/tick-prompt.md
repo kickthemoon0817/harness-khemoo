@@ -7,12 +7,13 @@ document your issue names, all under $PLAN_DIR/, and
 $TARGET_REPO/CLAUDE.md. Do not read design.md: its plan of record is void.
 
 PLACEHOLDERS: the prompts name this installation's paths and hosts by placeholder. `$HARNESS_HOME`
-(this harness's checkout), `$TARGET_REPO` (your starting directory), `$WORKTREE_ROOT` and `$PLAN_DIR`
-are in your environment, set from `$HARNESS_HOME/config/harness.env`. `<gpu-host-a>` (RTX 5090) and
+(this harness's checkout), `$TARGET_REPO` (your starting directory), `$WORKTREE_ROOT`, `$PLAN_DIR` and
+`$ASSET_COPY_DIR` (written `<asset-copy-dir>`) are in your environment. `<gpu-host-a>` (RTX 5090) and
 `<gpu-host-b>` (RTX 5080) are the remote cards' `user@host` targets: `$HARNESS_HOME/bin/lease.sh status`
-lists them and `BUILD_LOCK_NAMES` in harness.env gives each its lock name (`5090`, `w03`).
-`<nucleus-server>` is `NUCLEUS_HOST` and `<asset-copy-dir>` is `ASSET_COPY_DIR` in harness.env.
-`<harness-host>` is this machine's name.
+lists them. `<lock-name-a>` and `<lock-name-b>` are their lock names: the `WORV_DEV_BUILD_LOCK` that
+`$HARNESS_HOME/bin/build_host.sh` prints for a host ends in `worv-dev-build-remote-<name>.lock`.
+`<nucleus-server>` is the host on the `nucleus host:` line `$HARNESS_HOME/bin/nucleus_ok.sh` prints.
+`<harness-host>` is this machine's name. Never read `config/harness.env`: it holds credentials.
 
 THE PUBLIC RECORD: everything you post to GitHub — an issue body, a PR body, a comment, a close
 summary — is read by people who have the repository and nothing else, and it is written to

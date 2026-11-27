@@ -14,8 +14,11 @@
 #                                        that fix arm (age + idle p50 within tolerance)
 set -euo pipefail
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# A WORV_IMAGE the caller exports still wins over config/harness.env's.
+caller_image="${WORV_IMAGE:-}"
 # shellcheck source=/dev/null
 [ -r "$H/config/harness.env" ] && . "$H/config/harness.env"
+WORV_IMAGE="${caller_image:-${WORV_IMAGE:-}}"
 REPO="${TARGET_REPO:?set TARGET_REPO in config/harness.env}"
 : "${MAX_AGE_H:=24}" "${IDLE_TOL_MS:=0.5}"
 mode="${1:?dir|new|tree|check}"; shift

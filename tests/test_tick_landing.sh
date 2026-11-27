@@ -29,6 +29,8 @@ EOF
 chmod +x "$H/fakebin/claude" "$H/fakebin/queue" "$H/fakebin/crontab" "$H/livebin/claude"
 cat > "$H/config/harness.env" <<EOF
 TARGET_REPO=$H/target
+WORKTREE_ROOT=$H/worktrees
+PLAN_DIR=$H/plan
 QUEUE_DEPTH_CMD=$H/fakebin/queue
 CLAUDE_BIN=$H/fakebin/claude
 CLAUDE_FLAGS=

@@ -19,8 +19,11 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 : "${HARNESS_STATE:=$HARNESS_HOME/state}"
 : "${TARGET_REPO:?set TARGET_REPO in config/harness.env}"
-# The prompts name these paths by variable, so the tick's shell must carry them.
-export HARNESS_HOME TARGET_REPO WORKTREE_ROOT PLAN_DIR
+: "${WORKTREE_ROOT:?set WORKTREE_ROOT in config/harness.env}"
+: "${PLAN_DIR:?set PLAN_DIR in config/harness.env}"
+# The prompts name these by variable, so the tick's shell must carry them. NUCLEUS_HOST stays
+# out: exported, it would outrank the operator's state/nucleus/host redirect in nucleus_ok.sh.
+export HARNESS_HOME TARGET_REPO WORKTREE_ROOT PLAN_DIR ASSET_COPY_DIR
 : "${ISSUE_LABEL:=ai}"
 : "${WIP_LABEL:=ai:wip}"
 : "${MAX_SLOTS:=8}"

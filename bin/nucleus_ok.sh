@@ -11,6 +11,7 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 [ -z "${NUCLEUS_HOST:-}" ] && [ -s "$HARNESS_HOME/state/nucleus/host" ] && NUCLEUS_HOST=$(tr -d '[:space:]' < "$HARNESS_HOME/state/nucleus/host")
 [ -z "${NUCLEUS_HOST:-}" ] && [ -r "$HARNESS_HOME/config/harness.env" ] && NUCLEUS_HOST=$(. "$HARNESS_HOME/config/harness.env" >/dev/null 2>&1; printf '%s' "${NUCLEUS_HOST:-}")
 : "${NUCLEUS_HOST:?set NUCLEUS_HOST in config/harness.env}"; : "${NUCLEUS_PORT:=3009}"; : "${NUCLEUS_STABLE_S:=300}"
+echo "nucleus host: $NUCLEUS_HOST"
 status="$HARNESS_HOME/state/nucleus/status"
 now=$(date +%s)
 if [ -r "$status" ]; then

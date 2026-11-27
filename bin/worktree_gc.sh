@@ -17,7 +17,7 @@ export HARNESS_HOME="$H"
 [ -r "$H/config/harness.env" ] && set -a && . "$H/config/harness.env" && set +a
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 WT="${WORKTREE_ROOT:-$HOME/tmp_workspace/ai-worktrees}"
-REPO="${MAIN_REPO:-$HOME/tmp_workspace/isaac_sim}"
+REPO="${MAIN_REPO:-${TARGET_REPO:?set TARGET_REPO in config/harness.env}}"
 : "${GH_REPO:=MaumAI-Company/isaac_sim}"; : "${KEEP_HEADS:=3}"; : "${KEEP_HOURS:=6}"
 apply=0; [ "${1:-}" = "--apply" ] && apply=1
 LOG="$H/state/logs/worktree_gc.log"
