@@ -107,4 +107,5 @@ An instance prompt may narrow these rails, never loosen them.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): why the design has this shape
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md): running it, reading the logs, recovery
 - [`docs/LESSONS.md`](docs/LESSONS.md): failure modes seen in long runs, and their fixes
+- [`docs/FLEET.md`](docs/FLEET.md): fleet, the optional Rust layer that monitors devices and agent sessions and dispatches to them
 - [`prompts/public-record.md`](prompts/public-record.md): how every issue, PR and comment is written
