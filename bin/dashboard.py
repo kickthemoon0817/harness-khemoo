@@ -10,6 +10,8 @@ From <harness home>/config/harness.env it reads GH_TOKEN, GH_REPO and the label 
 key; the token reaches `gh` through its environment and is never shown. bin/dashboard.sh starts this detached.
 """
 import argparse
+import gzip
+import hashlib
 import hmac
 import json
 import os
@@ -18,19 +20,47 @@ import signal
 import sys
 import threading
 import urllib.parse
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
-from typing import ClassVar
+from typing import Any, ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dashboard_lib.collector import Collector, DashboardConfig  # noqa: E402
 from dashboard_lib.github import GitHubClient  # noqa: E402
 from dashboard_lib.harness_env import HarnessEnvReader  # noqa: E402
-from dashboard_lib.models import JsonDict  # noqa: E402
 from dashboard_lib.queue import QueueLabels  # noqa: E402
 from dashboard_lib.render import HtmlRenderer  # noqa: E402
+
+
+@dataclass(frozen=True)
+class Payload:
+    """
+    Ready-to-send representations, each validated against its exact wire bytes.
+    """
+
+    content_type: str
+    plain: bytes
+    plain_tag: str
+    compressed: bytes
+    compressed_tag: str
+
+    @classmethod
+    def prepare(cls, content_type: str, body: str) -> "Payload":
+        """
+        Args:
+            content_type: Media type and charset.
+            body: Scrubbed response text.
+
+        Returns:
+            Both encodings with strong validators.
+        """
+        plain = body.encode("utf-8")
+        compressed = gzip.compress(plain, compresslevel=3, mtime=0)
+        return cls(content_type, plain, f'"{hashlib.sha256(plain).hexdigest()}"',
+                   compressed, f'"{hashlib.sha256(compressed).hexdigest()}"')
 
 
 class DashboardHttpServer(ThreadingHTTPServer):
@@ -48,16 +78,23 @@ class DashboardHttpServer(ThreadingHTTPServer):
             port: The port on 127.0.0.1; 0 picks a free one.
             collector: Builds the snapshots.
             renderer: Renders them as HTML.
-            refresh_s: The page's reload interval.
+            refresh_s: The browser refresh interval.
             secret_values: Strings that must never leave in a response.
-            access_token: The token `/` and `/api/state` require as `?t=`.
+            access_token: The token required on every route as `?t=`.
         """
         super().__init__(("127.0.0.1", port), DashboardRequestHandler)
         self.collector: Collector = collector
         self.renderer: HtmlRenderer = renderer
-        self.refresh_s: int = refresh_s
+        self.refresh_s: int = max(1, refresh_s)
         self.secret_values: tuple[str, ...] = tuple(value for value in secret_values if value)
         self.access_token: str = access_token
+        script = Path(__file__).with_name("dashboard_lib").joinpath("dashboard.js").read_text(encoding="utf-8")
+        self.static: dict[str, Payload] = {
+            "/dashboard.js": Payload.prepare("text/javascript; charset=utf-8", self.scrub(script)),
+            "/healthz": Payload.prepare("text/plain; charset=utf-8", "ok\n"),
+        }
+        self.routes: dict[str, Payload] = {}
+        self.prior_fragments: dict[str, Payload] = {}
         bound_port: int = self.server_address[1]
         self.allowed_hosts: frozenset[str] = frozenset({f"127.0.0.1:{bound_port}", f"localhost:{bound_port}"})
 
@@ -68,6 +105,37 @@ class DashboardHttpServer(ThreadingHTTPServer):
             The page's URL, access token included.
         """
         return f"http://127.0.0.1:{self.server_address[1]}/?t={self.access_token}"
+
+    def publish_in_place(self) -> None:
+        """
+        Collects and prepares one generation before swapping the handler's route table.
+        """
+        snapshot = self.collector.snapshot()
+        raw = json.dumps(snapshot, separators=(",", ":"), default=str)
+        if any(json.dumps(value)[1:-1] in raw for value in self.secret_values):
+            snapshot = self._scrub_values(snapshot)
+            raw = json.dumps(snapshot, separators=(",", ":"), default=str)
+        previous = self.routes
+        if "/api/state" in previous and previous["/api/state"].plain == raw.encode():
+            return
+        sections = {name: self.scrub(fragment) for name, fragment in
+                    self.renderer.sections(snapshot, self.access_token).items()}
+        routes = dict(self.static)
+        versions: dict[str, str] = {}
+        markup = "text/html; charset=utf-8"
+        json_type = "application/json; charset=utf-8"
+        for name, fragment in sections.items():
+            digest = hashlib.sha256(fragment.encode()).hexdigest()
+            path = "/api/sections/" + digest
+            versions[name] = digest
+            routes[path] = previous.get(path) or Payload.prepare(markup, fragment)
+        page = self.renderer.document(sections, versions, self.refresh_s, self.access_token)
+        routes["/"] = routes["/index.html"] = Payload.prepare(markup, self.scrub(page))
+        routes["/api/state"] = Payload.prepare(json_type, raw)
+        routes["/api/sections"] = Payload.prepare(json_type, json.dumps(versions, separators=(",", ":")))
+        # A tab can receive the old index just before publication. Keep its fragments for one interval.
+        self.prior_fragments = {path: body for path, body in previous.items() if path.startswith("/api/sections/")}
+        self.routes = routes
 
     def scrub(self, body: str) -> str:
         """
@@ -83,27 +151,42 @@ class DashboardHttpServer(ThreadingHTTPServer):
             body = body.replace(value, "[redacted]")
         return body
 
+    def _scrub_values(self, value: Any) -> Any:
+        """
+        Args:
+            value: A snapshot value before HTML escaping or JSON serialization.
+
+        Returns:
+            The same structure with configured secrets removed from strings.
+        """
+        if isinstance(value, dict):
+            return {self.scrub(key) if isinstance(key, str) else key: self._scrub_values(item)
+                    for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._scrub_values(item) for item in value]
+        return self.scrub(value) if isinstance(value, str) else value
+
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     """
-    Answers `/` (HTML), `/api/state` (JSON) and `/healthz`; everything else is 404.
+    Serves the last published dashboard, its sections, the client script and readiness.
 
     A request whose Host header is not `127.0.0.1:<port>` or `localhost:<port>` gets 421, so a page that rebinds
-    its own name to 127.0.0.1 cannot read the dashboard. `/` and `/api/state` also need this start's access
-    token as `?t=`, else 403. Every response forbids framing, sniffing, cross-origin reads, referrers and any
-    source but itself.
+    its own name to 127.0.0.1 cannot read the dashboard. Every route requires this start's access token.
     """
 
     server: DashboardHttpServer
     server_version: ClassVar[str] = "harness-dashboard"
     SECURITY_HEADERS: ClassVar[tuple[tuple[str, str], ...]] = (
-        ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        ("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; "
+                                    "style-src 'unsafe-inline'; img-src data:; "
                                     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
         ("Referrer-Policy", "no-referrer"),
-        ("Cache-Control", "no-store"),
+        ("Cache-Control", "private, no-cache"),
+        ("Vary", "Accept-Encoding"),
     )
 
     def do_GET(self) -> None:
@@ -112,26 +195,53 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         """
         host: str = (self.headers.get("Host") or "").strip().lower()
         if host not in self.server.allowed_hosts:
-            self._send(421, "text/plain; charset=utf-8", "misdirected request: use 127.0.0.1 or localhost\n")
+            self._error(421, "misdirected request: use 127.0.0.1 or localhost\n")
             return
         parts: urllib.parse.SplitResult = urllib.parse.urlsplit(self.path)
-        if parts.path == "/healthz":
-            self._send(200, "text/plain; charset=utf-8", "ok\n")
-            return
-        if parts.path not in ("/", "/index.html", "/api/state"):
-            self._send(404, "text/plain; charset=utf-8", "not found\n")
-            return
         given_token: str = urllib.parse.parse_qs(parts.query).get("t", [""])[0]
         if not hmac.compare_digest(given_token.encode(), self.server.access_token.encode()):
-            self._send(403, "text/plain; charset=utf-8",
-                       "forbidden: open the URL that bin/dashboard.sh status prints\n")
+            self._error(403, "forbidden: open the URL that bin/dashboard.sh status prints\n")
             return
-        snapshot: JsonDict = self.server.collector.snapshot()
-        if parts.path == "/api/state":
-            self._send(200, "application/json; charset=utf-8", json.dumps(snapshot, indent=1, default=str))
-        else:
-            self._send(200, "text/html; charset=utf-8",
-                       self.server.renderer.render(snapshot, self.server.refresh_s, self.server.access_token))
+        payload = self.server.routes.get(parts.path) or self.server.prior_fragments.get(parts.path)
+        if payload is None:
+            self._error(404, "not found\n")
+            return
+        weights: dict[str, float] = {}
+        for entry in ",".join(self.headers.get_all("Accept-Encoding", [])).lower().split(","):
+            coding, _, parameter = entry.partition(";")
+            quality = parameter.strip().removeprefix("q=")
+            try:
+                weights[coding.strip()] = float(quality) if parameter else 1.0
+            except ValueError:
+                weights[coding.strip()] = 0
+        gzip_q = weights.get("gzip", weights.get("*", 0.0))
+        identity_q = weights.get("identity", 0.0 if weights.get("*") == 0 else 1.0)
+        use_gzip = gzip_q > 0 and gzip_q >= weights.get("identity", 0)
+        if not use_gzip and identity_q <= 0:
+            self._error(406, "no acceptable encoding\n")
+            return
+        tag = payload.compressed_tag if use_gzip else payload.plain_tag
+        body = payload.compressed if use_gzip else payload.plain
+        candidates = ",".join(self.headers.get_all("If-None-Match", [])).split(",")
+        matched = any(item.strip().removeprefix("W/") in (tag, "*") for item in candidates)
+        self.send_response(304 if matched else 200)
+        self.send_header("ETag", tag)
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        if not matched:
+            self.send_header("Content-Type", payload.content_type)
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not matched:
+            self.wfile.write(body)
+
+    def end_headers(self) -> None:
+        """
+        Applies the security and cache headers to successful and failed requests.
+        """
+        for name, value in self.SECURITY_HEADERS:
+            self.send_header(name, value)
+        super().end_headers()
 
     def log_message(self, format: str, *args: object) -> None:
         """
@@ -146,21 +256,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             line = line.replace(self.server.access_token, "[token]")
         sys.stderr.write(f"{self.log_date_time_string()} {line}\n")
 
-    def _send(self, status: int, content_type: str, body: str) -> None:
+    def _error(self, status: int, body: str) -> None:
         """
         Sends a response with the secrets scrubbed and the security headers set.
 
         Args:
             status: HTTP status.
-            content_type: The Content-Type.
             body: The response text.
         """
         payload: bytes = self.server.scrub(body).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        for name, value in self.SECURITY_HEADERS:
-            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -236,7 +343,7 @@ class DashboardApp:
 
         signal.signal(signal.SIGTERM, request_stop)
         signal.signal(signal.SIGINT, request_stop)
-        self.collector.start()
+        self.collector.start(server.publish_in_place, self.options.refresh)
         url_path: Path = self.config.data_dir / self.URL_FILE_NAME
         self.write_private_file(url_path, server.url + "\n")
         sys.stderr.write(f"harness dashboard on {server.url} "
@@ -319,7 +426,7 @@ class DashboardApp:
         parser.add_argument("--all-label", default="ai", help="label of every issue the queue panels list")
         parser.add_argument("--usage-cache", default=os.environ.get("USAGE_CACHE", "~/.claude/usage-cache.json"))
         parser.add_argument("--gh", default="gh", help="gh executable")
-        parser.add_argument("--refresh", type=int, default=30, help="page reload interval, seconds")
+        parser.add_argument("--refresh", type=int, default=30, help="snapshot and page refresh interval, seconds")
         parser.add_argument("--history-hours", type=float, default=6.0, help="sparkline window")
         parser.add_argument("--github-interval", type=float, default=60.0)
         parser.add_argument("--local-interval", type=float, default=30.0)

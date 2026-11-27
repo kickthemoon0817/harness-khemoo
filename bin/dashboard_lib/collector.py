@@ -2,6 +2,7 @@
 Gathers the dashboard's data on a cadence per source and assembles one JSON-ready snapshot.
 """
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -110,14 +111,14 @@ class Collector:
     """
     Keeps the last result of every source and builds snapshots from them.
 
-    `lease.sh status`, the process table and the local state files are read when a snapshot is asked for (at most
-    every `fast_ttl_s`). The local host sample, the remote probes, GitHub and claimable.sh run on their own
-    threads at their own cadence, so a slow ssh or gh call never delays a page: the snapshot carries the last
-    result of each and its age. The only files written are the dashboard's own, under `data_dir`.
+    The publisher collects leases, the process table and local state files at the page refresh cadence.
+    Local samples, SSH, GitHub and claimable.sh have independent refresh threads. Each snapshot carries
+    their last results and ages. The only files written are the dashboard's own, under `data_dir`.
     """
 
+    LOAD_PROBE: ClassVar[str] = r"""printf 'load %s %s\n' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"
+"""
     MACHINE_PROBE_SCRIPT: ClassVar[str] = r"""
-printf 'load %s %s\n' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"
 sed -n '/^MemTotal:/p;/^MemAvailable:/p' /proc/meminfo
 echo '--- gpu'
 timeout 5 nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1
@@ -178,10 +179,14 @@ exit 0
         self.flow_tracker: FlowTracker = FlowTracker(config.data_dir / "flow_state.json", config.flow_animate_s)
         self._activity_lock: threading.Lock = threading.Lock()
 
-    def start(self) -> None:
+    def start(self, publish: Callable[[], None] | None = None, publish_interval_s: float = 30.0) -> None:
         """
         Creates the data directory, owner-only, loads the saved history and GitHub cache, and starts the source
         threads.
+
+        Args:
+            publish: Collects and publishes the complete HTTP representations.
+            publish_interval_s: Seconds between publications.
         """
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.config.data_dir, 0o700)
@@ -201,6 +206,20 @@ exit 0
                                                         name=f"dashboard-{name}", daemon=True)
             thread.start()
             self._threads.append(thread)
+
+        if publish is not None:
+            publish()
+
+            def publish_periodically() -> None:
+                while not self._stop_event.wait(max(1.0, publish_interval_s)):
+                    try:
+                        publish()
+                    except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+                        logging.error("Dashboard publication failed (%s)", type(error).__name__)
+
+            publisher = threading.Thread(target=publish_periodically, name="dashboard-publisher", daemon=True)
+            publisher.start()
+            self._threads.append(publisher)
 
     def stop(self) -> None:
         """
@@ -260,7 +279,7 @@ exit 0
         started: float = self.clock()
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
-                ["bash", "-c", self.MACHINE_PROBE_SCRIPT], capture_output=True, text=True,
+                ["bash", "-c", self.LOAD_PROBE + self.MACHINE_PROBE_SCRIPT], capture_output=True, text=True,
                 timeout=self.config.command_timeout_s * 2, stdin=subprocess.DEVNULL,
             )
             probe: MachineProbe = StateParsers.parse_machine_probe(completed.stdout)
@@ -282,13 +301,19 @@ exit 0
             else {}
         probes: dict[str, SourceResult] = {}
         workers: list[threading.Thread] = []
+        latest = {row.host: row for row in self._read_host_health()}
 
         def probe_host(host: str) -> None:
             host_started: float = self.clock()
+            row = latest.get(host)
+            script = self.MACHINE_PROBE_SCRIPT
+            if (row is None or row.load1 is None or row.nproc is None
+                    or host_started - row.epoch > self.config.host_health_stale_s):
+                script = self.LOAD_PROBE + script
             try:
                 completed: subprocess.CompletedProcess[str] = subprocess.run(
                     ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={self.config.ssh_connect_timeout_s}",
-                     "-o", "ControlMaster=no", host, self.MACHINE_PROBE_SCRIPT],
+                     "-o", "ControlMaster=no", host, script],
                     capture_output=True, text=True, timeout=self.config.remote_timeout_s, stdin=subprocess.DEVNULL,
                 )
                 if completed.returncode != 0:
@@ -621,6 +646,8 @@ exit 0
                 else:
                     view["gpu"] = {"name": "", "util_pct": latest.gpu_util_pct, "mem_used_mb": latest.gpu_mem_used_mb,
                                    "mem_total_mb": None}
+            if latest is not None and probe is not None and probe.nproc is None:
+                view.update(load1=latest.load1, nproc=latest.nproc)
             streak: HostStreak | None = streaks.get(host)
             window_rows: list[HostHealthRow] = [row for row in host_rows if row.epoch >= window_start]
             view.update({
@@ -850,6 +877,8 @@ exit 0
         if procs_result is None or not procs_result.data:
             return
         lease_slots: tuple[LeaseSlot, ...] = lease_result.data.slots if lease_result and lease_result.data else ()
+        if lease_result and lease_result.data and lease_result.data.device:
+            lease_slots += (lease_result.data.device,)
         mapped: dict[int, tuple[int, str]] = ProcessScanner.map_pids_to_issues(self._read_claims(now), lease_slots, {})
         lookups: int = 0
         live_pids: set[int] = set()
@@ -882,7 +911,7 @@ exit 0
         """
         lease_result: SourceResult | None = self._result("lease")
         if lease_result and lease_result.data and lease_result.data.remote_cards:
-            return [card.host for card in lease_result.data.remote_cards]
+            return list(dict.fromkeys(card.host for card in lease_result.data.remote_cards))
         return list(dict.fromkeys(row.host for row in self._read_host_health()))
 
     def _read_host_health(self) -> tuple[HostHealthRow, ...]:

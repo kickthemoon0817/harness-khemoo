@@ -52,8 +52,10 @@ setsid nohup python3 "$here/dashboard.py" --harness-home "$H" --data-dir "$DATA"
   >> "$LOG" 2>&1 < /dev/null &
 pid=$!
 echo "$pid $PORT" > "$PIDFILE"
-for _ in $(seq 1 50); do
-  if [ -s "$URLFILE" ] && curl -sf --max-time 2 "http://127.0.0.1:$PORT/healthz" > /dev/null 2>&1; then
+for _ in $(seq 1 150); do
+  if [ -s "$URLFILE" ] && IFS= read -r url < "$URLFILE" &&
+    printf 'url = "http://127.0.0.1:%s/healthz?t=%s"\n' "$PORT" "${url##*\?t=}" |
+      curl -qsf --config - --max-time 2 > /dev/null 2>&1; then
     cat "$URLFILE"; exit 0
   fi
   kill -0 "$pid" 2>/dev/null || break

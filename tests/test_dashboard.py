@@ -4,6 +4,8 @@ Exercises bin/dashboard.py: the state-file parsers, the tick-to-issue mapping, t
 collector, page and HTTP server against a scratch harness home with a fake lease.sh, claimable.sh and gh.
 """
 import contextlib
+import gzip
+import hashlib
 import html
 import http.client
 import io
@@ -25,6 +27,7 @@ import urllib.request
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 FIXTURES: Path = REPO_ROOT / "tests" / "fixtures" / "dashboard"
@@ -559,10 +562,25 @@ class SecretSurfaceTest(unittest.TestCase):
             shape["shape"]: harness.start_fake_tick(issue=3000 + index, slot=index + 1, tool_command=shape["command"])
             for index, shape in enumerate(shapes)
         }
+        kept = json.loads((FIXTURES / "kept_shapes.json").read_text())
+        with (harness.state / "stalls.log").open("a") as stalls:
+            for item in kept:
+                stalls.write(f"2026-11-26T01:30:00Z STALL note local {item['text']}\n")
         collector: Collector = harness.collector()
         snapshot = collector.snapshot()
         snapshot_json: str = json.dumps(snapshot, default=str)
         page: str = HtmlRenderer().render(snapshot, 30, "access")
+        server = dashboard.DashboardHttpServer(0, collector, HtmlRenderer(), 30, (harness.FAKE_TOKEN,), "access")
+        self.addCleanup(server.server_close)
+        with patch.object(collector, "snapshot", return_value=snapshot):
+            server.publish_in_place()
+        manifest = server.routes["/api/sections"].plain.decode()
+        fragments = [server.routes["/api/sections/" + digest].plain.decode() for digest in
+                     json.loads(manifest).values()]
+        surface = html.unescape(manifest + "".join(fragments))
+        self.assertIn(CommandRedactor.MASK, surface)
+        for item in kept:
+            self.assertIn(item["kept"], surface)
         doing_by_pid: dict[int, str] = {tick["pid"]: tick["doing"] for tick in snapshot["ticks"]}
         for shape in shapes:
             with self.subTest(shape["shape"]):
@@ -572,6 +590,7 @@ class SecretSurfaceTest(unittest.TestCase):
                     self.assertNotIn(secret, doing)
                     self.assertNotIn(secret, snapshot_json)
                     self.assertNotIn(secret, page)
+                    self.assertNotIn(secret, surface)
 
 
 class TickMappingTest(unittest.TestCase):
@@ -765,6 +784,17 @@ class CollectorAndPageTest(unittest.TestCase):
         self.collector.refresh_claimable_in_place()
         self.snapshot: dict[str, Any] = self.collector.snapshot()
 
+    def test_publisher_keeps_its_own_cadence_whatever_the_source_intervals(self) -> None:
+        collector: Collector = self.harness.collector(local_interval_s=0, github_interval_s=0,
+                                                      claimable_interval_s=3600)
+        published: list[float] = []
+        collector.start(lambda: published.append(time.monotonic()), 1.0)
+        self.addCleanup(collector.stop)
+        deadline: float = time.monotonic() + 5.0
+        while len(published) < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertGreaterEqual(len(published), 3)
+
     def test_every_panel_has_data(self) -> None:
         snapshot = self.snapshot
         self.assertEqual([machine["key"] for machine in snapshot["machines"]],
@@ -849,7 +879,8 @@ class CollectorAndPageTest(unittest.TestCase):
             self.assertIn(expected, page)
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
-        self.assertNotIn("<script", page)
+        self.assertEqual(page.count("<script"), 1)
+        self.assertIn('<script defer src="/dashboard.js', page)
 
     def test_no_token_in_page_or_json(self) -> None:
         token: str = FixtureHarness.FAKE_TOKEN
@@ -956,12 +987,14 @@ class HttpServerTest(unittest.TestCase):
         server = dashboard.DashboardHttpServer(0, app.collector, HtmlRenderer(), 30, (app.github_token,),
                                                self.ACCESS_TOKEN)
         self.addCleanup(server.server_close)
+        server.publish_in_place()
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
         return server, server.server_address[1]
 
     @staticmethod
-    def request(port: int, path: str, host: str | None) -> tuple[int, dict[str, str], str]:
+    def request(port: int, path: str, host: str | None, headers: dict[str, str] | None = None
+                ) -> tuple[int, dict[str, str], str]:
         """
         Sends one GET with a chosen Host header, or none.
 
@@ -969,19 +1002,24 @@ class HttpServerTest(unittest.TestCase):
             port: The server's port.
             path: Path and query.
             host: The Host header; None sends none.
+            headers: Additional request headers.
 
         Returns:
             Status, headers and body.
         """
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
         try:
-            connection.putrequest("GET", path, skip_host=True)
+            connection.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
             if host is not None:
                 connection.putheader("Host", host)
+            for name, value in (headers or {}).items():
+                connection.putheader(name, value)
             connection.endheaders()
             response = connection.getresponse()
-            return response.status, {name.lower(): value for name, value in response.getheaders()}, \
-                response.read().decode()
+            body = response.read()
+            if body and response.getheader("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            return response.status, {name.lower(): value for name, value in response.getheaders()}, body.decode()
         finally:
             connection.close()
 
@@ -994,7 +1032,7 @@ class HttpServerTest(unittest.TestCase):
         self.assertEqual(server.server_address[0], "127.0.0.1")
         self.assertEqual(server.url, f"http://127.0.0.1:{port}/?t={self.ACCESS_TOKEN}")
         host: str = f"127.0.0.1:{port}"
-        status, _, body = self.request(port, "/healthz", host)
+        status, _, body = self.request(port, f"/healthz?t={self.ACCESS_TOKEN}", host)
         self.assertEqual((status, body), (200, "ok\n"))
         status, headers, page = self.request(port, f"/?t={self.ACCESS_TOKEN}", host)
         self.assertEqual((status, headers["content-type"]), (200, "text/html; charset=utf-8"))
@@ -1042,7 +1080,7 @@ class HttpServerTest(unittest.TestCase):
                                             ("/api/state?t=" + self.ACCESS_TOKEN, f"127.0.0.1:{port}", 200),
                                             ("/", f"127.0.0.1:{port}", 403),
                                             ("/", "evil.example", 421),
-                                            ("/missing", f"127.0.0.1:{port}", 404)):
+                                            ("/missing?t=" + self.ACCESS_TOKEN, f"127.0.0.1:{port}", 404)):
             with self.subTest(path=path, host=host):
                 status, headers, _ = self.request(port, path, host)
                 self.assertEqual(status, expected_status)
@@ -1054,6 +1092,69 @@ class HttpServerTest(unittest.TestCase):
                 self.assertIn("frame-ancestors 'none'", policy)
                 self.assertNotIn("http", policy)
                 self.assertNotIn("*", policy)
+
+    def test_conditional_get_and_gzip_variants(self) -> None:
+        harness = FixtureHarness()
+        self.addCleanup(harness.close)
+        server, port = self.serve(harness)
+        host = f"127.0.0.1:{port}"
+        query = "?t=" + self.ACCESS_TOKEN
+        with patch.object(server.collector, "snapshot", side_effect=AssertionError("collection during GET")):
+            for path in ("/", "/api/state", "/api/sections", "/dashboard.js"):
+                with self.subTest(path=path):
+                    status, plain, body = self.request(port, path + query, host)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(plain["etag"], f'"{hashlib.sha256(body.encode()).hexdigest()}"')
+                    status, zipped, decoded = self.request(port, path + query, host,
+                                                           {"Accept-Encoding": "br, gzip;q=0.8",
+                                                            "If-None-Match": plain["etag"]})
+                    self.assertEqual((status, decoded, zipped["content-encoding"]), (200, body, "gzip"))
+                    self.assertNotEqual(plain["etag"], zipped["etag"])
+                    self.assertLess(int(zipped["content-length"]), len(body.encode()))
+                    status, headers, empty = self.request(port, path + query, host, {"Accept-Encoding": "gzip",
+                                                            "If-None-Match": '"old", W/' + zipped["etag"]})
+                    self.assertEqual((status, empty, headers["etag"]), (304, "", zipped["etag"]))
+                    self.assertEqual(headers["cache-control"], "private, no-cache")
+                    self.assertEqual(headers["vary"], "Accept-Encoding")
+            for accepted in ("br", "gzip;q=0, *;q=1", "gzip;q=0.4, identity;q=1"):
+                status, headers, _ = self.request(port, "/api/state" + query, host, {"Accept-Encoding": accepted})
+                self.assertEqual(status, 200)
+                self.assertNotIn("content-encoding", headers)
+
+    def test_sections_track_content_and_require_the_token(self) -> None:
+        harness = FixtureHarness()
+        self.addCleanup(harness.close)
+        server, port = self.serve(harness)
+        host = f"127.0.0.1:{port}"
+        query = "?t=" + self.ACCESS_TOKEN
+        _, headers, index = self.request(port, "/api/sections" + query, host)
+        before = json.loads(index)
+        fragment = "/api/sections/" + before["ticks"]
+        for path in ("/healthz", "/dashboard.js", "/api/sections", fragment):
+            for credential in ("", "?t=wrong"):
+                self.assertEqual(self.request(port, path + credential, host, {"If-None-Match": "*"})[0], 403)
+            self.assertEqual(self.request(port, path + query, "foreign.example")[0], 421)
+        _, _, page = self.request(port, "/" + query, host)
+        self.assertIn(f'<noscript><meta http-equiv="refresh" content="30;url=/{query}"></noscript>', page)
+        self.assertIn(f'data-section="ticks" data-version="{before["ticks"]}"', page)
+        status, _, body = self.request(port, fragment + query, host)
+        self.assertEqual(status, 200)
+        self.assertIn("Running ticks", body)
+        self.assertNotIn("<style", body)
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), before["ticks"])
+
+        _, _, state = self.request(port, "/api/state" + query, host)
+        snapshot = json.loads(state)
+        snapshot["repo"] = "different/repo " + harness.FAKE_TOKEN
+        with patch.object(server.collector, "snapshot", return_value=snapshot):
+            server.publish_in_place()
+        status, _, index = self.request(port, "/api/sections" + query, host, {"If-None-Match": headers["etag"]})
+        after = json.loads(index)
+        self.assertEqual(status, 200)
+        self.assertEqual([name for name in before if before[name] != after[name]], ["header"])
+        fragment_body = self.request(port, "/api/sections/" + after["header"] + query, host)[2]
+        self.assertIn("different/repo [redacted]", fragment_body)
+        self.assertNotIn(harness.FAKE_TOKEN, fragment_body)
 
     def test_request_log_never_holds_the_access_token(self) -> None:
         harness: FixtureHarness = FixtureHarness()
@@ -1184,15 +1285,19 @@ class RunQueueTest(unittest.TestCase):
     def test_read_queues_names_state_issue_and_liveness(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root: Path = Path(directory)
+            now = time.time()
             for name, packet in (("running", "2026-11-26-2502-push"), ("waiting", "2026-11-26-2464-rest"),
                                  ("finished", "2026-11-26-2490-sub")):
-                shutil.copytree(self.QUEUES / name, root / packet / "runs")
+                runs = root / packet / "runs"
+                shutil.copytree(self.QUEUES / name, runs)
+                for path in runs.iterdir():
+                    os.utime(path, (now, now))
             old: Path = root / "2026-11-20-2000-old" / "runs"
             shutil.copytree(self.QUEUES / "finished", old)
             for path in old.iterdir():
-                os.utime(path, (time.time() - 86400, time.time() - 86400))
+                os.utime(path, (now - 86400, now - 86400))
             processes = {**self.holder(4101), **self.holder(4201)}
-            queues = RunQueueReader(root, 6 * 3600).read_queues(processes, time.time())
+            queues = RunQueueReader(root, 6 * 3600).read_queues(processes, now)
         by_issue = {queue.issue: queue for queue in queues}
         self.assertEqual(sorted(by_issue), [2464, 2490, 2502])
         self.assertEqual((by_issue[2502].state, by_issue[2502].arm), ("running", "RS6-on-s1323-render"))
@@ -1430,7 +1535,8 @@ class FlowPageTest(unittest.TestCase):
                          'class="fedge compile waits', "Waiting for a card", "#2464</b> claimed →",
                          "&lt;script&gt;alert(1)&lt;/script&gt;"):
             self.assertIn(expected, page)
-        self.assertNotIn("<script", page)
+        self.assertEqual(page.count("<script"), 1)
+        self.assertIn('<script defer src="/dashboard.js', page)
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, page + json.dumps(second, default=str))
 
 

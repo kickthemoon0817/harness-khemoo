@@ -164,13 +164,16 @@ the baseline runner, files to collect, host load sampling and the head check.
 ## Status dashboard
 
 `bin/dashboard.sh` starts `bin/dashboard.py` detached and prints its URL,
-`http://127.0.0.1:8787/?t=<token>`. The token is new at each start, and `/` and `/api/state` refuse a
+`http://127.0.0.1:8787/?t=<token>`. The token is new at each start, and every route refuses a
 request without it. `dashboard.sh status` prints the URL again from `state/dashboard/dashboard.url`,
 which only its owner can read. The server listens on 127.0.0.1 only. It answers only requests whose
 Host is `127.0.0.1:<port>` or `localhost:<port>`, which stops a web page that rebinds its own name to
 127.0.0.1. Every response forbids framing, MIME sniffing, cross-origin reads and any outside source.
-The page reloads every 30 s, and `/api/state` serves the same data as JSON. It needs Python 3 and
-nothing else.
+A visible tab polls `/api/sections` every 30 s (`--refresh`). The index maps section names to
+SHA-256 hashes. The tab fetches only new hashes from `/api/sections/<hash>` and patches the live
+page. Hidden tabs resume on return. CSS travels with the initial HTML and `/dashboard.js` loads
+once per navigation. Without JavaScript the page reloads at the same interval. `/api/state` serves
+the full JSON snapshot. Responses support gzip and conditional GET with private revalidation.
 
 ```bash
 bin/dashboard.sh                           # prints the URL
@@ -192,12 +195,12 @@ every response. Every GitHub call is a read.
 | Panel | Reads | Cadence |
 |---|---|---|
 | Machines: load against cores, memory, card use and memory, card processes, containers (folded) | this host: `/proc`, `nvidia-smi`, `docker ps`, kept in `state/dashboard/local_history.tsv`; remote hosts: `state/host_health.tsv` and `.streaks` (status, upload, history), plus a read-only ssh probe for memory, card size, processes and containers (`--remote-interval 0` turns it off) | 30 s local, 2 min ssh |
-| GPU slots and leases | `bin/lease.sh status` | each page load |
-| Running ticks | `claude -p` processes whose stdout is a `state/logs/tick-*.log`: slot from the slot lock they hold, model from `--model`, issue from the newest `state/locks/claim.<issue>` naming the pid, else a lease the pid holds, else a cached GitHub search for its claim comment. "Now" summarises the tick's youngest tool call: the working command's executable and a few arguments, with secret-looking values masked. No raw command line is served | each page load |
+| GPU slots and leases | `bin/lease.sh status` | snapshot cadence |
+| Running ticks | `claude -p` processes whose stdout is a `state/logs/tick-*.log`: slot from the slot lock they hold, model from `--model`, issue from the newest `state/locks/claim.<issue>` naming the pid, else a lease the pid holds, else a cached GitHub search for its claim comment. "Now" summarises the tick's youngest tool call: the working command's executable and a few arguments, with secret-looking values masked. No raw command line is served | snapshot cadence |
 | Issue queue and landings | GraphQL reads of the open `ai` issues, any `FIRST_LABEL` issue outside them, their `Depends on` states and the last day's merged PRs. Claimable follows `bin/claimable.sh`'s rules, its first-before-low gate included, and the panel lists what the gate holds back. The count is the dashboard's own; `bin/claimable.sh`'s (run every 5 min) and the allocator's stand beside it, marked unverified when taken while the dashboard's own read was failing, since `claimable.sh` prints 1 when `gh` fails | 1 min |
-| Stalls, allocator | the tails of `state/stalls.log` and `state/logs/allocator.log` | each page load |
-| Flow: each device with its card use, load, card memory, lease holders and compile lane; each issue as a card in its state column (waiting, claimed, compiling, waiting for a card, running on a card, landing, held, done), a line to each device lane it holds (solid) or waits for (dashed), and the latest transitions | the panels' data, plus the run folders `<evidence root>/*/runs*/` written in the last 6 h (`lease.log`: holder and BUSY streak; `status`: the arm running and its host), the build locks `<lock dir>/worv-dev-build-remote-<name>.lock` and `worv-dev-build.lock` (holder from the lock file, waiters from `lslocks`) and the issues closed in the last 6 h. Cards that changed state slide there on the next load; the last positions and transitions are kept in `state/dashboard/flow_state.json` | 10 s |
-| Usage | `~/.claude/usage-cache.json`, placed against the allocator's cut points (`bin/usage-lib.sh` defaults) | each page load |
+| Stalls, allocator | the tails of `state/stalls.log` and `state/logs/allocator.log` | snapshot cadence |
+| Flow: each device with its card use, load, card memory, lease holders and compile lane; each issue as a card in its state column (waiting, claimed, compiling, waiting for a card, running on a card, landing, held, done), a line to each device lane it holds (solid) or waits for (dashed), and the latest transitions | the panels' data, plus the run folders `<evidence root>/*/runs*/` written in the last 6 h (`lease.log`: holder and BUSY streak; `status`: the arm running and its host), the build locks `<lock dir>/worv-dev-build-remote-<name>.lock` and `worv-dev-build.lock` (holder from the lock file, waiters from `lslocks`) and the issues closed in the last 6 h. Cards that changed state slide there on the next update; the last positions and transitions are kept in `state/dashboard/flow_state.json` | snapshot cadence (activity reads at least 10 s apart) |
+| Usage | `~/.claude/usage-cache.json`, placed against the allocator's cut points (`bin/usage-lib.sh` defaults) | snapshot cadence |
 
 A slow ssh or `gh` call never holds a page: each source keeps its last result, and the footer
 shows its age and last error. `tests/test_dashboard.py` runs it against fixture state files and a fake
