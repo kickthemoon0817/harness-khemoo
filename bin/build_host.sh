@@ -2,8 +2,8 @@
 # Prints the export line a tick evals before `tools/dev/iter.sh build`, naming the host to compile
 # on, that host's compile lock and the builder image there:
 #   export DOCKER_HOST=ssh://<host> WORV_DEV_BUILD_LOCK=<lock dir>/worv-dev-build-remote-<name>.lock WORV_BUILDER_IMAGE=worv-builder:isaac6
-# With state/local-cpu-lane present (owner, 2026-11-26: this host's CPU takes compiles, never its
-# card), this host is a lane after the remote ones: it takes a compile when no remote lane is
+# With state/local-cpu-lane present (this host's CPU takes compiles, never its card, which is
+# the owner's), this host is a lane after the remote ones: it takes a compile when no remote lane is
 # free and unwaited, under the host's own dev build lock (shared with the owner's own builds) and
 # the builder image the file names:
 #   export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=<lock dir>/worv-dev-build.lock WORV_BUILDER_IMAGE=<image>

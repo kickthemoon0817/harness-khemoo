@@ -2,7 +2,7 @@
 # Dependency-aware queue depth: open ISSUE_LABEL issues without WIP_LABEL whose
 # "Depends on:" issue numbers are all closed, and which are not parked for the
 # owner (SIGNOFF_LABEL). Prints one integer.
-# Priority (operator, 2026-11-26): an issue labelled LOW_LABEL counts only when no other
+# Priority: an issue labelled LOW_LABEL counts only when no other
 # issue of the list is claimable, and none labelled FIRST_LABEL is claimable anywhere; an
 # issue labelled FABLE_LABEL without FIRST_LABEL counts only while no FIRST_LABEL issue is
 # claimable anywhere. So low-priority work and new design rounds wait for the take-first queue.

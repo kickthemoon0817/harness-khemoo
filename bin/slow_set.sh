@@ -42,8 +42,8 @@ held_by_cost_read() {
         }'
 }
 run_on=""
-# The scheduled suites are CPU work, so with this host's CPU lane on (state/local-cpu-lane, owner
-# 2026-11-26) they run here, under the host's dev build lock and the lane's builder image, which keeps
+# The scheduled suites are CPU work, so with this host's CPU lane on (state/local-cpu-lane) they
+# run here, under the host's dev build lock and the lane's builder image, which keeps
 # both remote cards free for the runs that need a card. Otherwise, with the harness kept to its remote
 # hosts, bin/build_host.sh names a remote host and that host's compile lock and builder image.
 if [ -s "$HARNESS_STATE/local-cpu-lane" ]; then

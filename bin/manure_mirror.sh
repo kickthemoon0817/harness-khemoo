@@ -3,8 +3,7 @@
 # MaumAI-Company/worv.env.manure, until the extension becomes a submodule.
 #
 # The mirror is the subtree split of origin/ai/manure-mpm with every
-# "Co-Authored-By:" trailer dropped from the commit messages (owner,
-# 2026-11-03). Both steps are deterministic, so a re-run reproduces the
+# "Co-Authored-By:" trailer dropped from the commit messages. Both steps are deterministic, so a re-run reproduces the
 # commits already pushed and only appends new ones; the push is refused unless
 # it is a fast-forward of the remote main.
 #
