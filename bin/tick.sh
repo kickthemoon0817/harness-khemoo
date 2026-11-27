@@ -154,20 +154,22 @@ harness_paused() {
 # number sets queue_error instead and returns 1, so no caller mistakes it for a count.
 # QUEUE_DEPTH_CMD is a command line split on whitespace, without quoting: no path in it may hold a space.
 queue_depth() {  # $1 = the label to count
-    local out rc err token=()
+    local out rc err
     err=$(mktemp)
-    # gh reads the config's token; the count command gets it, a tick never does.
-    [ -n "${GH_TOKEN:-}" ] && token=(GH_TOKEN="$GH_TOKEN")
-    if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
-        # shellcheck disable=SC2086
-        out=$(env ${token[@]+"${token[@]}"} GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" \
-            SIGNOFF_LABEL="$SIGNOFF_LABEL" OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" \
-            LOW_LABEL="${LOW_LABEL:-}" LANE_LABEL="${LANE_LABEL:-}" $QUEUE_DEPTH_CMD 2>"$err")
-    else
-        out=$(cd "$TARGET_REPO" && env ${token[@]+"${token[@]}"} gh issue list --repo "${GH_REPO:-}" --label "$1" \
-            --state open --limit 100 \
-            --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length" 2>"$err")
-    fi
+    # gh reads the config's token, so the count gets it, through its environment only: a token in
+    # argv shows in /proc/<pid>/cmdline, which ps and the dashboard read. A tick never gets it.
+    out=$(
+        exec 2>"$err"
+        [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
+            # shellcheck disable=SC2086
+            GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" SIGNOFF_LABEL="$SIGNOFF_LABEL" \
+                OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" LOW_LABEL="${LOW_LABEL:-}" \
+                LANE_LABEL="${LANE_LABEL:-}" exec $QUEUE_DEPTH_CMD
+        fi
+        cd "$TARGET_REPO" && exec gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 \
+            --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length"
+    )
     rc=$?
     queue_error="label $1: exit $rc, output '$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-60)', stderr '$(tail -n 1 "$err" | cut -c1-160)'"
     rm -f "$err"

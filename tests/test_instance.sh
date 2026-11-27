@@ -25,6 +25,7 @@ EOF
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
 [ -e "$FAKE_QUEUE_FAILS" ] && { echo "queue service unreachable" >&2; exit 1; }
+printf '%s\n' "argv=$(tr '\0' ' ' < /proc/$$/cmdline)" "token=${GH_TOKEN:-unset}" > "$FAKE_QUEUE_SEEN"
 case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) echo 1 ;; esac
 EOF
 cat > "$H/fakebin/crontab" <<'EOF'
@@ -54,7 +55,7 @@ EOF
 }
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.txt" FAKE_ENV="$H/env.txt" \
     FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" FAKE_LINT_ENV="$H/lint-env.txt" \
-    FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_NO_CRON="$H/no-cron"
+    FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron"
 LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
@@ -150,6 +151,9 @@ GH_TOKEN=env-token launch
 check "the lint's settings and the labels reach the tick, GH_TOKEN does not" \
     '[ "$(cat "$FAKE_LINT_ENV")" = "$(printf "%s\n" "rules=$H/rules.json pr=Summary,Why" "issue=Summary repo=o/r&x|y\\z wip=bot:wip" "low=bot:low token=unset")" ]' \
     "$(cat "$FAKE_LINT_ENV" 2>/dev/null)"
+check "the queue count gets the config's GH_TOKEN in its environment, never in its argv" \
+    'grep -qx "token=secret-token" "$FAKE_QUEUE_SEEN" && grep -q "^argv=.*queue" "$FAKE_QUEUE_SEEN" && ! grep "^argv=" "$FAKE_QUEUE_SEEN" | grep -q secret-token' \
+    "$(cat "$FAKE_QUEUE_SEEN" 2>/dev/null)"
 write_env
 
 # A failed queue count is an error in the log, and still counts one issue so a tick runs.
