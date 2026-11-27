@@ -50,7 +50,7 @@ check "its shorthand is a warning, not a block" 'grep -q "warn shorthand-scenari
 
 cat >"$T/bad-pr.md" <<'EOF'
 Packet: `~/tmp_workspace/artifacts/manure-plan/evidence/2026-11-03-2137-walk-hold-at-rest/INDEX.md`,
-run on slot 1 of 10.50.2.178 with `lease.sh acquire 2137`, cubin b034f353dfa4. Then `ai:ready` (mine).
+run on GPU slot 1 of 10.50.2.178 with `lease.sh acquire 2137`, cubin b034f353dfa4. Then `ai:ready` (mine).
 EOF
 out=$(python3 "$LINT" --kind pr "$T/bad-pr.md" 2>&1); rc=$?
 check "a host path, a slot, an address and a harness file block" \
@@ -69,6 +69,28 @@ check "the old claim line in the open is blocked for its pid, host and budget, a
 { cat "$T/good-pr.md"; printf '\n<details><summary>Harness trace</summary>\npid 1\n</details>\n'; } >"$T/trace-in-body.md"
 out=$(python3 "$LINT" --kind pr "$T/trace-in-body.md" 2>&1); rc=$?
 check "a trace block in a body is blocked" '[ "$rc" -eq 1 ] && grep -q "trace-in-body" <<<"$out"' "$out"
+
+# Each pair: a near miss a reader's prose may hold is clean, and the form the rule exists for blocks.
+# $1 name, $2 rule, $3 clean comment text, $4 blocking comment text.
+near_miss() {
+    rule=$2
+    out=$(printf '%b' "$3" | python3 "$LINT" --kind comment - 2>&1); rc=$?
+    check "$1: the near miss is clean" '[ "$rc" -eq 0 ]' "$out"
+    out=$(printf '%b' "$4" | python3 "$LINT" --kind comment - 2>&1); rc=$?
+    check "$1: the real form blocks" '[ "$rc" -eq 1 ] && grep -q "BLOCK $rule" <<<"$out"' "$out"
+}
+near_miss "a tmp folder inside the repository" container-tmp \
+    'The log is `_build/x/release/tmp/a.log` at 8f4e54b3d.\n' 'The log is at /tmp/mg/run.log.\n'
+near_miss "a four-part version" host-address \
+    'Built against Kit 106.5.0.2.\n' 'Built on 10.0.0.12.\n'
+near_miss "an address with a port" host-address \
+    'Built against Kit 106.5.0.2.\n' 'Copied over 192.168.1.5:22.\n'
+near_miss "lease, slot and remote host in prose" gpu-slot \
+    'The lease on the remote host ran out; the board in slot 3 was idle.\n' \
+    'Measured on GPU slot 3 under resource.lease.3, lease 2137 held.\n'
+near_miss "a fenced block of quoted output" host-path \
+    'The run printed:\n```\nwrote /home/ci/out/run.log (pid 4242)\n```\n' \
+    'The run wrote /home/ci/out/run.log.\n'
 
 printf '## Summary\nx\n## Ask\ny\n' >"$T/issue.md"
 out=$(python3 "$LINT" --kind issue "$T/issue.md" 2>&1); rc=$?

@@ -6,7 +6,8 @@ nothing else. The lint blocks what such a reader cannot use: paths on this host,
 addresses, process ids, GPU slots and leases, harness file names, tick-to-tick asides. It warns on
 shorthand a body may leave undefined. A `<details><summary>Harness trace</summary>` block in a comment is
 exempt: that is where the harness's own bookkeeping goes, the claim protocol line (`harness tick … pid N
-claiming`) included, because the launcher finds that line anywhere in a comment.
+claiming`) included, because the launcher finds that line anywhere in a comment. Fenced code blocks are
+exempt from the content rules too, so quoted output does not block; the section checks still read them.
 
     public_record_lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
     public_record_lint.py --kind comment -           lint a comment from stdin
@@ -30,6 +31,15 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from typing import Sequence
+
+_OCTET: str = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_IPV4: str = rf"{_OCTET}(?:\.{_OCTET}){{3}}"
+# A dotted quad is also a version number (`Kit 106.5.0.2`), so an address blocks only where it is
+# clearly one: in a private or loopback range, or with a port or a user in front of it.
+_PRIVATE_IPV4: str = (rf"(?:10|127)(?:\.{_OCTET}){{3}}|192\.168(?:\.{_OCTET}){{2}}|"
+                      rf"172\.(?:1[6-9]|2\d|3[01])(?:\.{_OCTET}){{2}}")
+_HOST_ADDRESS: str = (rf"(?<![\w.])(?:{_PRIVATE_IPV4})(?![\w-]|\.\d)|(?<![\w.]){_IPV4}:\d{{1,5}}\b|"
+                      rf"@{_IPV4}(?![\w-]|\.\d)")
 
 
 @dataclass(frozen=True)
@@ -74,6 +84,7 @@ class PublicRecordLint:
     TRACE_BLOCK: re.Pattern[str] = re.compile(
         r"<details>\s*<summary>[^<]*harness trace[^<]*</summary>.*?</details>", re.IGNORECASE | re.DOTALL)
     HEADING: re.Pattern[str] = re.compile(r"^#{1,3}\s+(.+?)\s*$", re.MULTILINE)
+    FENCE: re.Pattern[str] = re.compile(r"^\s*(?:```|~~~)")
 
     BLOCKING_RULES: tuple[Rule, ...] = (
         Rule("host-path", re.compile(r"(?<![\w./-])(?:/home/\w+|~/|\$HOME\b|/mnt/\w+)"),
@@ -83,13 +94,14 @@ class PublicRecordLint:
              re.compile(r"\b(?:tmp_workspace|ai-worktrees|claude-issue-harness|manure-harness)\b|\bartifacts/manure-"),
              "the harness's scratch tree: cite docs/manure-plan/evidence/<packet>/ at the commit that holds it",
              True),
-        Rule("host-address", re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b|\bssh://|\bDOCKER_HOST\b|\(host \S+\)"),
+        Rule("host-address", re.compile(rf"{_HOST_ADDRESS}|\bssh://|\bDOCKER_HOST\b|\(host \S+\)"),
              "a host or an address: say what the host did ('the second GPU host'), never which", True),
         Rule("process-id", re.compile(r"\bpid \d+\b"),
              "a process id belongs in a comment's Harness trace block", True),
         Rule("gpu-slot",
-             re.compile(r"\bslots? ?\d\b|\bresource\.lease|\bworv-iter(?:-\d+)?\b|\b(?:local|remote) "
-                        r"(?:lane|card|slot|host)\b|\bwhole[- ]card\b|\bcard alone\b|\blease\b"),
+             re.compile(r"\b(?:GPU|card|local|remote) slots? ?\d\b|\bresource\.lease|\bworv-iter(?:-\d+)?\b|"
+                        r"\b(?:local|remote) (?:lane|card|slot)\b|\bwhole[- ]card\b|\bcard alone\b|"
+                        r"\b[Ll]ease(?::| \d+\b| held\b)|\b(?:device|GPU|card) lease\b"),
              "GPU bookkeeping: state the measurement condition instead ('with no other process on the GPU')",
              True),
         Rule("harness-file",
@@ -103,7 +115,7 @@ class PublicRecordLint:
              "a tick-to-tick aside: the reader is not the next tick", True),
         Rule("cubin-hash", re.compile(r"\bcubin [0-9a-f]{8,}\b"),
              "a kernel binary hash: name the kernel source commit instead", True),
-        Rule("container-tmp", re.compile(r"/tmp/(?!kit\.log\b)"),
+        Rule("container-tmp", re.compile(r"(?<![\w./-])/tmp/(?!kit\.log\b)"),
              "a path in a container or on this host", True),
         Rule("operator-stamp",
              re.compile(r"\b[Oo]perator(?:'s)?,? ?\(?\d{2}:\d{2}Z|\b\d{2}:\d{2}Z (?:ruling|sign-off|post|comment|"
@@ -159,7 +171,13 @@ class PublicRecordLint:
                                     "a Harness trace belongs in a comment, never in an issue or PR body", True))
         lines: list[str] = text.split("\n")
         seen_warnings: set[tuple[str, str]] = set()
+        in_fence: bool = False
         for line_index, line in enumerate(lines):
+            if self.FENCE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
             for rule in self.BLOCKING_RULES:
                 for match in rule.pattern.finditer(line):
                     findings.append(Finding(rule.rule_id, line_index + 1, match.group(0), rule.hint, True))
