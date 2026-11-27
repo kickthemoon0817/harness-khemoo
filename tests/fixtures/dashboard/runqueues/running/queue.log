@@ -1,0 +1,6 @@
+holder 4101 start 2026-11-26T02:54:30Z queue=/e/2026-11-26-2502-courant-split-push/render.queue want=any deadline=1795700000
+2026-11-26T02:54:30Z BUSY no remote card is free, alone and quiet
+2026-11-26T02:54:44Z ACQUIRED slot=6 file=/h/state/locks/resource.lease.6 container=dev-run-6 domain=82 cache=/tmp/sim/cache-slot6 remote=ci@192.0.2.60 exclusive=all-remote
+export APP_LEASE_FILE=/h/state/locks/resource.lease.6 RUN_CONTAINER=dev-run-6 SLOT_DOMAIN=82 DOCKER_HOST=ssh://ci@192.0.2.60
+service ok: stable 82 min (host probe)
+2026-11-26T03:03:05Z renew before RS6-on-s1323-render: ACQUIRED slot=6 remote=ci@192.0.2.60 exclusive=all-remote

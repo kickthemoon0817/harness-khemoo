@@ -10,7 +10,7 @@ JsonDict: TypeAlias = dict[str, Any]
 @dataclass(frozen=True)
 class HostHealthRow:
     """
-    One `state/host_health.tsv` row: a remote host's probe by bin/host_health.sh.
+    One `state/host_health.tsv` row: a remote host's probe, written by the instance.
     """
 
     time: str
@@ -42,7 +42,7 @@ class HostStreak:
 @dataclass(frozen=True)
 class RemoteCard:
     """
-    A remote card named by `lease.sh status`, with the slot numbers that live on it.
+    A remote host named by the resource status, with the slot numbers that live on it.
     """
 
     host: str
@@ -53,7 +53,7 @@ class RemoteCard:
 @dataclass(frozen=True)
 class LeaseSlot:
     """
-    One slot (or the device lease) as `lease.sh status` reports it.
+    One slot (or the device lease) as the resource status reports it.
     """
 
     slot: int | None
@@ -70,7 +70,7 @@ class LeaseSlot:
 @dataclass(frozen=True)
 class LeaseWait:
     """
-    A recorded wait for a slot or the whole card.
+    A recorded wait for a slot, the whole device or the whole pool.
     """
 
     kind: str
@@ -82,7 +82,7 @@ class LeaseWait:
 @dataclass(frozen=True)
 class LeaseStatus:
     """
-    The parsed output of `lease.sh status`.
+    The parsed output of the resource status command.
     """
 
     remote_cards: tuple[RemoteCard, ...]
@@ -177,9 +177,9 @@ class TickProcess:
 
 
 @dataclass(frozen=True)
-class GpuReading:
+class DeviceReading:
     """
-    One card's utilisation and memory.
+    One device's utilisation and memory.
     """
 
     name: str
@@ -189,9 +189,9 @@ class GpuReading:
 
 
 @dataclass(frozen=True)
-class GpuProcess:
+class DeviceProcess:
     """
-    A compute process on a card, with the container it runs in when known.
+    A process on a device, with the container it runs in when known.
     """
 
     pid: int
@@ -215,15 +215,15 @@ class ContainerInfo:
 @dataclass(frozen=True)
 class MachineProbe:
     """
-    One read of a machine: load, memory, card, card processes and containers.
+    One read of a machine: load, memory, device, device processes and containers.
     """
 
     load1: float | None
     nproc: int | None
     mem_used_mb: float | None
     mem_total_mb: float | None
-    gpu: GpuReading | None
-    gpu_processes: tuple[GpuProcess, ...]
+    gpu: DeviceReading | None
+    gpu_processes: tuple[DeviceProcess, ...]
     containers: tuple[ContainerInfo, ...]
 
 
@@ -244,7 +244,7 @@ class SourceResult:
 @dataclass(frozen=True)
 class RunQueue:
     """
-    One bin/arm_queue.sh run folder (`<packet>/runs*/`): who holds it, what it waits for and what it runs.
+    One run folder RUN_QUEUE_GLOB matches: who holds it, what it waits for and what it runs.
     """
 
     packet: str
@@ -254,9 +254,9 @@ class RunQueue:
     alive: bool
     state: str
     want: str | None
-    arm: str | None
-    arm_host: str | None
-    arm_started: str | None
+    job: str | None
+    job_host: str | None
+    job_started: str | None
     busy_since: str | None
     busy_reason: str | None
     granted_host: str | None

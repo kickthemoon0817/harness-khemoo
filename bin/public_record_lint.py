@@ -3,23 +3,39 @@
 
 The public record (issue bodies, PR bodies, comments) is read by people who have the repository and
 nothing else. The lint blocks what such a reader cannot use: paths on this host, host names and
-addresses, process ids, GPU slots and leases, harness file names, tick-to-tick asides. It warns on
-shorthand a body may leave undefined. A `<details><summary>Harness trace</summary>` block in a comment is
-exempt: that is where the harness's own bookkeeping goes, the claim protocol line (`harness tick … pid N
-claiming`) included, because the launcher finds that line anywhere in a comment. Inside a closed fenced
-code block only the prose rules (GPU wording, tick asides, the warnings) are skipped, so quoted output
-does not block on harness vocabulary; every rule that identifies the machine still applies there.
+addresses, process ids, harness file names, tick-to-tick asides. It warns on harness labels in prose. A
+`<details><summary>Harness trace</summary>` block in a comment is exempt: that is where the harness's own
+bookkeeping goes, the claim protocol line (`harness tick … pid N claiming`) included, because the launcher
+finds that line anywhere in a comment. Inside a closed fenced code block only the prose rules (tick
+asides, an installation's rules marked prose, the warnings) are skipped, so quoted output does not block
+on harness vocabulary; every rule that identifies the machine still applies there.
 
     public_record_lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
     public_record_lint.py --kind comment -           lint a comment from stdin
     public_record_lint.py --pr 2138                  lint a PR body fetched with gh
     public_record_lint.py --issue 2137               lint an issue body fetched with gh
     public_record_lint.py --audit prs --last 20      one line per body over the last 20 PRs
-    public_record_lint.py --self-test                the built-in samples
+    public_record_lint.py --self-test                the built-in samples, core rules only
 
 GH_REPO (or --repo) names the repository for --pr, --issue and --audit. PUBLIC_RECORD_PR_SECTIONS and
 PUBLIC_RECORD_ISSUE_SECTIONS (comma-separated heading names) override the sections a body must carry.
-Exit 0 clean (warnings allowed), 1 blocking findings, 2 usage or fetch error.
+The harness labels the warning names come from WIP_LABEL, READY_LABEL, SIGNOFF_LABEL, OPERATOR_LABEL,
+LONG_LABEL, LANE_LABEL, FIRST_LABEL and LOW_LABEL.
+
+Any path under WORKTREE_ROOT, HARNESS_HOME or HARNESS_STATE, each when set, blocks.
+
+The installation's rules load from PUBLIC_RECORD_RULES, else from $HARNESS_INSTANCE_DIR/lint_rules.json
+(HARNESS_INSTANCE_DIR defaults to the checkout's instance/); an instance dir without that file is named
+on stderr on every run. The file is a JSON object:
+
+    {"version_words": ["SDK"],            words a dotted quad may follow as a version, not an address
+     "labels": ["ai:plan"],               more harness labels to warn on
+     "rules": [{"id": "...", "pattern": "...", "hint": "...",
+                "blocking": true,         false makes it a warning
+                "prose": false}]}         true skips it inside a closed fence
+
+A rule whose id is a core rule's replaces that rule. Exit 0 clean (warnings allowed), 1 blocking
+findings, 2 usage, rules-file or fetch error.
 """
 from __future__ import annotations
 
@@ -31,25 +47,92 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 _OCTET: str = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 _IPV4: str = rf"{_OCTET}(?:\.{_OCTET}){{3}}"
-# A dotted quad is also a version number (`Kit 106.5.0.2`), so a bare one passes only right after a
-# version word; with a port it is an address whatever precedes it.
-_VERSION_PREFIX: str = r"(?<![Vv]ersion )(?<![Kk]it )(?<![Kk]it-)(?<!Isaac Sim )"
-_HOST_ADDRESS: str = (rf"(?<![\w.]){_IPV4}:\d{{1,5}}\b|"
-                      rf"(?<![\w.-]){_VERSION_PREFIX}{_IPV4}(?![\w-]|\.\d|:\d)")
+DEFAULT_VERSION_WORDS: tuple[str, ...] = ("v", "version")
+# The label settings tick.sh and claimable.sh read, with their defaults.
+LABEL_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("WIP_LABEL", "ai:wip"), ("READY_LABEL", "ai:ready"), ("SIGNOFF_LABEL", "ai:signoff"),
+    ("OPERATOR_LABEL", "ai:operator"), ("LONG_LABEL", "ai:long"), ("LANE_LABEL", ""),
+    ("FIRST_LABEL", "ai:first"), ("LOW_LABEL", "ai:low"))
+DEFAULT_LABELS: tuple[str, ...] = tuple(default for _, default in LABEL_SETTINGS if default)
+
+
+def host_address_pattern(version_words: Sequence[str]) -> str:
+    """Returns the address pattern, letting a bare dotted quad pass right after a version word.
+
+    A dotted quad is also a version number (`version 1.2.3.4`), so a bare one passes only right after a
+    version word; with a port it is an address whatever precedes it. A word joined by a hyphen
+    (`v-1.2.3.4`) or with no space (`v1.2.3.4`) already passes: the quad must not follow a word
+    character, a dot or a hyphen.
+    """
+    prefix: str = ""
+    for word in version_words:
+        head: str = f"[{word[0].upper()}{word[0].lower()}]" if word[0].isalpha() else re.escape(word[0])
+        prefix += rf"(?<!\b{head}{re.escape(word[1:])} )"
+    return rf"(?<![\w.]){_IPV4}:\d{{1,5}}\b|(?<![\w.-]){prefix}{_IPV4}(?![\w-]|\.\d|:\d)"
 
 
 @dataclass(frozen=True)
 class Rule:
-    """One pattern the lint looks for, with the hint printed beside a hit."""
+    """One pattern the lint looks for, with the hint printed beside a hit.
+
+    A prose rule is skipped inside a closed fence, so quoted output may carry its words.
+    """
 
     rule_id: str
     pattern: re.Pattern[str]
     hint: str
     blocking: bool
+    prose: bool = False
+
+
+def core_rules(version_words: Sequence[str], labels: Sequence[str],
+               harness_roots: Sequence[str] = ()) -> tuple[Rule, ...]:
+    """Returns the rules every installation gets, blocking ones first.
+
+    Args:
+        version_words: Words a dotted quad may follow as a version.
+        labels: Harness labels to warn on in prose.
+        harness_roots: The worktree root, the harness checkout and its state; any path under one blocks.
+    """
+    rules: list[Rule] = []
+    roots: list[str] = [root.rstrip("/") for root in harness_roots if root.rstrip("/")]
+    if roots:
+        alternatives: str = "|".join(re.escape(root) for root in sorted(set(roots), key=len, reverse=True))
+        rules.append(Rule("harness-path", re.compile(rf"(?<![\w.-])(?:{alternatives})(?![\w.-])"),
+                          "a path in the harness's own trees: name the path inside the repository at a commit",
+                          True))
+    rules += [
+        Rule("host-path", re.compile(r"(?<![\w./-])(?:/home/\w+|~/|\$HOME\b|/mnt/\w+)"),
+             "a path on this host: name the path inside the repository at a commit, or say the file is not in "
+             "the repository", True),
+        Rule("host-address", re.compile(rf"{host_address_pattern(version_words)}|\bssh://|\bDOCKER_HOST\b|\(host \S+\)"),
+             "a host or an address: say what the host did ('the second test host'), never which", True),
+        Rule("process-id", re.compile(r"\bpid \d+\b"),
+             "a process id belongs in a comment's Harness trace block", True),
+        Rule("harness-file",
+             re.compile(r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage_ok|usage-lib|pr_sweep|worktree_gc|"
+                        r"instance-lib|public_record_lint|dashboard)\.(?:sh|py)\b|\bstate/(?:locks|logs|paused)\b"),
+             "a harness file: name the repository command that does the same", True),
+        Rule("tick-aside",
+             re.compile(r"\(mine\)|\bbudget \d+ ?min\b|\bharness tick\b|\bresume recipe\b|"
+                        r"\b(?:next|this|my|a later) tick\b|\bmerge (?:slot|lock)\b|\d{2}:\d{2}Z slot\b"),
+             "a tick-to-tick aside: the reader is not the next tick", True, prose=True),
+        Rule("container-tmp", re.compile(r"(?<![\w./-])/tmp/"),
+             "a path in a container or on this host", True),
+        Rule("operator-stamp",
+             re.compile(r"\b[Oo]perator(?:'s)?,? ?\(?\d{2}:\d{2}Z|\b\d{2}:\d{2}Z (?:ruling|sign-off|post|comment|"
+                        r"answer)\b|\(\d{2}:\d{2}Z\)"),
+             "a timestamp in place of a decision: write what was decided and link the comment", True),
+    ]
+    if labels:
+        alternatives: str = "|".join(re.escape(label) for label in sorted(set(labels), key=len, reverse=True))
+        rules.append(Rule("label-mention", re.compile(rf"(?<![\w:-])(?:{alternatives})(?![\w:-])"),
+                          "a harness label in prose: the labels show on the issue; say the state in words", False))
+    return tuple(rules)
 
 
 @dataclass(frozen=True)
@@ -74,6 +157,56 @@ class AuditRow:
     top_rules: str
 
 
+class RulesFileError(ValueError):
+    """The installation's rules file cannot be used as written."""
+
+
+def load_rules_file(path: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[Rule, ...]]:
+    """Reads an installation's lint_rules.json.
+
+    Args:
+        path: The file, laid out as the module docstring says.
+
+    Returns:
+        The extra version words, the extra labels, and the rules.
+
+    Raises:
+        RulesFileError: The file is missing, is not JSON, or does not have that layout.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data: Any = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RulesFileError(f"{path}: {error}") from error
+    if not isinstance(data, dict) or set(data) - {"version_words", "labels", "rules"}:
+        raise RulesFileError(f"{path}: expected an object with only version_words, labels and rules")
+
+    def strings(key: str) -> tuple[str, ...]:
+        value: Any = data.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+            raise RulesFileError(f"{path}: {key} must be a list of non-empty strings")
+        return tuple(value)
+
+    raw_rules: Any = data.get("rules", [])
+    if not isinstance(raw_rules, list):
+        raise RulesFileError(f"{path}: rules must be a list")
+    rules: list[Rule] = []
+    for index, raw in enumerate(raw_rules):
+        where: str = f"{path}: rules[{index}]"
+        if not isinstance(raw, dict) or set(raw) - {"id", "pattern", "hint", "blocking", "prose"}:
+            raise RulesFileError(f"{where}: expected an object with id, pattern, hint, and optional blocking, prose")
+        if not all(isinstance(raw.get(key), str) and raw[key] for key in ("id", "pattern", "hint")):
+            raise RulesFileError(f"{where}: id, pattern and hint must be non-empty strings")
+        if not all(isinstance(raw.get(key, False), bool) for key in ("blocking", "prose")):
+            raise RulesFileError(f"{where}: blocking and prose must be true or false")
+        try:
+            pattern: re.Pattern[str] = re.compile(raw["pattern"])
+        except re.error as error:
+            raise RulesFileError(f"{where} ({raw['id']}): bad pattern: {error}") from error
+        rules.append(Rule(raw["id"], pattern, raw["hint"], raw.get("blocking", True), raw.get("prose", False)))
+    return strings("version_words"), strings("labels"), tuple(rules)
+
+
 class PublicRecordLint:
     """Checks a body against the public-record contract and reports what it finds."""
 
@@ -85,70 +218,24 @@ class PublicRecordLint:
         r"<details>\s*<summary>[^<]*harness trace[^<]*</summary>.*?</details>", re.IGNORECASE | re.DOTALL)
     HEADING: re.Pattern[str] = re.compile(r"^#{1,3}\s+(.+?)\s*$", re.MULTILINE)
     FENCE_OPEN: re.Pattern[str] = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-    # Quoted output carries the harness's own words; only these rules let it.
-    PROSE_RULES: frozenset[str] = frozenset({"gpu-slot", "tick-aside"})
 
-    BLOCKING_RULES: tuple[Rule, ...] = (
-        Rule("host-path", re.compile(r"(?<![\w./-])(?:/home/\w+|~/|\$HOME\b|/mnt/\w+)"),
-             "a path on this host: name the path inside the repository at a commit, or say the file is not in "
-             "the repository", True),
-        Rule("scratch-path",
-             re.compile(r"\b(?:tmp_workspace|ai-worktrees|claude-issue-harness|manure-harness)\b|\bartifacts/manure-"),
-             "the harness's scratch tree: cite docs/manure-plan/evidence/<packet>/ at the commit that holds it",
-             True),
-        Rule("host-address", re.compile(rf"{_HOST_ADDRESS}|\bssh://|\bDOCKER_HOST\b|\(host \S+\)"),
-             "a host or an address: say what the host did ('the second GPU host'), never which", True),
-        Rule("process-id", re.compile(r"\bpid \d+\b"),
-             "a process id belongs in a comment's Harness trace block", True),
-        Rule("gpu-slot",
-             re.compile(r"\b(?:GPU|card|local|remote) slots? ?\d\b|\bresource\.lease|\bworv-iter(?:-\d+)?\b|"
-                        r"\b(?:local|remote) (?:lane|card|slot)\b|\bwhole[- ]card\b|\bcard alone\b|"
-                        r"\b[Ll]ease(?::| \d+\b| held\b)|\b(?:device|GPU|card) lease\b"),
-             "GPU bookkeeping: state the measurement condition instead ('with no other process on the GPU')",
-             True),
-        Rule("harness-file",
-             re.compile(r"\b(?:lease|merge-lock|claim|tick-pid|run_queue|slow_set|usage_ok|perf_control|"
-                        r"nucleus_ok|tick|evidence_trim|worktree_gc|manure_mirror|remote-env)\.(?:sh|py)\b|"
-                        r"\bstate/(?:locks|logs|paused)\b|\bbin/remote-docker\b"),
-             "a harness file: name the repository command that does the same", True),
-        Rule("tick-aside",
-             re.compile(r"\(mine\)|\bbudget \d+ ?min\b|\bharness tick\b|\bresume recipe\b|"
-                        r"\b(?:next|this|my|a later) tick\b|\bmerge (?:slot|lock)\b|\d{2}:\d{2}Z slot\b"),
-             "a tick-to-tick aside: the reader is not the next tick", True),
-        Rule("cubin-hash", re.compile(r"\bcubin [0-9a-f]{8,}\b"),
-             "a kernel binary hash: name the kernel source commit instead", True),
-        Rule("container-tmp", re.compile(r"(?<![\w./-])/tmp/(?!kit\.log\b)"),
-             "a path in a container or on this host", True),
-        Rule("operator-stamp",
-             re.compile(r"\b[Oo]perator(?:'s)?,? ?\(?\d{2}:\d{2}Z|\b\d{2}:\d{2}Z (?:ruling|sign-off|post|comment|"
-                        r"answer)\b|\(\d{2}:\d{2}Z\)"),
-             "a timestamp in place of a decision: write what was decided and link the comment", True),
-    )
-    WARNING_RULES: tuple[Rule, ...] = (
-        Rule("shorthand-scenario", re.compile(r"\bRS[1-7]\b"),
-             "define on first use, for example 'RS4, the scoop, carry and dump cycle' (prompts/glossary.md)",
-             False),
-        Rule("shorthand-class", re.compile(r"\bclass [AB]\b"),
-             "say what the class means: A changes no engine behaviour, B does and needs a sign-off", False),
-        Rule("shorthand-parent", re.compile(r"\bparent-[0-9a-f]{7,}\b"),
-             "name the base commit and say it is the unchanged tree the change is compared against", False),
-        Rule("shorthand-suite", re.compile(r"\b(?:fast|slow|whole) set\b"),
-             "name the command: tools/dev/iter.sh build --test [--fast] worv.env.manure", False),
-        Rule("shorthand-section", re.compile(r"§\s?[A-Z]\.\d+|§\s?\d+[a-z]?\b"),
-             "cite the document and the section's title", False),
-        Rule("shorthand-rule", re.compile(r"\b(?:P|V|D|T)\d{1,2}[a-z]?\b|\bbar [123]\b"),
-             "name the rule the first time: 'P1 (the engine names no body role)'", False),
-        Rule("shorthand-run", re.compile(r"\blockstep\b|\bidentity (?:arm|proof|run)s?\b|\b(?:change|parent) arms?\b"),
-             "say what the run is: a deterministic replay whose state documents must match byte for byte",
-             False),
-        Rule("label-mention", re.compile(r"\bai:(?:ready|wip|signoff|operator|plan|fable|long|group)\b"),
-             "a harness label in prose: the labels show on the issue; say the state in words", False),
-    )
-
-    def __init__(self, repo: str | None, pr_sections: Sequence[str], issue_sections: Sequence[str]) -> None:
+    def __init__(self, repo: str | None, pr_sections: Sequence[str], issue_sections: Sequence[str],
+                 rules: Sequence[Rule]) -> None:
         self._repo: str | None = repo
         self._pr_sections: tuple[str, ...] = tuple(pr_sections)
         self._issue_sections: tuple[str, ...] = tuple(issue_sections)
+        self._blocking: tuple[Rule, ...] = tuple(rule for rule in rules if rule.blocking)
+        self._warnings: tuple[Rule, ...] = tuple(rule for rule in rules if not rule.blocking)
+
+    @staticmethod
+    def compose_rules(version_words: Sequence[str], labels: Sequence[str], installation_rules: Sequence[Rule],
+                      harness_roots: Sequence[str] = ()) -> tuple[Rule, ...]:
+        """Returns the core rules with the installation's added, one with a core rule's id replacing it."""
+        replacing: dict[str, Rule] = {rule.rule_id: rule for rule in installation_rules}
+        core: tuple[Rule, ...] = core_rules((*DEFAULT_VERSION_WORDS, *version_words), (*labels,), harness_roots)
+        core_ids: set[str] = {rule.rule_id for rule in core}
+        return (tuple(replacing.get(rule.rule_id, rule) for rule in core)
+                + tuple(rule for rule in installation_rules if rule.rule_id not in core_ids))
 
     def lint(self, body: str, kind: str) -> tuple[Finding, ...]:
         """Lints one body.
@@ -176,15 +263,15 @@ class PublicRecordLint:
         seen_warnings: set[tuple[str, str]] = set()
         for line_index, line in enumerate(lines):
             if line_index in fenced:
-                for rule in self.BLOCKING_RULES:
-                    if rule.rule_id not in self.PROSE_RULES:
+                for rule in self._blocking:
+                    if not rule.prose:
                         for match in rule.pattern.finditer(line):
                             findings.append(Finding(rule.rule_id, line_index + 1, match.group(0), rule.hint, True))
                 continue
-            for rule in self.BLOCKING_RULES:
+            for rule in self._blocking:
                 for match in rule.pattern.finditer(line):
                     findings.append(Finding(rule.rule_id, line_index + 1, match.group(0), rule.hint, True))
-            for rule in self.WARNING_RULES:
+            for rule in self._warnings:
                 for match in rule.pattern.finditer(line):
                     key: tuple[str, str] = (rule.rule_id, match.group(0))
                     if key in seen_warnings:
@@ -279,27 +366,26 @@ class PublicRecordLint:
             True when every sample behaves as the contract says.
         """
         bad_body: str = "\n".join([
-            "Packet: `~/tmp_workspace/artifacts/manure-plan/evidence/2026-11-03-x/INDEX.md` on 192.0.2.178.",
-            "Lease: slot 1 (`worv-iter`), pid 2421513, budget 120 min, cubin b034f353dfa4, `lease.sh acquire`.",
+            "Results: `~/work/runs/1234/INDEX.md` on 192.0.2.178, pid 2421513, budget 120 min, `claim.sh acquire`.",
             "Operator (05:31Z) accepted it; land in the 06:00Z slot; log at /tmp/mg/run.log. Then `ai:ready` (mine).",
         ])
         good_pr: str = "\n".join([
-            "## Summary", "The return walk keeps a candidate's borne verdict while its inputs repeat. Fixes #2137.",
-            "## Why", "Each exchange read every column again; 57 ms of an 84 ms stage on RS6, the pushed-crate scenario.",
-            "## What changed", "- `ManureZone::_markBorneByStillSteel` keeps the verdict per row.",
-            "## How to verify", "```", "tools/dev/iter.sh build --test --fast worv.env.manure", "```",
-            "## Evidence", "Packet `docs/manure-plan/evidence/2026-11-03-2137-walk-hold-at-rest/` at 249643293.",
-            "## Scope and limits", "Compile-verified on the second GPU host only.",
+            "## Summary", "The handler parses the config once per change instead of once per request. Fixes #1234.",
+            "## Why", "Each request parsed the whole config again: 57 ms of an 84 ms handler, on version 1.2.3.4.",
+            "## What changed", "- `ConfigCache.get` keeps the parsed config keyed on the file's hash.",
+            "## How to verify", "```", "make test", "```",
+            "## Evidence", "The new case fails at 4f04f3f1f and passes at 8f4e54b3d; it was waiting on ai:ready.",
+            "## Scope and limits", "Measured on the second test host only.",
         ])
         good_comment: str = "\n".join([
-            "Claimed. Starting with the walk stage's split on 994809f4b, then the hold.",
+            "Claimed. Starting with the failing case for the parser on 994809f4b, then the fix.",
             "", "<details><summary>Harness trace</summary>", "",
             "harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min",
-            "host host-a, slot 1, worktree /home/you/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137",
+            "host host-a, worktree /home/you/worktrees/app-1234, claim.sh acquire 1234",
             "</details>",
         ])
         old_style_comment: str = ("harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host host-a), budget 120 min "
-                                  "(labels: ai,ai:plan). Claim time 2026-11-03T09:06:50Z.")
+                                  "(labels: ai,ai:wip). Claim time 2026-11-03T09:06:50Z.")
         passed: bool = True
 
         def check(name: str, condition: bool, detail: str) -> None:
@@ -309,14 +395,14 @@ class PublicRecordLint:
 
         bad_findings: tuple[Finding, ...] = self.lint(bad_body, "pr")
         fired: set[str] = {finding.rule_id for finding in bad_findings if finding.blocking}
-        for rule in self.BLOCKING_RULES:
+        for rule in self._blocking:
             check(f"{rule.rule_id} fires on the bad body", rule.rule_id in fired, self.format(bad_findings, "pr"))
         check("a body without the sections is blocked", "section" in fired, self.format(bad_findings, "pr"))
         good_findings: tuple[Finding, ...] = self.lint(good_pr, "pr")
         check("a PR body written to the contract has no blocking finding",
               not any(finding.blocking for finding in good_findings), self.format(good_findings, "pr"))
-        check("the PR body's shorthand is warned, not blocked",
-              any(finding.rule_id == "shorthand-scenario" for finding in good_findings), self.format(good_findings, "pr"))
+        check("the PR body's label in prose is warned, not blocked",
+              any(finding.rule_id == "label-mention" for finding in good_findings), self.format(good_findings, "pr"))
         comment_findings: tuple[Finding, ...] = self.lint(good_comment, "comment")
         check("a comment with its protocol line inside the trace block is clean",
               not any(finding.blocking for finding in comment_findings), self.format(comment_findings, "comment"))
@@ -363,6 +449,20 @@ class PublicRecordLint:
         return missing
 
     @staticmethod
+    def rules_path() -> tuple[str | None, str]:
+        """Returns the installation's rules file and the instance dir it was looked for in.
+
+        The file is PUBLIC_RECORD_RULES when set, else the instance's lint_rules.json when it exists.
+        """
+        home: str = os.environ.get("HARNESS_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        instance: str = os.environ.get("HARNESS_INSTANCE_DIR") or os.path.join(home, "instance")
+        explicit: str = os.environ.get("PUBLIC_RECORD_RULES", "")
+        if explicit:
+            return explicit, instance
+        candidate: str = os.path.join(instance, "lint_rules.json")
+        return (candidate if os.path.isfile(candidate) else None), instance
+
+    @staticmethod
     def main(argv: Sequence[str]) -> int:
         """Parses the command line and runs one of the modes.
 
@@ -391,12 +491,34 @@ class PublicRecordLint:
         issue_sections: tuple[str, ...] = tuple(
             part.strip() for part in os.environ.get("PUBLIC_RECORD_ISSUE_SECTIONS", "").split(",") if part.strip()
         ) or PublicRecordLint.DEFAULT_ISSUE_SECTIONS
-        lint: PublicRecordLint = PublicRecordLint(args.repo, pr_sections, issue_sections)
+        if args.self_test:
+            core: tuple[Rule, ...] = core_rules(DEFAULT_VERSION_WORDS, DEFAULT_LABELS)
+            return 0 if PublicRecordLint(args.repo, pr_sections, issue_sections, core).self_test() else 1
+        labels: list[str] = [label for name, default in LABEL_SETTINGS
+                             if (label := os.environ.get(name, default))]
+        version_words: tuple[str, ...] = ()
+        installation_rules: tuple[Rule, ...] = ()
+        rules_file, instance = PublicRecordLint.rules_path()
+        if rules_file is None and os.path.isdir(instance):
+            # An instance without its rules is likely a missed copy, and the lint then passes what
+            # the project's rules would block, so say so on every run.
+            print(f"public_record_lint: no lint_rules.json in {instance}; only the core rules applied",
+                  file=sys.stderr)
+        if rules_file is not None:
+            try:
+                version_words, extra_labels, installation_rules = load_rules_file(rules_file)
+            except RulesFileError as error:
+                print(f"public_record_lint: {error}", file=sys.stderr)
+                return 2
+            labels += extra_labels
+        lint: PublicRecordLint = PublicRecordLint(
+            args.repo, pr_sections, issue_sections,
+            PublicRecordLint.compose_rules(version_words, labels, installation_rules,
+                                           [os.environ.get(name, "") for name in
+                                            ("WORKTREE_ROOT", "HARNESS_HOME", "HARNESS_STATE")]))
         kind: str
         body: str
         try:
-            if args.self_test:
-                return 0 if lint.self_test() else 1
             if args.audit:
                 print(PublicRecordLint.format_audit(lint.audit(args.audit, args.last, args.base, args.label)))
                 return 0

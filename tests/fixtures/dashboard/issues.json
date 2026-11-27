@@ -147,7 +147,7 @@
  },
  {
   "number": 2063,
-  "title": "mpm: field lateral law",
+  "title": "app: field lateral law",
   "url": "https://github.com/example/repo/issues/2063",
   "updatedAt": "2026-11-26T01:00:00Z",
   "body": "",
@@ -188,7 +188,7 @@
      "name": "ai:plan"
     },
     {
-     "name": "ai:fable"
+     "name": "ai:lane"
     },
     {
      "name": "ai:first"
@@ -306,7 +306,7 @@
      "name": "ai:plan"
     },
     {
-     "name": "ai:fable"
+     "name": "ai:lane"
     }
    ]
   },

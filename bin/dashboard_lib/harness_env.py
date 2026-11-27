@@ -1,5 +1,5 @@
 """
-Reads named keys from config/harness.env without sourcing it.
+Reads named keys from the instance's harness.env without sourcing it.
 """
 import re
 from pathlib import Path
@@ -40,6 +40,25 @@ class HarnessEnvReader:
                 continue
             values[match.group(1)] = HarnessEnvReader._unquote(match.group(2))
         return values
+
+    @staticmethod
+    def expand(value: str, placeholders: dict[str, str]) -> str:
+        """
+        Replaces `$NAME` and `${NAME}` for each name in `placeholders`, and nothing else: the file is never
+        evaluated, so a value can only name the few directories the dashboard already knows.
+
+        Args:
+            value: A value as read, or one word of a split command.
+            placeholders: Name to its replacement.
+
+        Returns:
+            The value with those names replaced; any other `$` text is left as it is.
+        """
+        if not placeholders:
+            return value
+        names: str = "|".join(re.escape(name) for name in placeholders)
+        pattern: re.Pattern[str] = re.compile(r"\$(?:\{(" + names + r")\}|(" + names + r")(?![A-Za-z0-9_]))")
+        return pattern.sub(lambda match: placeholders[match.group(1) or match.group(2)], value)
 
     @staticmethod
     def _unquote(raw_value: str) -> str:

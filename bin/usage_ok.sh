@@ -2,20 +2,19 @@
 # Prints the rate-limit reading and exits 0 while both windows are under the point where a tick
 # stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT unless set; the
 # weekly window reads USAGE_TICK_STOP_WEEK_PCT, the same point unless set), 1 at or above it,
-# and 2 when no fresh reading exists. Ticks run it before starting any build, suite, kit, render
-# queue or agent.
+# and 2 when no fresh reading exists. Ticks run it before starting any build, suite, long run
+# or agent.
 set -u
-HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=/dev/null
-[ -r "$HARNESS_HOME/config/harness.env" ] && . "$HARNESS_HOME/config/harness.env"
+. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+harness_load
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/usage-lib.sh"
 
-# A ruling posted after a tick's claim binds that tick (prompts/runbook-plan.md, "Read the issue's
-# comments again"). Name each Operator comment on the issue this tick claimed that is newer than the
+# A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue this tick claimed that is newer than the
 # claim, once per tick. Silent, and never fatal, when no claim, no token or no answer is found.
 operator_notes() {
-    local state="${HARNESS_STATE:-$HARNESS_HOME/state}" pid=$PPID depth f iss cpid ctime seen since filter out
+    local state="$HARNESS_STATE" pid=$PPID depth f iss cpid ctime seen since filter out
     [ -n "${GH_REPO:-}" ] || return 0
     for depth in 1 2 3 4 5 6; do
         for f in "$state/locks"/claim.*; do

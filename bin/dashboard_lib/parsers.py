@@ -10,8 +10,8 @@ from dashboard_lib.models import (
     AllocatorLine,
     ClaimRecord,
     ContainerInfo,
-    GpuProcess,
-    GpuReading,
+    DeviceProcess,
+    DeviceReading,
     HostHealthRow,
     HostStreak,
     LeaseSlot,
@@ -26,21 +26,23 @@ from dashboard_lib.models import (
 
 class StateParsers:
     """
-    Turns harness text (TSV rows, `lease.sh status`, logs, probe output) into records.
+    Turns harness text (TSV rows, the resource status, logs, probe output) into records.
 
     Every parser takes text and returns records; none reads a file. A line that does not match its format is
-    skipped (or, for `lease.sh status`, kept as an unparsed line) so one malformed row never hides the rest.
+    skipped (or, for the resource status, kept as an unparsed line) so one malformed row never hides the rest.
     """
 
     HOST_HEALTH_COLUMNS: ClassVar[int] = 9
-    REMOTE_CARD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^remote card: (\S+) \(slots (\d+)-(\d+)\)$")
+    REMOTE_CARD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"^remote (?:device|card|host): (\S+) \(slots (\d+)-(\d+)\)$")
+    LOCAL_OFF_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^local (?:device|card|host): off\b")
     HARNESS_ONLY_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^harness ticks: (.*?) only\b")
     SLOT_FREE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^slot (\d+) free$")
     SLOT_HELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^(?:slot (\d+)|device) (HELD|ORPHAN) (\S+) (\d+) (\S+)((?: \S+)*?) \((alive|pid dead)\)$"
     )
     WAIT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^wait (whole-card|single-slot) issue (\d+) for (-?\d+) min(?: \((.*)\))?$"
+        r"^wait (whole-device|whole-card|whole-pool|single-slot) issue (\d+) for (-?\d+) min(?: \((.*)\))?$"
     )
     STALL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\S+) STALL (\S+) (\S+) ?(.*)$")
     ALLOCATOR_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{8}T\d{6}Z) (.*)$")
@@ -48,7 +50,6 @@ class StateParsers:
     MODEL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
     TOOL_EVAL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\beval '(.*)' < /dev/null", re.DOTALL)
     DOCKER_CGROUP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"docker[-/]([0-9a-f]{12})")
-    WORKTREE_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"ai-worktrees/[A-Za-z][A-Za-z0-9]*-(\d+)(?:/|$)")
     PACKET_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|/)\d{4}-\d{2}-\d{2}-(\d+)-[^/]*(?:/|$)")
 
     @staticmethod
@@ -130,13 +131,14 @@ class StateParsers:
     @staticmethod
     def parse_lease_status(text: str) -> LeaseStatus:
         """
-        Parses the output of `lease.sh status`.
+        Parses the resource status format; `device`, `card` and `host` name the same thing in its `remote` and
+        `local` lines, and `whole-device` and `whole-card` the same wait.
 
         Args:
             text: The command's stdout.
 
         Returns:
-            The cards, slots, device lease, operator priority and waits it names.
+            The remote hosts, slots, device lease, operator priority and waits it names.
         """
         remote_cards: list[RemoteCard] = []
         harness_only_hosts: tuple[str, ...] = ()
@@ -158,17 +160,14 @@ class StateParsers:
                 remote_cards.append(RemoteCard(card_match.group(1), int(card_match.group(2)), int(card_match.group(3))))
             elif only_match:
                 harness_only_hosts = tuple(only_match.group(1).split())
-            elif line.startswith("local card: off"):
+            elif StateParsers.LOCAL_OFF_PATTERN.match(line):
                 local_card_off = True
-            elif line.startswith("local host: off"):
-                continue
             elif line.startswith("operator priority:"):
                 operator_priority = tuple(line.split(":", 1)[1].split())
             elif wait_match:
-                waits.append(
-                    LeaseWait(wait_match.group(1), int(wait_match.group(2)), int(wait_match.group(3)),
-                              wait_match.group(4) or "")
-                )
+                kind: str = "whole-device" if wait_match.group(1) == "whole-card" else wait_match.group(1)
+                waits.append(LeaseWait(kind, int(wait_match.group(2)), int(wait_match.group(3)),
+                                       wait_match.group(4) or ""))
             elif line.startswith("slot ") or line.startswith("device "):
                 pending_slot_lines.append(line)
             else:
@@ -303,17 +302,17 @@ class StateParsers:
         Parses the output of the machine probe script (Collector.MACHINE_PROBE_SCRIPT).
 
         Args:
-            text: The script's stdout: a `load` line, two meminfo lines, then `--- gpu`, `--- apps`, `--- cgroup`
-                and `--- docker` sections.
+            text: The script's stdout: a `load` line, two meminfo lines, then `--- device`, `--- processes` and
+                `--- cgroup` sections when a device is probed, and a `--- docker` section.
 
         Returns:
-            Load, memory, the first card, its compute processes and the running containers.
+            Load, memory, the device, its processes and the running containers.
         """
         section: str = "head"
         load1: float | None = None
         nproc: int | None = None
         meminfo_kb: dict[str, int] = {}
-        gpu: GpuReading | None = None
+        gpu: DeviceReading | None = None
         app_rows: list[tuple[int, float | None, str]] = []
         container_by_pid: dict[int, str] = {}
         containers: list[ContainerInfo] = []
@@ -330,16 +329,16 @@ class StateParsers:
                     nproc = StateParsers._optional_int(parts[2])
                 elif parts[0] in ("MemTotal:", "MemAvailable:") and len(parts) >= 2 and parts[1].isdigit():
                     meminfo_kb[parts[0].rstrip(":")] = int(parts[1])
-            elif section == "gpu" and gpu is None:
+            elif section == "device" and gpu is None:
                 gpu_columns: list[str] = [column.strip() for column in line.split(",")]
                 if len(gpu_columns) >= 4:
-                    gpu = GpuReading(
+                    gpu = DeviceReading(
                         name=gpu_columns[0],
                         util_pct=StateParsers._optional_float(gpu_columns[1]),
                         mem_used_mb=StateParsers._optional_float(gpu_columns[2]),
                         mem_total_mb=StateParsers._optional_float(gpu_columns[3]),
                     )
-            elif section == "apps":
+            elif section == "processes":
                 app_columns: list[str] = [column.strip() for column in line.split(",", 2)]
                 if len(app_columns) == 3 and app_columns[0].isdigit():
                     app_rows.append((int(app_columns[0]), StateParsers._optional_float(app_columns[1]),
@@ -355,8 +354,8 @@ class StateParsers:
                     containers.append(ContainerInfo(docker_columns[0][:12], docker_columns[1], docker_columns[2],
                                                     docker_columns[3]))
         name_by_id: dict[str, str] = {container.container_id: container.name for container in containers}
-        gpu_processes: tuple[GpuProcess, ...] = tuple(
-            GpuProcess(pid, used_mb, name,
+        gpu_processes: tuple[DeviceProcess, ...] = tuple(
+            DeviceProcess(pid, used_mb, name,
                        name_by_id.get(container_by_pid.get(pid, ""), container_by_pid.get(pid)))
             for pid, used_mb, name in app_rows
         )
@@ -374,19 +373,22 @@ class StateParsers:
         )
 
     @staticmethod
-    def issue_from_path(path: str) -> int | None:
+    def issue_from_path(path: str, worktree_root: str) -> int | None:
         """
-        Reads the issue a worktree or evidence packet belongs to from its path.
+        Reads the issue a worktree or run packet belongs to from its path.
 
         Args:
-            path: A path holding an `ai-worktrees/<prefix>-<issue>` worktree or a
-                `<YYYY-MM-DD>-<issue>-<slug>` packet.
+            path: A path holding a `<worktree root>/<name>-<issue>` worktree or a `<YYYY-MM-DD>-<issue>-<slug>`
+                packet.
+            worktree_root: WORKTREE_ROOT; empty matches no worktree.
 
         Returns:
             The issue number, or None when the path names neither.
         """
-        match: re.Match[str] | None = StateParsers.WORKTREE_ISSUE_PATTERN.search(path) \
-            or StateParsers.PACKET_ISSUE_PATTERN.search(path)
+        root: str = worktree_root.rstrip("/")
+        worktree_match: re.Match[str] | None = re.search(
+            re.escape(root) + r"/[A-Za-z][A-Za-z0-9-]*-(\d+)(?:/|$)", path) if root else None
+        match: re.Match[str] | None = worktree_match or StateParsers.PACKET_ISSUE_PATTERN.search(path)
         return int(match.group(1)) if match else None
 
     @staticmethod
@@ -426,11 +428,11 @@ class StateParsers:
     @staticmethod
     def _parse_slot_line(line: str, remote_cards: list[RemoteCard]) -> LeaseSlot | None:
         """
-        Parses one `slot N ...` or `device ...` line of `lease.sh status`.
+        Parses one `slot N ...` or `device ...` line of the resource status.
 
         Args:
             line: The line.
-            remote_cards: The cards named above it, to place the slot on its host.
+            remote_cards: The remote hosts named above it, to place the slot on its host.
 
         Returns:
             The slot (slot None for the device lease), or None when the line does not match.
@@ -470,7 +472,7 @@ class StateParsers:
 
         Args:
             slot_number: The slot.
-            remote_cards: The remote cards and their slot ranges.
+            remote_cards: The remote hosts and their slot ranges.
 
         Returns:
             The remote host whose range holds the slot, else `local`.

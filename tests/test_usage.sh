@@ -7,7 +7,7 @@ H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
 # A scratch harness home with no config, so the real cache and fetch script are never read.
 mkdir -p "$H/bin"
-cp "$here/bin/usage-lib.sh" "$here/bin/usage_ok.sh" "$H/bin/"
+cp "$here/bin/usage-lib.sh" "$here/bin/usage_ok.sh" "$here/bin/instance-lib.sh" "$H/bin/"
 export USAGE_CACHE="$H/usage-cache.json" USAGE_FETCH="$H/no-fetch" HARNESS_HOME="$H"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }

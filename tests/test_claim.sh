@@ -24,6 +24,8 @@ out=$("$CLAIM" status 8); check "status names a live holder" '[[ "$out" == "HELD
 echo "10 $D 2026-09-28T00:00:00Z" > "$L/claim.10"
 out=$("$CLAIM" status 10); check "status names a dead holder" '[[ "$out" == "ORPHAN 10 $D "* ]]' "$out"
 out=$("$CLAIM" status 11); check "status of an unclaimed issue is free" '[[ "$out" == free ]]' "$out"
+mkdir -p "$H/st"
+out=$(HARNESS_STATE="$H/st" "$CLAIM" acquire 12); check "the claim lives under HARNESS_STATE when set" '[[ "$out" == ACQUIRED ]] && [ -s "$H/st/locks/claim.12" ] && [ ! -e "$L/claim.12" ]' "$out"
 "$CLAIM" acquire abc >/dev/null 2>&1; rc=$?; check "a non-numeric issue is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 "$CLAIM" take 7 >/dev/null 2>&1; rc=$?; check "an unknown command is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 

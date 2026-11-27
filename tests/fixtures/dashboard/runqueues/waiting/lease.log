@@ -1,9 +1,0 @@
-holder 4200 start 2026-11-26T01:00:00Z queue=/e/q want=ci@192.0.2.60 deadline=1795700000
-2026-11-26T01:00:00Z BUSY kit limit 2/2
-2026-11-26T01:05:00Z BUSY kit limit 2/2
-holder 4201 start 2026-11-26T02:30:00Z queue=/e/q want=ci@192.0.2.60 deadline=1795700000
-2026-11-26T02:30:00Z BUSY priority 2490 waits for the whole card
-2026-11-26T02:31:00Z ACQUIRED slot=7 remote=ci@192.0.2.60
-2026-11-26T02:32:00Z grant on ci@192.0.2.60, not ci@192.0.2.60: released
-2026-11-26T02:40:00Z BUSY no remote card is free, alone and quiet
-2026-11-26T02:44:00Z BUSY no remote card is free, alone and quiet
