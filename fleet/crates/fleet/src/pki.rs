@@ -8,7 +8,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fleet_proto::{DeviceName, Role};
+use fleet_proto::{DeviceName, ROLE_URI_PREFIX, Role};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
@@ -22,9 +22,6 @@ pub const CA_DAYS: u32 = 3650;
 /// Browsers' ceiling for a leaf, and short enough that a lost key ages out.
 pub const LEAF_DAYS: u32 = 397;
 pub const MAX_DAYS: u32 = 36_500;
-
-/// The SAN URI prefix of a client certificate's role, as fleetd reads it.
-pub const ROLE_URI_PREFIX: &str = "fleet:role:";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
