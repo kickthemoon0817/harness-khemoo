@@ -92,5 +92,27 @@ check "with a slot free inside the width, the normal tick starts and no landing 
     "log=$(cat "$LOG" 2>/dev/null) lanes=$(cat "$FAKE_LANES")"
 release_all
 
+# Through fleet the prompt is on stdin, so a landing tick carries a label that tells it in the process table.
+cat > "$H/fakebin/fleet" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = dispatch ] || exit 2
+printf '%s\n' "$*" >> "$FAKE_FLEET_ARGV"
+head -1 >> "$FAKE_LANES"
+EOF
+cp "$H/livebin/claude" "$H/livebin/fleet"
+chmod +x "$H/fakebin/fleet" "$H/livebin/fleet"
+printf '%s\n' "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet" >> "$H/instance/harness.env"
+export FAKE_FLEET_ARGV="$H/fleet-argv.txt"
+usage 10 68; echo 1 > "$FAKE_READY"; hold 1; hold 2; sleep 0.3
+launch
+check "through fleet, the landing tick is dispatched with its label" \
+    'grep -q "landing tick: claim only an issue labelled" "$FAKE_LANES" && grep -q -- "--label tick=landing$" "$FAKE_FLEET_ARGV"' \
+    "lanes=$(cat "$FAKE_LANES") argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
+"$H/livebin/fleet" dispatch --device auto --adapter claude --wait --label tick=landing >/dev/null 2>&1 & holders+=($!)
+sleep 0.3
+launch
+check "a live dispatched landing tick keeps a second one from starting" '[ ! -s "$FAKE_LANES" ]' "lanes=$(cat "$FAKE_LANES")"
+release_all
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
