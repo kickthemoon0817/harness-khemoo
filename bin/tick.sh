@@ -246,8 +246,8 @@ while [ "$s" -le "$MAX_SLOTS" ]; do
     s=$(( s + 1 ))
 done
 [ "$free" -eq 0 ] && exit 0
-# Every model cooling down: a runner would only log that nothing ran.
-[ -z "$(pick_model "")" ] && exit 0
+# Every model cooling down and no fable lane to run: a runner would only log that nothing ran.
+[ -z "$(pick_model "")" ] && ! fable_lane && exit 0
 
 compute_allowed
 if [ "$pct" = "?" ]; then

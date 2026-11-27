@@ -59,7 +59,10 @@ The owner: "each job takes excessive testing time, just implement and only check
 3. **The item document** the issue names (`todo/Tnn-*.md`, `STRATEGY.md` probes), and the
    investigations it cites.
 4. The repository's `CLAUDE.md` hard rules.
-5. `runbook.md` — for the **mechanics only**, as listed below.
+5. **`public-record.md`** — how every issue body, PR body, comment and close summary is written,
+   for a reader who has the repository and nothing else; `bin/public_record_lint.py` gates each post
+   (override 14).
+6. `runbook.md` — for the **mechanics only**, as listed below.
 
 The plan's working copy is `/home/khemoo/tmp_workspace/artifacts/manure-plan/`. The same text is in the
 repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read it there.
@@ -470,11 +473,13 @@ overridden below.
      identity kits mount, the scenario runner, the render companion or a scenario file. Docs, tests,
      analysis tools, unmounted extensions and investigations merge when ready, as before; 3b exempts them.
    - **Ready.** When the proof holds against the current head and the packet is written:
-     - a perf step, whose issue asks for a gain, is ready only once its gain read has posted, card alone,
-       against the same base. Identity alone does not make it ready: a cut that does not pay is dropped,
+     - a perf step, whose issue asks for a gain, is ready only once its gain read has posted against the
+       same base, stated as taken with no other process on the GPU. Identity alone does not make it ready: a cut that does not pay is dropped,
        not landed (operator, 2026-11-03, #2148; P7);
      - add `ai:ready` to the issue and the PR;
-     - post `harness tick pid <PID> pausing: ready for the merge slot, proven on <base9>, packet <path>`;
+     - post a pause comment that says in plain words the change is ready to land, proven on `<base9>`, with
+       the packet as `docs/manure-plan/evidence/<packet>/INDEX.md`, and the line `harness tick pid <PID>
+       pausing` inside its Harness trace block (override 14);
      - END without merging.
    - **Landing in a slot.** `claimable.sh` offers `ai:ready` issues only while a slot is open. The tick that
      takes one runs these steps in order:
@@ -518,7 +523,7 @@ overridden below.
        production file with yours (`gh pr view <n> --json files`). Ignore version, CHANGELOG and device-record files.
      - **None:** prove against the window base as now; PRs that share no file land as one batch.
      - **One or more:** take the earliest-ready one as your base. Merge its branch into yours, resolving the shared hunks
-       as unions, and prove on that merge result. Say `rides on #<pr>` in your ready line and in the PR body.
+       as unions, and prove on that merge result. Say `rides on #<pr>` in your ready comment and in the PR body.
      - **Landing a rider.** Land it in the same slot right after the PR it rides on. Step 3 accepts the commits
        that PR's landing brought as a batch-mate's, and step 2 then meets no conflict outside version and
        CHANGELOG, because the rider already holds them.
@@ -567,7 +572,7 @@ overridden below.
      3. **One set of arms.** Run RS1–RS6 change arms of the group branch against the shared parent pairs
         (3a), one set for the whole group, on either card.
      4. **All identical.** Set aside only the keys the members' packets name.
-        - Post `Group proof: identical on <base9>, packet <path>` on each member.
+        - Post `Group proof: identical on <base9>, packet docs/manure-plan/evidence/<packet>/INDEX.md` on each member.
         - Lift the holds and add `ai:ready` to each member and its PR.
         - The members land one by one in the slot, in group order, as 3c says.
      5. **A scenario parts.** Bisect on that scenario only: re-run it on half the members, then narrow.
@@ -579,7 +584,7 @@ overridden below.
         A group may be filed while its members are still implementing (operator, 2026-10-29, #2042). Each member
         then keeps its lane and finishes that evidence without scenario arms and without the fast set. The group's
         host checks run the fast set once, on the combination. Each member posts
-        `Member evidence ready: <branch>@<hash>, packet <path>` and holds itself with `ai:operator`. The group issue
+        `Member evidence ready: <branch>@<hash>, packet docs/manure-plan/evidence/<packet>/INDEX.md` and holds itself with `ai:operator`. The group issue
         stays on `ai:operator` until every member has done so, and the operator lifts it.
      2. **Read the combination.** The group branch, built as above, carries every member. Its scenario arms
         (change against parent), V5 and tick cost are read on that combination, the tree that will land.
@@ -683,9 +688,11 @@ overridden below.
      landings may go on only if they add no failure to the fast set on their merge result, and the landing comment
      names the head's own red cases. Then close the issue. A PR that 3c holds
      for a merge slot lands only in a slot, as 3c says.
-   - **Class B** — a behaviour change: open the PR with the packet linked in `## Verification`, add
-     `ai:signoff` to the PR and the issue, post `harness tick pid <PID> pausing: awaiting
-     sign-off, packet <path>`, and END. Never merge a class B PR before its sign-off comment.
+   - **Class B** — a behaviour change: open the PR with the sections of override 14, the packet cited in
+     `## Evidence` by its repository path, add `ai:signoff` to the PR and the issue, post a pause comment
+     that says in plain words the PR awaits sign-off, with the packet as
+     `docs/manure-plan/evidence/<packet>/INDEX.md` and the line `harness tick pid <PID> pausing` inside its
+     Harness trace block, and END. Never merge a class B PR before its sign-off comment.
    - If a class A issue turns out to change behaviour, treat it as class B and say why.
    - **Class B after its sign-off** (landing in a merge slot, 3c). When the issue carries a comment starting
      `Owner sign-off: approved` or `Operator sign-off: approved`, a tick may land the PR: merge `origin/ai/manure-mpm` into the branch,
@@ -699,7 +706,7 @@ overridden below.
        landing comment, and the operator reviews it after the fact.
      - **The same line.** Where both sides edited the same line, stop and post a `Plan finding:` with
        the proposed resolution.
-6. **Principle checks in every PR body**: P1 (the diff names no body role — grep the diff for
+6. **Principle checks in every PR body, under its `## Principle checks` section**: P1 (the diff names no body role — grep the diff for
    bucket, wheel, cutting_edge, carried, parked, tool box; explain any hit), P4 (ledger drift over the
    run), P9 (every new constant with its class: MATERIAL, DERIVED, SHARED RULE, SETTING — a bare
    number in a law is a defect), P10 (which interface the change sits behind, once A0 exists).
@@ -747,6 +754,50 @@ overridden below.
     `worv.robots.locomotion` and `worv.robots.attachments` builds.** The baked image's locomotion rejects
     `[drive].wheel_odom_hz`, and the robot never boots. That is how #1367's first traces were all invalid.
     A run that fails this check is named as failed in the packet, never used.
+
+14. **The public record is written for a reader with the repository and nothing else**
+    (`public-record.md`; operator, 2026-11-03). The issues and PRs of this branch had become notes
+    between the operator and one machine: packets named by their path on this host, GPU slots,
+    hosts, PIDs, cubin hashes, merge slots and "(mine)" in the bodies, and no packet INDEX.md
+    committed since 2026-09-25 while every PR cited one. So:
+    - **Every body is linted before it is posted.** Write it to a file, run
+      `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr|issue|comment <file>`,
+      and post with `--body-file` only when it exits 0. A blocking finding is rewritten, never
+      posted around. Warnings name shorthand to define on first use (`glossary.md`).
+    - **A PR body has the sections of `public-record.md`**, in its order: Summary (with
+      `Fixes #<issue>`, the class in words, the version), Why, What changed, How to verify (repository
+      commands and what they should read), Evidence, Principle checks (override 6), Scope and limits.
+      `## Verification` is retired. The same sections for a docs-only or tests-only PR, the ones that
+      do not apply saying so in one line.
+    - **The packet is cited by its repository path, and its text is committed in the PR.** The tick
+      still writes the packet under the plan's evidence folder on this host (override 2); before the
+      PR it copies the packet's text — `INDEX.md`, `packet.md`, every `visual-check*.md`, `checks/*`
+      scripts and notes, tables and run summaries under 200 kB — into
+      `docs/manure-plan/evidence/<packet>/` on its branch, and the body names
+      `docs/manure-plan/evidence/<packet>/INDEX.md` at the PR's head. Frames, videos, traces and
+      `.npy` stay out of git; the INDEX.md lists each with its size and says it is kept outside the
+      repository under the packet's name. A packet cited by any other path is a blocking finding.
+    - **Every reading carries its commit and its condition**, in a table when there are more than
+      two: which tree, which scenario and seed, whether another process shared the GPU, the window
+      and the percentile. A comparison is stated only between arms taken in one session, and says so.
+    - **Harness words stay out of bodies**: tick, slot, lease, lane, merge slot, merge lock, whole
+      card, worktree, cubin hash, budget, "(mine)", "the next tick". The measurement condition they
+      imply is stated instead, or nothing. An operator ruling is quoted as what it decided, linking
+      the comment, never as a time of day.
+    - **A comment's visible text is the state in plain words**, each item with its commit: what
+      is being started, done, running or owed, and what a successor must do. The protocol line the
+      launcher parses — `harness tick <UTC> pid <PID> claiming|resuming, budget <n> min`,
+      `harness tick pid <PID> checkpoint <n> at <UTC>`, `harness tick pid <PID>
+      pausing|withdrawing|releasing` — goes **inside** the `<details><summary>Harness trace</summary>`
+      block at the end, with the labels, the host, the slot, the worktree and the resume recipe. The
+      launcher finds the line anywhere in the comment; in the open, "harness tick … pid … claiming
+      (host …), budget 120 min (labels: …)" is the record of one machine, and the lint blocks it.
+    - **A close summary** is one or two sentences: what landed, as which commit and version, and
+      where the evidence is. A landing comment names the merge commit, the version and the suites run
+      on the merge result.
+    - An issue a tick files (one that blocks it) has the defect layout of `public-record.md`:
+      `## Summary`, `## Observed`, `## Expected`, `## Evidence`, `## Ask`, a `Depends on:` line and
+      `Class:`; `Depends on:` keeps its exact form because the launcher reads it.
 
 ## Done
 

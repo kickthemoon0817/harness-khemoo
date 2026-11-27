@@ -21,7 +21,12 @@ cat > "$H/livebin/claude" <<'EOF'
 #!/usr/bin/env bash
 sleep 30
 EOF
-chmod +x "$H/fakebin/claude" "$H/fakebin/queue" "$H/livebin/claude"
+# tick.sh reads the crontab to tell a paused harness; the stub keeps the host's out of it.
+cat > "$H/fakebin/crontab" <<'EOF'
+#!/usr/bin/env bash
+echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
+EOF
+chmod +x "$H/fakebin/claude" "$H/fakebin/queue" "$H/fakebin/crontab" "$H/livebin/claude"
 cat > "$H/config/harness.env" <<EOF
 TARGET_REPO=$H/target
 QUEUE_DEPTH_CMD=$H/fakebin/queue
@@ -35,7 +40,7 @@ WEEK_HALF_AT=64
 WEEK_ONE_AT=70
 CLAIM_GRACE_S=0
 EOF
-export HARNESS_HOME="$H" FAKE_LANES="$H/lanes.txt" FAKE_READY="$H/ready.txt" FAKE_WORK="$H/work.txt"
+export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_LANES="$H/lanes.txt" FAKE_READY="$H/ready.txt" FAKE_WORK="$H/work.txt"
 L="$H/state/locks"; LOG="$H/state/logs/allocator.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
