@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Runs a tick through the real fleet and fleetd: bin/tick.sh in runner mode with FLEET_DISPATCH=1
+# dispatches to a fleetd on a unix socket, whose agent adapter is a script that records its stdin and
+# hits a usage limit on the first model. Then the dashboard reads the same fleet's status. Needs cargo
+# to build fleet/; without it the suite is skipped, except in CI, where that is a failure.
+set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if ! command -v cargo >/dev/null 2>&1; then
+    if [ -n "${CI:-}" ]; then echo "FAIL cargo is not installed, and CI must run this suite"; exit 1; fi
+    echo "SKIP test_fleet_e2e.sh: cargo is not installed, so fleet and fleetd cannot be built"
+    exit 0
+fi
+# The fleet workspace pins its toolchain in fleet/rust-toolchain.toml, which rustup reads from the cwd.
+(cd "$here/fleet" && cargo build --quiet --locked --bin fleet --bin fleetd) || { echo "FAIL cargo build"; exit 1; }
+target=$(cd "$here/fleet" && cargo metadata --format-version 1 --no-deps \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+FLEET="$target/debug/fleet"; FLEETD="$target/debug/fleetd"
+
+H=$(mktemp -d)
+daemon=""
+cleanup() { [ -n "$daemon" ] && kill "$daemon" 2>/dev/null; rm -rf "$H"; }
+trap cleanup EXIT
+mkdir -p "$H/bin" "$H/prompts" "$H/instance/prompts" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin"
+cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+echo "Core rules." > "$H/prompts/tick-core.md"
+cp "$here/tests/fixtures/instance/prompts/tick.md" "$H/instance/prompts/tick.md"
+git -C "$H/target" init -q
+cat > "$H/agent.sh" <<'EOF'
+printf '=== %s\n' "$1" >> "$AGENT_RECORD"
+cat >> "$AGENT_RECORD"
+if [ "$1" = model-a ]; then
+    echo "You've hit your usage limit · resets 5pm"
+    exit 1
+fi
+echo "agent tick on $1 done"
+EOF
+cat > "$H/fakebin/crontab" <<'EOF'
+#!/usr/bin/env bash
+echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$H/fakebin/gh"
+chmod +x "$H/fakebin/crontab" "$H/fakebin/gh"
+
+cat > "$H/fleetd.toml" <<EOF
+device = "dev-a"
+state_dir = "$H/fleetd"
+kill_grace_s = 1
+
+[adapters.fake]
+exe = "/bin/sh"
+args = ["$H/agent.sh", "{model}"]
+models = ["model-a", "model-b"]
+workdir_roots = ["$H/target"]
+match_exe = ["fleet-e2e-none"]
+max_concurrent = 2
+
+[adapters.fake.env]
+AGENT_RECORD = "$H/agent-stdin.txt"
+EOF
+cat > "$H/instance/fleet.toml" <<EOF
+[devices.dev-a]
+transport = "local"
+socket = "$H/fleetd/fleetd.sock"
+EOF
+cat > "$H/instance/harness.env" <<EOF
+TARGET_REPO=$H/target
+WORKTREE_ROOT=$H/worktrees
+GH_REPO=example-org/example-repo
+CLAUDE_FLAGS=
+TICK_AGENT=fake
+TICK_MODELS="model-a model-b"
+FLEET_DISPATCH=1
+FLEET_BIN=$FLEET
+FLEET_STATUS_CMD="$FLEET status --json"
+MAX_SLOTS=1
+USAGE_CACHE=$H/usage-cache.json
+USAGE_FETCH=$H/no-fetch
+EOF
+
+"$FLEETD" --config "$H/fleetd.toml" 2>"$H/fleetd.log" & daemon=$!
+for _ in $(seq 100); do [ -S "$H/fleetd/fleetd.sock" ] && break; sleep 0.1; done
+
+pass=0; fail=0
+check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
+
+check "fleetd is up" '[ -S "$H/fleetd/fleetd.sock" ]' "$(cat "$H/fleetd.log")"
+export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH"
+unset HARNESS_INSTANCE_DIR HARNESS_ENV FLEET_CONFIG
+"$H/bin/tick.sh" runner 1 0
+log=$(ls "$H"/state/logs/tick-*-slot1.log 2>/dev/null | head -1)
+record="$H/agent-stdin.txt"
+
+check "the prompt reached the agent on stdin, on each model" \
+    'grep -qx "=== model-a" "$record" && grep -qx "=== model-b" "$record" && [ "$(grep -c "^Core rules\.$" "$record")" -eq 2 ]' \
+    "$(cat "$record" 2>/dev/null)"
+check "the tick log has the agent's output and fleet's exit status" \
+    'grep -q "agent tick on model-b done" "$log" && grep -q "^fleet: dev-a: session d-" "$log" && grep -q "exit=1 .*model=model-a" "$log" && grep -q "exit=0 .*model=model-b" "$log"' \
+    "$(cat "$log" 2>/dev/null)"
+check "a usage-limit line cools the model down" \
+    '[ -f "$H/state/model-cooldown/model-a" ] && [ ! -f "$H/state/model-cooldown/model-b" ] && grep -q "model-a hit its usage limit" "$H/state/logs/allocator.log"' \
+    "$(ls "$H/state/model-cooldown" 2>/dev/null); $(cat "$H/state/logs/allocator.log" 2>/dev/null)"
+
+snapshot=$(python3 "$here/bin/dashboard.py" --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
+    --remote-interval 0 --claimable-interval 0 --once 2>"$H/dashboard.err")
+panel=$(printf '%s' "$snapshot" | python3 -c '
+import json, sys
+fleet = json.load(sys.stdin)["fleet"]
+if not fleet["devices"]:
+    sys.exit("no devices: " + str(fleet["error"]))
+device = fleet["devices"][0]
+sessions = sorted((s["model"], s["adapter"], s["state"]) for s in fleet["sessions"])
+print(fleet["available"], device["name"], device["error"], device["cpus"] > 0, device["adapters"][0]["name"],
+      " ".join(",".join(s) for s in sessions))
+' 2>&1)
+check "the dashboard's fleet panel reads the real fleet status" \
+    '[ "$panel" = "True dev-a None True fake model-a,fake,exited 1 model-b,fake,exited 0" ]' \
+    "$panel; $(tail -5 "$H/dashboard.err")"
+
+echo "pass=$pass fail=$fail"
+[ "$fail" -eq 0 ]
