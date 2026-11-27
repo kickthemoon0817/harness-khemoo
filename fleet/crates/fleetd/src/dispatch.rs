@@ -485,13 +485,37 @@ fn spawn(launch: &Launch, argv: &[OsString], workdir: &Path) -> io::Result<(Chil
         }
     }
     cmd.envs(&launch.env);
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     let pgid = child
         .id()
         .and_then(|p| i32::try_from(p).ok())
         .and_then(Pid::from_raw)
         .ok_or_else(|| io::Error::other("the agent exited before it could be tracked"))?;
+    if !started_in_roots(pgid, &launch.workdir_roots) {
+        let _ = rustix::process::kill_process_group(pgid, Signal::KILL);
+        let _ = child.start_kill();
+        return Err(io::Error::other(
+            "the agent started outside the adapter's workdir_roots",
+        ));
+    }
     Ok((child, pgid))
+}
+
+/// Whether the agent's working directory, read back after it started, is still inside the
+/// adapter's roots. The workdir is checked as a path before the spawn; a symlink swapped
+/// into that path in between would move the child elsewhere, and this catches it. A child
+/// already gone, or a cwd that cannot be read, passes: there is nothing left to stop.
+#[cfg(target_os = "linux")]
+fn started_in_roots(pid: Pid, roots: &[PathBuf]) -> bool {
+    match std::fs::read_link(format!("/proc/{}/cwd", pid.as_raw_nonzero())) {
+        Ok(cwd) => roots.iter().any(|r| cwd.starts_with(r)),
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn started_in_roots(_pid: Pid, _roots: &[PathBuf]) -> bool {
+    true
 }
 
 #[cfg(target_os = "linux")]
@@ -668,5 +692,25 @@ async fn pump(pipe: Option<impl AsyncRead + Unpin>, log: &tokio::sync::Mutex<Log
             Ok(0) | Err(_) => return,
             Ok(n) => log.lock().await.write(&buf[..n]).await,
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_is_checked_against_the_roots_by_its_actual_cwd() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        assert!(started_in_roots(pid, std::slice::from_ref(&dir)));
+        assert!(!started_in_roots(pid, &[dir.join("elsewhere")]));
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 }

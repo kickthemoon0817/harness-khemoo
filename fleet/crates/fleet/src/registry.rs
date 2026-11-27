@@ -328,6 +328,25 @@ fn has_control(s: &str) -> bool {
     s.chars().any(char::is_control)
 }
 
+/// ssh options a device may not set: each would forward the hub's agent, display or ports to
+/// the device, run a local command, or pull in config that could do either.
+const SSH_DENIED_OPTIONS: &[&str] = &[
+    "ForwardAgent",
+    "ForwardX11",
+    "ForwardX11Trusted",
+    "ProxyCommand",
+    "LocalCommand",
+    "PermitLocalCommand",
+    "RemoteCommand",
+    "LocalForward",
+    "RemoteForward",
+    "DynamicForward",
+    "Tunnel",
+    "KnownHostsCommand",
+    "Include",
+    "Match",
+];
+
 fn ssh_transport(key: &str, dev: &RawDevice, program: &Path) -> Result<Transport, ConfigError> {
     let target = dev
         .target
@@ -343,12 +362,24 @@ fn ssh_transport(key: &str, dev: &RawDevice, program: &Path) -> Result<Transport
     }
     let options = dev.ssh_options.clone().unwrap_or_default();
     for o in &options {
-        let valid = o
-            .split_once('=')
-            .is_some_and(|(k, _)| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric()))
-            && !has_control(o);
-        if !valid {
-            return Err(err(format!("{key}.ssh_options: each must be Key=value")));
+        let name = match o.split_once('=') {
+            Some((k, _))
+                if !k.is_empty()
+                    && k.bytes().all(|b| b.is_ascii_alphanumeric())
+                    && !has_control(o) =>
+            {
+                k
+            }
+            _ => return Err(err(format!("{key}.ssh_options: each must be Key=value"))),
+        };
+        if let Some(denied) = SSH_DENIED_OPTIONS
+            .iter()
+            .find(|d| d.eq_ignore_ascii_case(name))
+        {
+            return Err(err(format!(
+                "{key}.ssh_options: {denied} is not allowed: it forwards to the device, runs a \
+                 command, or reads more config"
+            )));
         }
     }
     let remote_command = dev

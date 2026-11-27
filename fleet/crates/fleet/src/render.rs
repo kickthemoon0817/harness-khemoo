@@ -1,16 +1,37 @@
 //! Human-readable tables. They are not a stable interface; scripts use `--json`.
 //!
-//! Every string a device reported is untrusted: [`clean`] replaces its control characters
-//! before it reaches a terminal, so a device cannot move the cursor or retitle the window.
+//! Every string a device reported is untrusted: [`clean`] replaces its control characters,
+//! bidi controls and zero-width characters before it reaches a terminal, so a device cannot
+//! move the cursor, retitle the window, or make text read differently from what it is.
 
 use std::fmt::Write as _;
 
 use fleet_proto::SessionState;
 use fleet_proto::output::{SessionsOutput, StatusOutput, TransportKind};
 
+/// Bidi controls and zero-width characters: invisible, they can make text read in another
+/// order than it is (a "Trojan Source" spoof) or hide a difference between two names.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{061C}'
+            | '\u{FEFF}'
+    )
+}
+
 pub fn clean(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .map(|c| {
+            if c.is_control() || is_invisible(c) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -19,7 +40,7 @@ pub fn clean(s: &str) -> String {
 pub fn clean_output(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            if (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || is_invisible(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -208,6 +229,22 @@ mod tests {
             clean_output("ok\tdone\r\n\x1b[2J\x7f\u{85}\u{9b}31m\x00é"),
             "ok\tdone\r\n\u{FFFD}[2J\u{FFFD}\u{FFFD}\u{FFFD}31m\u{FFFD}é"
         );
+    }
+
+    #[test]
+    fn bidi_and_zero_width_characters_are_replaced() {
+        let invisible = [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{200B}', '\u{200C}',
+            '\u{200D}', '\u{2060}', '\u{FEFF}',
+        ];
+        for c in invisible {
+            let s = format!("a{c}b");
+            assert_eq!(clean(&s), "a\u{FFFD}b", "{:04X}", u32::from(c));
+            assert_eq!(clean_output(&s), "a\u{FFFD}b", "{:04X}", u32::from(c));
+        }
+        assert_eq!(clean("é\u{2010}"), "é\u{2010}");
+        assert_eq!(clean_output("x\ty\n"), "x\ty\n");
     }
 
     #[test]

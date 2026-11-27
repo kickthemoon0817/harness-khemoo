@@ -218,8 +218,16 @@ async fn ssh_speaks_the_protocol_over_the_child_stdio() {
         recorded_argv(dir.path()),
         [
             "-T",
+            "-a",
+            "-x",
             "-o",
             "BatchMode=yes",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "PermitLocalCommand=no",
             "-o",
             "Port=2222",
             "--",
@@ -228,6 +236,59 @@ async fn ssh_speaks_the_protocol_over_the_child_stdio() {
             "--stdio"
         ]
     );
+}
+
+/// Runs the real ssh's `-G` on fleet's argv under a config that turns every forwarding on,
+/// and checks fleet's options win. Skipped where ssh -G cannot run.
+#[tokio::test]
+async fn ssh_config_cannot_turn_forwarding_back_on() {
+    let dir = TempDir::new();
+    let ssh = fake_ssh(dir.path(), FakeSsh::Mock("dev-c"));
+    let reg = load(&write_config(dir.path(), &ssh_config(&ssh)));
+    connect(&reg, "dev-c", Role::Monitor).await.unwrap();
+    let config = dir.join("ssh_config");
+    std::fs::write(
+        &config,
+        "Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  LocalForward 1234 localhost:22\n  \
+         RemoteForward 2345 localhost:22\n  DynamicForward 3456\n  PermitLocalCommand yes\n  \
+         LocalCommand touch pwned\n",
+    )
+    .unwrap();
+    let resolve = |args: &[String]| {
+        std::process::Command::new("ssh")
+            .arg("-F")
+            .arg(&config)
+            .arg("-G")
+            .args(args)
+            .output()
+    };
+    // ssh -G also fails where the uid has no passwd entry, as in some containers.
+    match resolve(&["probe".to_owned()]) {
+        Ok(probe) if probe.status.success() => {}
+        probe => {
+            eprintln!("skipped: ssh -G cannot run here: {probe:?}");
+            return;
+        }
+    }
+    let out = resolve(&recorded_argv(dir.path())).unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let resolved = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = resolved.lines().collect();
+    for want in [
+        "forwardagent no",
+        "forwardx11 no",
+        "clearallforwardings yes",
+        "permitlocalcommand no",
+        "port 2222",
+    ] {
+        assert!(lines.contains(&want), "{want:?} not in {resolved}");
+    }
+    for forward in ["localforward", "remoteforward", "dynamicforward"] {
+        assert!(
+            !lines.iter().any(|l| l.starts_with(forward)),
+            "{forward} in {resolved}"
+        );
+    }
 }
 
 #[tokio::test]

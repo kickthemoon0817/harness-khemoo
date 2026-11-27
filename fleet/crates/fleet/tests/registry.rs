@@ -258,6 +258,34 @@ fn errors_name_the_key() {
 }
 
 #[test]
+fn ssh_options_that_forward_or_run_commands_are_refused() {
+    for option in [
+        "ForwardAgent=yes",
+        "forwardx11=yes",
+        "FORWARDX11TRUSTED=yes",
+        "ProxyCommand=nc %h %p",
+        "LocalCommand=id",
+        "PermitLocalCommand=yes",
+        "RemoteCommand=sh",
+        "LocalForward=1234 localhost:22",
+        "RemoteForward=1234 localhost:22",
+        "DynamicForward=1080",
+        "Tunnel=yes",
+        "KnownHostsCommand=id",
+        "Include=/tmp/x",
+        "match=all",
+    ] {
+        let text =
+            format!("[devices.a]\ntransport = \"ssh\"\ntarget = \"a\"\nssh_options = [{option:?}]");
+        let message = load_err(&text);
+        assert!(
+            message.contains("devices.a.ssh_options") && message.contains("not allowed"),
+            "{option}: {message}"
+        );
+    }
+}
+
+#[test]
 fn a_missing_file_is_an_error() {
     let dir = TempDir::new();
     let e = load(&dir.join("absent.toml")).err().unwrap();

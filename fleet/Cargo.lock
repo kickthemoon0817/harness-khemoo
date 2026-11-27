@@ -259,6 +259,7 @@ dependencies = [
  "fleet-proto",
  "futures-util",
  "rcgen",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
