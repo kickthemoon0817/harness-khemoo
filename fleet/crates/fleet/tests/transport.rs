@@ -229,6 +229,10 @@ async fn ssh_speaks_the_protocol_over_the_child_stdio() {
             "-o",
             "PermitLocalCommand=no",
             "-o",
+            "ControlPath=none",
+            "-o",
+            "ControlMaster=no",
+            "-o",
             "Port=2222",
             "--",
             "dev@dev-c.example.com",
@@ -251,7 +255,7 @@ async fn ssh_config_cannot_turn_forwarding_back_on() {
         &config,
         "Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  LocalForward 1234 localhost:22\n  \
          RemoteForward 2345 localhost:22\n  DynamicForward 3456\n  PermitLocalCommand yes\n  \
-         LocalCommand touch pwned\n",
+         LocalCommand touch pwned\n  ControlMaster auto\n  ControlPath ~/.ssh/mux-%C\n",
     )
     .unwrap();
     let resolve = |args: &[String]| {
@@ -279,6 +283,7 @@ async fn ssh_config_cannot_turn_forwarding_back_on() {
         "forwardx11 no",
         "clearallforwardings yes",
         "permitlocalcommand no",
+        "controlmaster false",
         "port 2222",
     ] {
         assert!(lines.contains(&want), "{want:?} not in {resolved}");

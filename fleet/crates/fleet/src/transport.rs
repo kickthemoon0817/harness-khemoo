@@ -29,7 +29,8 @@ const SSH_STDERR_TAIL: usize = 2048;
 
 /// Given before the device's own options. ssh keeps the first value it sees for an option,
 /// so neither those nor `~/.ssh/config` can turn agent or X11 forwarding, port forwards or a
-/// local command back on: a compromised device must not reach the hub's ssh agent.
+/// local command back on: a compromised device must not reach the hub's ssh agent. No control
+/// socket either, so a master another session opened, with its own forwards, is never reused.
 const SSH_HARDENING: &[&str] = &[
     "-T",
     "-a",
@@ -42,6 +43,10 @@ const SSH_HARDENING: &[&str] = &[
     "ForwardAgent=no",
     "-o",
     "PermitLocalCommand=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ControlMaster=no",
 ];
 
 /// The byte stream under a [`Connection`], whichever transport opened it.
