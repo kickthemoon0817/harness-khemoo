@@ -99,7 +99,7 @@ fi
 # reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
 export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
     ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
-    TICK_AGENT FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG
+    TICK_AGENT TICK_AGENT_EXES FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG
 export -n GH_TOKEN
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
@@ -407,10 +407,8 @@ if [ "${1:-}" = "runner" ]; then
                 # agent's status and writes its output here, so what follows reads it as a local run's.
                 # The timeout allows the longest budget and half an hour to wrap up.
                 dispatch=("$FLEET_BIN" dispatch --device "${FLEET_DEVICE:-auto}" --adapter "$TICK_AGENT"
-                    --workdir "$WORKTREE_ROOT" --model "$model" --wait --timeout $(( (LONG_TICK_BUDGET_MIN + 30) * 60 )))
+                    --workdir "$TARGET_REPO" --model "$model" --wait --timeout $(( (LONG_TICK_BUDGET_MIN + 30) * 60 )))
                 [ -n "$landing" ] && dispatch+=(--label tick=landing)
-                # A dispatch needs its workdir to exist; a tick creates the root only on its first worktree.
-                mkdir -p "$WORKTREE_ROOT"
                 compose_prompt "$lane" | "${dispatch[@]}" >>"$log" 2>&1
                 rc=$?
             else

@@ -264,12 +264,11 @@ fleet_env() { write_env "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet" "LONG_TI
 fleet_env
 launch
 check "FLEET_DISPATCH runs fleet dispatch with the argv the contract gives, and not claude" \
-    '[ "$(cat "$FAKE_FLEET_ARGV")" = "dispatch --device auto --adapter claude --workdir $H/worktrees --model fake-model --wait --timeout 7200" ] && [ ! -e "$FAKE_PROMPT" ]' \
+    '[ "$(cat "$FAKE_FLEET_ARGV")" = "dispatch --device auto --adapter claude --workdir $H/target --model fake-model --wait --timeout 7200" ] && [ ! -e "$FAKE_PROMPT" ]' \
     "argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null) log=$(cat "$LOG")"
 check "the prompt goes on stdin, never into argv" \
     '[ "$(head -1 "$FAKE_FLEET_STDIN")" = "This tick runs on fake-model." ] && grep -q "^Core rules for" "$FAKE_FLEET_STDIN" && ! grep -q "Core rules" "$FAKE_FLEET_ARGV"' \
     "stdin=$(cat "$FAKE_FLEET_STDIN" 2>/dev/null)"
-check "the dispatch creates the workdir it names" '[ -d "$H/worktrees" ]' ""
 echo 7 > "$FAKE_FLEET_RC"
 launch
 tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
