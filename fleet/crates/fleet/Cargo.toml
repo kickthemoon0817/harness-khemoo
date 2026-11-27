@@ -8,20 +8,23 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 clap.workspace = true
 fleet-proto.workspace = true
-rcgen.workspace = true
+futures-util.workspace = true
+# x509-parser: issuing a leaf reads the CA's subject and key identifier back from ca.pem.
+rcgen = { workspace = true, features = ["x509-parser"] }
 rustls.workspace = true
-rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tokio-rustls.workspace = true
-toml.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
+# preserve_order: devices keep their file order, which is the registry order everywhere.
+toml = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+x509-parser.workspace = true
 
 [lints]
 workspace = true
