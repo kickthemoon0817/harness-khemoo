@@ -788,6 +788,15 @@ fleet --version | --help
 
   If fleet receives SIGINT or SIGTERM while waiting, it cancels the session over a new connection,
   best effort, and exits 128 + the signal.
+
+  The exit code alone is ambiguous: an agent that exits 124, 125 or 130 itself, or 128 + N, looks
+  like a timeout, a fleet failure, a cancel or a signal. A caller that must tell them apart uses
+  `--json`: the last line is then `{"state": {…}}` with the session's end, such as
+  `{"kind": "exited", "code": 124}` against `{"kind": "timed_out"}`, and when fleet itself
+  failed there is no `state` line at all. Without `--json`, a fleet failure writes
+  `fleet: <device>: …` to stderr after the `fleet: <device>: session <id>` line, while an
+  agent's own exit code writes nothing more there; the session id also lets `fleet sessions
+  --json` report the recorded state afterwards.
 - `--device auto` asks every device with `auto = true` for its status, concurrently, and keeps
   those that answered, have the adapter with `max_concurrent` above 0 and `running` below it,
   and allow `--model` if one is given. It orders them by `load[0] / cpus`, lowest first, ties in
