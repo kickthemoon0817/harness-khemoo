@@ -91,6 +91,8 @@ pub async fn start(cfg: Config, tls: Option<Arc<rustls::ServerConfig>>) -> anyho
         let policy = TlsPolicy {
             acceptor: TlsAcceptor::from(server_config),
             per_ip: PerIp::new(t.max_connections_per_ip),
+            conns: Arc::new(Semaphore::new(t.max_connections)),
+            handshakes: Arc::new(Semaphore::new(t.max_handshakes)),
         };
         tasks.spawn(Arc::clone(&daemon).tls_loop(tcp, policy, rx.clone()));
     }
@@ -172,6 +174,10 @@ pub(crate) fn peer_allowed(peer_uid: u32, own_uid: u32) -> bool {
 struct TlsPolicy {
     acceptor: TlsAcceptor,
     per_ip: PerIp,
+    /// One permit per tls connection, from accept to close.
+    conns: Arc<Semaphore>,
+    /// One permit per connection still in its TLS handshake or `Hello`.
+    handshakes: Arc<Semaphore>,
 }
 
 struct Daemon {
@@ -179,7 +185,7 @@ struct Daemon {
     sessions: Arc<Sessions>,
     inventory: Arc<Inventory>,
     discovery: Arc<Discovery>,
-    /// One permit per open connection, across transports.
+    /// One permit per unix connection, the ssh relay's included.
     conns: Arc<Semaphore>,
 }
 
@@ -257,8 +263,13 @@ impl Daemon {
                             tracing::debug!(%ip, "refused a peer outside allow_cidrs");
                             continue;
                         }
-                        let Ok(permit) = Arc::clone(&self.conns).try_acquire_owned() else {
-                            tracing::debug!(%ip, "refused a tls peer over max_connections");
+                        let Ok(permit) = Arc::clone(&policy.conns).try_acquire_owned() else {
+                            tracing::debug!(%ip, "refused a tls peer over tls.max_connections");
+                            continue;
+                        };
+                        let Ok(handshaking) = Arc::clone(&policy.handshakes).try_acquire_owned()
+                        else {
+                            tracing::debug!(%ip, "refused a tls peer over tls.max_handshakes");
                             continue;
                         };
                         let Some(slot) = policy.per_ip.acquire(ip) else {
@@ -270,7 +281,7 @@ impl Daemon {
                         conns.spawn(async move {
                             let _slot = slot;
                             let _ = tcp.set_nodelay(true);
-                            this.tls_conn(tcp, &policy.acceptor, permit).await;
+                            this.tls_conn(tcp, &policy.acceptor, permit, handshaking).await;
                         });
                     }
                     Err(e) => {
@@ -287,6 +298,7 @@ impl Daemon {
         tcp: tokio::net::TcpStream,
         acceptor: &TlsAcceptor,
         permit: OwnedSemaphorePermit,
+        handshaking: OwnedSemaphorePermit,
     ) {
         let Some(tls_cfg) = self.cfg.tls.as_ref() else {
             return;
@@ -320,14 +332,14 @@ impl Daemon {
                 }
             }
         };
-        if let Ok(Some((conn, role, id))) =
-            tokio::time::timeout(self.cfg.handshake_timeout, setup).await
-        {
+        let setup = tokio::time::timeout(self.cfg.handshake_timeout, setup).await;
+        drop(handshaking);
+        if let Ok(Some((conn, role, id))) = setup {
             self.serve(conn, role, &Peer::Tls(id), permit).await;
         }
     }
 
-    /// The request loop. `_permit` holds the connection's place under `max_connections`.
+    /// The request loop. `_permit` holds the connection's place in its transport's budget.
     async fn serve<T: AsyncRead + AsyncWrite + Unpin>(
         &self,
         mut conn: Connection<T>,

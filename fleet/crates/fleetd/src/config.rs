@@ -73,7 +73,13 @@ pub struct TlsConfig {
     pub ca: PathBuf,
     pub cert: PathBuf,
     pub key: PathBuf,
+    /// The tls listener's own budget, apart from the unix one, so peers that have not
+    /// authenticated can never lock out local and ssh clients.
+    pub max_connections: usize,
+    /// At most `max_connections`.
     pub max_connections_per_ip: usize,
+    /// At most `max_connections`; bounds slow handshakes holding the budget.
+    pub max_handshakes: usize,
     /// Normalized with [`normalize_serial`].
     pub revoked_serials: HashSet<String>,
 }
@@ -274,7 +280,9 @@ struct RawTls {
     ca: PathBuf,
     cert: PathBuf,
     key: PathBuf,
+    max_connections: Option<u64>,
     max_connections_per_ip: Option<u64>,
+    max_handshakes: Option<u64>,
     #[serde(default)]
     revoked_serials: Vec<String>,
 }
@@ -520,19 +528,34 @@ fn parse_tls(raw: RawTls) -> Result<TlsConfig, ConfigError> {
                 .ok_or_else(|| invalid("tls.revoked_serials", format!("{s:?} is not hex")))
         })
         .collect::<Result<_, _>>()?;
+    let max_connections = usize_of(ranged(
+        "tls.max_connections",
+        raw.max_connections,
+        64,
+        1,
+        MAX_CONNECTIONS_LIMIT,
+    )?);
+    // Unset, each limit defaults to no more than the budget it divides.
+    let within = |key: &str, v: Option<u64>, default: u64| {
+        let default = default.min(max_connections as u64);
+        let v = usize_of(ranged(key, v, default, 1, MAX_CONNECTIONS_LIMIT)?);
+        if v > max_connections {
+            return Err(invalid(key, "must not exceed tls.max_connections"));
+        }
+        Ok(v)
+    };
+    let max_connections_per_ip =
+        within("tls.max_connections_per_ip", raw.max_connections_per_ip, 8)?;
+    let max_handshakes = within("tls.max_handshakes", raw.max_handshakes, 32)?;
     Ok(TlsConfig {
         listen,
         allow_cidrs,
         ca: absolute("tls.ca", raw.ca)?,
         cert: absolute("tls.cert", raw.cert)?,
         key: absolute("tls.key", raw.key)?,
-        max_connections_per_ip: usize_of(ranged(
-            "tls.max_connections_per_ip",
-            raw.max_connections_per_ip,
-            8,
-            1,
-            MAX_CONNECTIONS_LIMIT,
-        )?),
+        max_connections,
+        max_connections_per_ip,
+        max_handshakes,
         revoked_serials,
     })
 }

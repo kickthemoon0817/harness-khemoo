@@ -77,7 +77,9 @@ preset = "codex"
     assert_eq!(cfg.stdio_max_role, Role::Dispatch);
     assert!(cfg.all_users);
     let tls = cfg.tls.as_ref().unwrap();
+    assert_eq!(tls.max_connections, 64);
     assert_eq!(tls.max_connections_per_ip, 8);
+    assert_eq!(tls.max_handshakes, 32);
     assert!(tls.revoked_serials.contains("abcd"));
 
     let names: Vec<&str> = cfg.adapters.iter().map(|a| a.name.as_str()).collect();
@@ -150,6 +152,10 @@ fn each_bad_value_is_refused_naming_its_key() {
         (tls("listen = \"192.0.2.10:7443\"\nallow_cidrs = [\"10.0.0.0/33\"]"), "tls.allow_cidrs"),
         (tls("listen = \"192.0.2.10:7443\"\nrevoked_serials = [\"zz\"]"), "tls.revoked_serials"),
         (tls("listen = \"192.0.2.10:7443\"\nmax_connections_per_ip = 0"), "tls.max_connections_per_ip"),
+        (tls("listen = \"192.0.2.10:7443\"\nmax_connections = 0"), "tls.max_connections"),
+        (tls("listen = \"192.0.2.10:7443\"\nmax_connections = 4\nmax_connections_per_ip = 5"), "tls.max_connections_per_ip"),
+        (tls("listen = \"192.0.2.10:7443\"\nmax_connections = 4\nmax_handshakes = 5"), "tls.max_handshakes"),
+        (tls("listen = \"192.0.2.10:7443\"\nmax_handshakes = 0"), "tls.max_handshakes"),
         ("[tls]\nlisten = \"192.0.2.10:7443\"\nca = \"ca.pem\"\ncert = \"/c\"\nkey = \"/k\"".into(), "tls.ca"),
         ("[tls]\nlisten = \"192.0.2.10:7443\"\nca = \"/c\"\ncert = \"/c\"\nkey = \"k\"".into(), "tls.key"),
         ("[adapters.Bad]\nmatch_exe = [\"x\"]".into(), "adapters.Bad"),
@@ -198,6 +204,16 @@ fn bad_top_level_values_are_refused() {
         let err = Config::parse(toml).expect_err(toml).to_string();
         assert!(err.contains(key), "{toml:?}: {err}");
     }
+}
+
+#[test]
+fn tls_limits_default_within_a_small_budget() {
+    let f = Fixture::new();
+    let cfg = f
+        .parse("[tls]\nlisten = \"192.0.2.10:7443\"\nmax_connections = 4\nca = \"/c\"\ncert = \"/c\"\nkey = \"/k\"\n")
+        .unwrap();
+    let tls = cfg.tls.unwrap();
+    assert_eq!((tls.max_connections_per_ip, tls.max_handshakes), (4, 4));
 }
 
 #[test]

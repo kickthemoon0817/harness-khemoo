@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::support::{TempDir, adapter, base_config, error_code, next, request, start};
+use crate::support::{TempDir, adapter, base_config, connect, error_code, next, request, start};
 
 type Ca = CertifiedIssuer<'static, KeyPair>;
 
@@ -336,4 +336,68 @@ fn the_tls_material_is_checked_at_load() {
         .replace("device = \"dev-a\"", "device = \"dev-b\"");
     let err = fleetd::tls::load(&cfg(&other)).unwrap_err();
     assert!(err.to_string().contains("tls.cert"), "{err}");
+}
+
+/// Whether the server drops a fresh TCP connection without waiting out the handshake timeout.
+async fn dropped_at_once(addr: SocketAddr) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(3), tcp.read(&mut byte));
+    matches!(read.await, Ok(Ok(0) | Err(_)))
+}
+
+/// Opens raw TCP connections that never start a handshake, and lets the server accept them.
+async fn idle_peers(addr: SocketAddr, n: usize) -> Vec<TcpStream> {
+    let mut held = Vec::new();
+    for _ in 0..n {
+        held.push(TcpStream::connect(addr).await.unwrap());
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    held
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_tls_peers_cannot_lock_out_unix_clients() {
+    let pki = Pki::new();
+    let toml = pki
+        .config("max_connections = 2\nmax_connections_per_ip = 2\nmax_handshakes = 2")
+        .replace("kill_grace_s = 1", "kill_grace_s = 1\nmax_connections = 1");
+    let running = start(&toml).await;
+    let addr = running.tls_addr().unwrap();
+    let _held = idle_peers(addr, 2).await;
+    assert!(dropped_at_once(addr).await, "the tls budget is full");
+
+    let (mut conn, _) = connect(&running, Role::Monitor).await;
+    let resp = request(&mut conn, 1, json!({"op": "status"})).await;
+    assert!(
+        matches!(resp.body, ResponseBody::Status(_)),
+        "the unix budget is separate"
+    );
+    running.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connections_past_max_handshakes_are_dropped_at_once() {
+    let pki = Pki::new();
+    let running = start(&pki.config("max_connections = 8\nmax_handshakes = 1")).await;
+    let addr = running.tls_addr().unwrap();
+    let held = idle_peers(addr, 1).await;
+    assert!(
+        dropped_at_once(addr).await,
+        "one handshake is already in flight"
+    );
+
+    drop(held);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let cfg = client_config(
+        &pki.ca,
+        Some(client_cert(&pki.ca, &["fleet:role:monitor"], 50)),
+    );
+    let (_done, _) = session(addr, Arc::clone(&cfg), Role::Monitor)
+        .await
+        .unwrap();
+    // A finished handshake gives its slot back while the connection stays open.
+    assert!(works(addr, cfg).await);
+    running.shutdown().await;
 }

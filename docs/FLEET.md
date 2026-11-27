@@ -230,7 +230,7 @@ A message is for people and never holds a prompt, environment value or secret.
 | `forbidden` | fleetd | the device's policy refuses it: workdir outside the roots, model not allowed, a discovery-only adapter, or `logs`, `wait` or `cancel` on a discovered session |
 | `bad_request` | fleetd | the frame did not decode or a value failed validation |
 | `not_found` | fleetd | no such adapter or session, or the workdir does not exist |
-| `busy` | fleetd | the adapter is at `max_concurrent`, or fleetd is at `max_connections` |
+| `busy` | fleetd | the adapter is at `max_concurrent`, or the unix socket is at `max_connections` |
 | `too_large` | fleetd | a frame exceeded 1 MiB |
 | `version_mismatch` | fleetd, hub | the peers' protocol versions differ |
 | `unavailable` | fleetd | `fleetd --stdio` found no running daemon to relay to |
@@ -337,9 +337,16 @@ These apply to the tls transport:
   `0.0.0.0` or `::` unless `allow_cidrs` is non-empty.
 - When `allow_cidrs` is non-empty, a peer whose address is in none of them is closed right after
   `accept`, before the TLS handshake. IPv4-mapped IPv6 addresses are matched as IPv4.
-- At most `max_connections` connections are open across all transports, and at most
-  `max_connections_per_ip` from one address. A tls connection over a limit is closed before the
-  handshake; a unix one gets a `Hello` granting `monitor`, then a `busy` error with id 0.
+- The tls listener has its own connection budget, `[tls] max_connections`, apart from the unix
+  socket's (top-level `max_connections`, which ssh relays also count against). A tls connection
+  holds a place from `accept` to close, so peers that have not authenticated, or never will, can
+  fill only the tls budget and never lock out local or ssh clients. Within it, at most
+  `[tls] max_connections_per_ip` come from one address, and at most `[tls] max_handshakes` are
+  still in their TLS handshake or `Hello`, so slow handshakes cannot fill it either; a finished
+  handshake gives its slot back.
+- A tls connection over any of these limits is closed right after `accept`, before the handshake;
+  a unix one over `max_connections` gets a `Hello` granting `monitor`, then a `busy` error with
+  id 0.
 - `handshake_timeout_s` bounds the TLS handshake plus the `Hello`. `idle_timeout_s` closes a
   connection that sends no frame while it has no request in progress.
 
@@ -493,7 +500,7 @@ be absolute unless the table says otherwise.
 | `session_retention_s` | integer ≥ 0 | 604800 | how long an ended dispatched session (metadata and log) is kept |
 | `log_max_bytes` | integer ≥ 4096 | 67108864 | per-session log cap |
 | `kill_grace_s` | integer 1 to 300 | 10 | the wait between SIGTERM and SIGKILL |
-| `max_connections` | integer 1 to 4096 | 32 | open connections across all transports |
+| `max_connections` | integer 1 to 4096 | 32 | open unix socket connections, the ssh relays' included; tls has its own budget |
 | `handshake_timeout_s` | integer 1 to 300 | 10 | TLS handshake plus `Hello` |
 | `idle_timeout_s` | integer ≥ 1 | 300 | a connection with no request in progress that sends nothing this long is closed |
 
@@ -554,7 +561,9 @@ Absent means fleetd listens on no TCP port.
 | `ca` | path | required | PEM file with one or more CA certificates that client certificates must chain to |
 | `cert` | path | required | PEM chain, leaf first; the leaf must have a DNS SAN equal to `device`, checked at startup |
 | `key` | path | required | PEM private key (PKCS#8, SEC1 or PKCS#1), mode 0600 or 0400, owned by fleetd's user |
-| `max_connections_per_ip` | integer 1 to 4096 | 8 | open tls connections from one address |
+| `max_connections` | integer 1 to 4096 | 64 | open tls connections, from `accept` to close |
+| `max_connections_per_ip` | integer 1 to `max_connections` | 8, or `max_connections` if lower | open tls connections from one address |
+| `max_handshakes` | integer 1 to `max_connections` | 32, or `max_connections` if lower | tls connections still in the TLS handshake or `Hello` |
 | `revoked_serials` | array of strings | `[]` | client certificate serials to refuse, as hex (case, `:` separators and leading zeros ignored) |
 
 ### `[adapters.<name>]`
