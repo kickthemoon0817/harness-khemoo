@@ -18,6 +18,17 @@ unset -f docker 2>/dev/null
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
+# While state/ov-aliases.toml exists (the operator's Nucleus redirects during an outage), every
+# container a run or create starts here gets it as its client's config, read-only, so its kit
+# resolves the aliased omniverse:// URLs. Removing the file ends the redirect for new containers.
+ov_aliases="$(cd "$self_dir/../.." && pwd)/state/ov-aliases.toml"
+if [ -s "$ov_aliases" ]; then
+  ov_args=("$@"); ov_si=-1
+  for ((ov_i = 0; ov_i < ${#ov_args[@]}; ov_i++)); do case "${ov_args[$ov_i]}" in -*) ;; *) ov_si=$ov_i; break ;; esac; done
+  if [ "$ov_si" -ge 0 ] && { [ "${ov_args[$ov_si]}" = run ] || [ "${ov_args[$ov_si]}" = create ]; }; then
+    set -- "${ov_args[@]:0:$((ov_si + 1))}" -v "$ov_aliases:/root/.nvidia-omniverse/config/omniverse.toml:ro" "${ov_args[@]:$((ov_si + 1))}"
+  fi
+fi
 # This host's card is the owner's, and its default runtime hands every container the card unless
 # told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) runs only what
 # `tools/dev/iter.sh build` needs: `docker run` with the options listed below in their separate or
