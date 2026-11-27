@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Serves the harness status dashboard on 127.0.0.1: machines, live ticks, the issue queue, landings and health
-signals, plus the instance's resource slots, run queues and build lanes when it configures them, as an
-auto-refreshing page (`/`) and as JSON (`/api/state`).
+signals, plus the instance's resource slots, run queues, build lanes and fleet's devices and agent sessions when it
+configures them, as an auto-refreshing page (`/`) and as JSON (`/api/state`).
 
     dashboard.py [--harness-home DIR] [--port 8787] [--data-dir DIR] [--queue-label LABEL]
     dashboard.py --once            print one snapshot as JSON and exit
@@ -293,7 +293,7 @@ class DashboardApp:
         "GH_TOKEN", "GH_REPO", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD", "DEVICE_PROBE_CMD",
         "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
         "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG",
-        "BUILD_LOCK_DIR", "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", *LABEL_KEYS,
+        "BUILD_LOCK_DIR", "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD", *LABEL_KEYS,
     })
     URL_FILE_NAME: ClassVar[str] = "dashboard.url"
 
@@ -360,6 +360,8 @@ class DashboardApp:
             build_lock_remote=env_values.get("BUILD_LOCK_REMOTE", ""),
             build_lock_names=self.parse_build_lock_names(env_values.get("BUILD_LOCK_NAMES", "")),
             done_window_s=options.done_hours * 3600,
+            fleet_status_command=command_setting("FLEET_STATUS_CMD"),
+            fleet_interval_s=options.fleet_interval,
         )
         github: GitHubClient | None = GitHubClient(repo, self.github_token or None, options.gh) if repo else None
         self.collector: Collector = Collector(self.config, github)
@@ -382,6 +384,8 @@ class DashboardApp:
             self.collector.refresh_github_in_place()
             if self.config.claimable_interval_s > 0:
                 self.collector.refresh_claimable_in_place()
+            if self.config.fleet_status_command:
+                self.collector.refresh_fleet_in_place()
             body: str = json.dumps(self.collector.snapshot(), indent=1, default=str)
             print(body.replace(self.github_token, "[redacted]") if self.github_token else body)
             return 0
@@ -534,6 +538,8 @@ class DashboardApp:
                             help="read-only ssh probe of each remote host; 0 turns it off")
         parser.add_argument("--claimable-interval", type=float, default=300.0,
                             help="how often to run QUEUE_DEPTH_CMD, else bin/claimable.sh; 0 turns it off")
+        parser.add_argument("--fleet-interval", type=float, default=30.0,
+                            help="how often to run FLEET_STATUS_CMD, when it is set")
         parser.add_argument("--done-hours", type=float, default=6.0, help="how long a closed issue stays as done")
         parser.add_argument("--once", action="store_true", help="print one JSON snapshot and exit")
         parser.add_argument("--print-data-dir", action="store_true",

@@ -196,7 +196,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             machines["machine-" + key] = self._machine_card(machine, snapshot)
         return {
             "header": self._header(snapshot), **machines, "ticks": self._ticks_panel(snapshot),
-            "leases": self._leases_panel(snapshot), "queue": self._queue_section(snapshot),
+            "leases": self._leases_panel(snapshot), "fleet_devices": self._fleet_devices_panel(snapshot),
+            "fleet_sessions": self._fleet_sessions_panel(snapshot), "queue": self._queue_section(snapshot),
             "landings": self._landings_panel(snapshot), "stalls": self._stalls_panel(snapshot),
             "allocator": self._allocator_panel(snapshot), "flow": self._flow_section(snapshot),
             "sources": self._sources_footer(snapshot, query),
@@ -206,7 +207,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
                  title: str) -> str:
         """
         Wraps the prepared sections in the initial document. The ticks take the whole row when the instance has
-        no resource panel.
+        no resource panel; the fleet panels are left out with their key.
 
         Args:
             sections: Rendered fragments.
@@ -232,7 +233,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             f'<body data-refresh="{refresh_s}">{slots["header"]}<main>'
             f'<section class="grid machines">{machines}</section>'
             f'<section class="grid{" split" if sections["leases"] else ""}">{slots["ticks"]}{slots["leases"]}'
-            f'</section>{slots["queue"]}'
+            f'</section>{slots["fleet_devices"]}{slots["fleet_sessions"]}{slots["queue"]}'
             f'<section class="grid thirds">{slots["landings"]}{slots["stalls"]}{slots["allocator"]}</section>'
             f'{slots["flow"]}{slots["sources"]}</main></body></html>'
         )
@@ -679,6 +680,117 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         return (f'<article class="panel"><h2>Resource slots and leases <span class="sub">{held} of '
                 f'{len(leases.get("slots", []))} held</span></h2><div class="hscroll">{table}</div>'
                 f'<ul class="list">{"".join(notes)}</ul>{error}</article>')
+
+    def _fleet_devices_panel(self, snapshot: JsonDict) -> str:
+        """
+        Renders fleet's devices: reachability, CPU, memory, GPUs and each adapter's dispatched sessions against its
+        capacity.
+
+        Args:
+            snapshot: The snapshot.
+
+        Returns:
+            The panel HTML, or an empty string without FLEET_STATUS_CMD or when its document lists no devices.
+        """
+        fleet: JsonDict | None = snapshot.get("fleet")
+        if fleet is None or (fleet.get("available") and fleet.get("devices") is None):
+            return ""
+        rows: list[str] = []
+        for device in fleet.get("devices") or []:
+            if device.get("error"):
+                state: str = self._pill("critical", "unreachable")
+                reading: str = f'<td colspan="4" class="err" title="{self._e(device["error"])}">{self._e(device["error"])}</td>'
+            else:
+                state = self._pill("good", "reachable")
+                load: list[float] = device.get("load") or []
+                gpus: str = "; ".join(
+                    f'{self._e(gpu.get("name"))} {self._percent(gpu.get("util_pct"))}'
+                    + (f' {self._bytes_gb(gpu.get("mem_used_bytes"))} / {self._bytes_gb(gpu.get("mem_total_bytes"))} GB'
+                       if gpu.get("mem_total_bytes") is not None else "")
+                    for gpu in device.get("gpus", [])) or '<span class="note">none</span>'
+                adapters: str = "".join(
+                    f'<span class="chip" title="{self._e(", ".join(adapter.get("models", [])))}">'
+                    f'{self._e(adapter.get("name"))} '
+                    + (f'{adapter.get("running")}/{adapter.get("max_concurrent")}' if adapter.get("max_concurrent")
+                       else "watch only") + "</span>"
+                    for adapter in device.get("adapters", []))
+                reading = (f'<td class="num">{self._percent(device.get("cpu_percent"))} &middot; load '
+                           f'{self._number(load[0] if load else None, 2)} / {device.get("cpus") or "?"}</td>'
+                           f'<td class="num">{self._bytes_gb(device.get("mem_used_bytes"))} / '
+                           f'{self._bytes_gb(device.get("mem_total_bytes"))} GB</td>'
+                           f'<td class="wrap">{gpus}</td><td class="wrap">{adapters}</td>')
+            host: str = " &middot; ".join(self._e(part) for part in (device.get("hostname"), device.get("os")) if part)
+            rows.append(f'<tr><td title="{self._e(device.get("name"))}"><b>{self._e(device.get("name"))}</b>'
+                        f'<div class="note line">{host}</div></td><td>{self._e(device.get("transport"))}</td>'
+                        f'<td>{state}</td>{reading}</tr>')
+        table: str = (
+            '<table><colgroup><col style="width:18%"><col style="width:60px"><col style="width:110px">'
+            '<col style="width:150px"><col style="width:110px"><col><col style="width:22%"></colgroup>'
+            "<tr><th>Device</th><th>Via</th><th>State</th><th>CPU</th><th>Memory</th><th>GPUs</th><th>Adapters</th></tr>"
+            f'{"".join(rows)}</table>'
+        ) if rows else '<div class="empty">no device read</div>'
+        reachable: int = sum(1 for device in fleet.get("devices") or [] if not device.get("error"))
+        return (f'<article class="panel"><h2>Devices <span class="sub">{reachable} of '
+                f'{len(fleet.get("devices") or [])} reachable through fleet</span></h2>'
+                f'<div class="hscroll">{table}</div>{self._fleet_read_note(fleet)}</article>')
+
+    def _fleet_sessions_panel(self, snapshot: JsonDict) -> str:
+        """
+        Renders the agent sessions fleet reports on every device, dispatched and discovered.
+
+        Args:
+            snapshot: The snapshot.
+
+        Returns:
+            The panel HTML, or an empty string without FLEET_STATUS_CMD.
+        """
+        fleet: JsonDict | None = snapshot.get("fleet")
+        if fleet is None:
+            return ""
+        rows: list[str] = []
+        for session in fleet.get("sessions", []):
+            level: str = "good" if session.get("running") else ("idle" if session.get("state") == "exited 0"
+                                                               else "warning")
+            issue: str = (f'{self._issue_link(session["issue"], session.get("url"))} '
+                          f'<span class="chip">{self._e(session.get("issue_source"))}</span>'
+                          if session.get("issue") is not None else '<span class="note">-</span>')
+            who: str = f'pid {session["pid"]}' if session.get("pid") is not None else self._e(session.get("id"))
+            model: str = f' <span class="sub">{self._e(session["model"])}</span>' if session.get("model") else ""
+            rows.append(
+                f'<tr class="{"" if session.get("running") else "dim"}"><td>{self._e(session.get("device"))}</td>'
+                f'<td>{self._e(session.get("adapter"))}{model}</td>'
+                f'<td title="{self._e(session.get("id"))} {self._e(session.get("origin"))}: '
+                f'{self._e(session.get("summary"))}">{who}</td>'
+                f'<td>{self._pill(level, session.get("state"))}</td><td>{self._duration(session.get("age_s"))}</td>'
+                f'<td title="{self._e(session.get("cwd"))}">{self._e(session.get("cwd") or "-")}</td>'
+                f'<td title="{self._e(session.get("title"))}">{issue}</td></tr>'
+            )
+        table: str = (
+            '<table><colgroup><col style="width:14%"><col style="width:16%"><col style="width:16%">'
+            '<col style="width:100px"><col style="width:56px"><col><col style="width:110px"></colgroup>'
+            "<tr><th>Device</th><th>Adapter</th><th>Session</th><th>State</th><th>Age</th><th>Workdir</th>"
+            f'<th>Issue</th></tr>{"".join(rows)}</table>'
+        ) if rows else '<div class="empty">no agent session</div>'
+        notes: str = "".join(f'<li class="err">{self._e(error)}</li>' for error in fleet.get("errors", [])
+                             if fleet.get("devices") is None)
+        notes += "".join(f'<li class="note">{self._e(name)}: more sessions than one answer holds</li>'
+                         for name in fleet.get("truncated", []))
+        running: int = sum(1 for session in fleet.get("sessions", []) if session.get("running"))
+        return (f'<article class="panel"><h2>Agent sessions <span class="sub">{running} running</span></h2>'
+                f'<div class="hscroll">{table}</div>{f"<ul class=list>{notes}</ul>" if notes else ""}'
+                f'{self._fleet_read_note(fleet)}</article>')
+
+    def _fleet_read_note(self, fleet: JsonDict) -> str:
+        """
+        Args:
+            fleet: The snapshot's fleet view.
+
+        Returns:
+            The last read's failure, or its time.
+        """
+        if fleet.get("error"):
+            return f'<div class="err">last read failed: {self._e(fleet["error"])}</div>'
+        return f'<div class="note">read {self._sample_time(fleet.get("fetched_at"))}</div>'
 
     def _queue_section(self, snapshot: JsonDict) -> str:
         """
@@ -1181,6 +1293,17 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             GiB to one decimal, or `-`.
         """
         return "-" if megabytes is None else f"{float(megabytes) / 1024:.1f}"
+
+    @staticmethod
+    def _bytes_gb(count: Any) -> str:
+        """
+        Args:
+            count: Bytes or None.
+
+        Returns:
+            GiB to one decimal, or `-`.
+        """
+        return "-" if count is None else f"{float(count) / 1073741824:.1f}"
 
     @staticmethod
     def _short_host(host: str) -> str:
