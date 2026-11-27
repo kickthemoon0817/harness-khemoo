@@ -88,9 +88,21 @@ near_miss "an address with a port" host-address \
 near_miss "lease, slot and remote host in prose" gpu-slot \
     'The lease on the remote host ran out; the board in slot 3 was idle.\n' \
     'Measured on GPU slot 3 under resource.lease.3, lease 2137 held.\n'
-near_miss "a fenced block of quoted output" host-path \
-    'The run printed:\n```\nwrote /home/ci/out/run.log (pid 4242)\n```\n' \
-    'The run wrote /home/ci/out/run.log.\n'
+near_miss "an address in a CGNAT range" host-address \
+    'Built against Isaac Sim 4.5.0.1.\n' 'Reached the build host at 100.101.5.7.\n'
+near_miss "a link-local address" host-address \
+    'Built against version 1.2.3.4.\n' 'The card answered on 169.254.1.1.\n'
+near_miss "harness words in a closed fence" gpu-slot \
+    'The run printed:\n```\nGPU slot 3 free, slot 3 idle\n```\n' \
+    'The run printed:\n```\nGPU slot 3 free\n~~~\nThe run used GPU slot 3.\n'
+near_miss "a fence closed by a shorter run" gpu-slot \
+    '````\nGPU slot 3 free\n````\n' '````\nGPU slot 3 free\n```\n'
+out=$(printf 'The run printed:\n```\nwrote /home/ci/out/run.log as pid 4242 on 10.0.0.12\n```\n' \
+    | python3 "$LINT" --kind comment - 2>&1); rc=$?
+check "a host path, a pid and an address inside a fence still block" \
+    '[ "$rc" -eq 1 ] && grep -q "BLOCK host-path" <<<"$out" && grep -q "BLOCK process-id" <<<"$out" && grep -q "BLOCK host-address" <<<"$out"' "$out"
+out=$(printf 'The run printed:\n```\nfree\nThen GPU slot 3 took it.\n' | python3 "$LINT" --kind comment - 2>&1); rc=$?
+check "an unclosed fence exempts nothing" '[ "$rc" -eq 1 ] && grep -q "L4 BLOCK gpu-slot" <<<"$out"' "$out"
 
 printf '## Summary\nx\n## Ask\ny\n' >"$T/issue.md"
 out=$(python3 "$LINT" --kind issue "$T/issue.md" 2>&1); rc=$?

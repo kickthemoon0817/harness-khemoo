@@ -39,8 +39,9 @@ resume: build, then RS1–RS6 identity against parent-8cc9dd2e8
 ```
 
 The lint skips that block in a comment and blocks it in an issue or PR body. A `harness tick` or
-`pid N` line anywhere else in a comment is a blocking finding. The lint also skips fenced code
-blocks, so quoted output does not block; what a fence quotes is still held to the table above.
+`pid N` line anywhere else in a comment is a blocking finding. Inside a closed fenced code block
+the lint lets quoted output keep the harness's words (slots, leases, tick asides), but a host path,
+an address, a pid or a cubin hash blocks there as anywhere else.
 
 ## A PR body
 

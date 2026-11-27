@@ -6,8 +6,9 @@ nothing else. The lint blocks what such a reader cannot use: paths on this host,
 addresses, process ids, GPU slots and leases, harness file names, tick-to-tick asides. It warns on
 shorthand a body may leave undefined. A `<details><summary>Harness trace</summary>` block in a comment is
 exempt: that is where the harness's own bookkeeping goes, the claim protocol line (`harness tick … pid N
-claiming`) included, because the launcher finds that line anywhere in a comment. Fenced code blocks are
-exempt from the content rules too, so quoted output does not block; the section checks still read them.
+claiming`) included, because the launcher finds that line anywhere in a comment. Inside a closed fenced
+code block only the prose rules (GPU wording, tick asides, the warnings) are skipped, so quoted output
+does not block on harness vocabulary; every rule that identifies the machine still applies there.
 
     public_record_lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
     public_record_lint.py --kind comment -           lint a comment from stdin
@@ -34,12 +35,11 @@ from typing import Sequence
 
 _OCTET: str = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 _IPV4: str = rf"{_OCTET}(?:\.{_OCTET}){{3}}"
-# A dotted quad is also a version number (`Kit 106.5.0.2`), so an address blocks only where it is
-# clearly one: in a private or loopback range, or with a port or a user in front of it.
-_PRIVATE_IPV4: str = (rf"(?:10|127)(?:\.{_OCTET}){{3}}|192\.168(?:\.{_OCTET}){{2}}|"
-                      rf"172\.(?:1[6-9]|2\d|3[01])(?:\.{_OCTET}){{2}}")
-_HOST_ADDRESS: str = (rf"(?<![\w.])(?:{_PRIVATE_IPV4})(?![\w-]|\.\d)|(?<![\w.]){_IPV4}:\d{{1,5}}\b|"
-                      rf"@{_IPV4}(?![\w-]|\.\d)")
+# A dotted quad is also a version number (`Kit 106.5.0.2`), so a bare one passes only right after a
+# version word; with a port it is an address whatever precedes it.
+_VERSION_PREFIX: str = r"(?<![Vv]ersion )(?<![Kk]it )(?<![Kk]it-)(?<!Isaac Sim )"
+_HOST_ADDRESS: str = (rf"(?<![\w.]){_IPV4}:\d{{1,5}}\b|"
+                      rf"(?<![\w.-]){_VERSION_PREFIX}{_IPV4}(?![\w-]|\.\d|:\d)")
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,9 @@ class PublicRecordLint:
     TRACE_BLOCK: re.Pattern[str] = re.compile(
         r"<details>\s*<summary>[^<]*harness trace[^<]*</summary>.*?</details>", re.IGNORECASE | re.DOTALL)
     HEADING: re.Pattern[str] = re.compile(r"^#{1,3}\s+(.+?)\s*$", re.MULTILINE)
-    FENCE: re.Pattern[str] = re.compile(r"^\s*(?:```|~~~)")
+    FENCE_OPEN: re.Pattern[str] = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    # Quoted output carries the harness's own words; only these rules let it.
+    PROSE_RULES: frozenset[str] = frozenset({"gpu-slot", "tick-aside"})
 
     BLOCKING_RULES: tuple[Rule, ...] = (
         Rule("host-path", re.compile(r"(?<![\w./-])(?:/home/\w+|~/|\$HOME\b|/mnt/\w+)"),
@@ -170,13 +172,14 @@ class PublicRecordLint:
                                     "<details><summary>Harness trace</summary>",
                                     "a Harness trace belongs in a comment, never in an issue or PR body", True))
         lines: list[str] = text.split("\n")
+        fenced: set[int] = self._fenced_lines(lines)
         seen_warnings: set[tuple[str, str]] = set()
-        in_fence: bool = False
         for line_index, line in enumerate(lines):
-            if self.FENCE.match(line):
-                in_fence = not in_fence
-                continue
-            if in_fence:
+            if line_index in fenced:
+                for rule in self.BLOCKING_RULES:
+                    if rule.rule_id not in self.PROSE_RULES:
+                        for match in rule.pattern.finditer(line):
+                            findings.append(Finding(rule.rule_id, line_index + 1, match.group(0), rule.hint, True))
                 continue
             for rule in self.BLOCKING_RULES:
                 for match in rule.pattern.finditer(line):
@@ -326,6 +329,30 @@ class PublicRecordLint:
         check("a trace block in a body is blocked", any(finding.rule_id == "trace-in-body" for finding in trace_in_body),
               self.format(trace_in_body, "pr"))
         return passed
+
+    def _fenced_lines(self, lines: Sequence[str]) -> set[int]:
+        """Returns the indexes of lines inside closed fenced code blocks, delimiters included.
+
+        A fence closes on a line of the opener's character, at least as long, indented up to three
+        spaces. An opener with no closer fences nothing: the lint fails closed.
+        """
+        fenced: set[int] = set()
+        index: int = 0
+        while index < len(lines):
+            opener: re.Match[str] | None = self.FENCE_OPEN.match(lines[index])
+            if opener is None:
+                index += 1
+                continue
+            marker: str = opener.group(1)
+            closer: re.Pattern[str] = re.compile(rf"^ {{0,3}}{re.escape(marker[0])}{{{len(marker)},}}\s*$")
+            end: int | None = next((later for later in range(index + 1, len(lines)) if closer.match(lines[later])),
+                                   None)
+            if end is None:
+                index += 1
+                continue
+            fenced.update(range(index, end + 1))
+            index = end + 1
+        return fenced
 
     def _missing_sections(self, text: str, required: Sequence[str]) -> list[Finding]:
         present: list[str] = [heading.lower() for heading in self.HEADING.findall(text)]
