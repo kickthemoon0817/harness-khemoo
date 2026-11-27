@@ -73,7 +73,8 @@ class DashboardConfig:
     process whose first arguments hold `run_queue_holder` holds them.
     `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
     names under `build_lock_dir`. `fleet_status_command` is an argv printing `fleet status --json` or
-    `fleet sessions --json` (docs/FLEET.md).
+    `fleet sessions --json` (docs/FLEET.md); `fleet_environment` is set for it, as a tick's fleet gets it, so fleet
+    finds the instance's fleet.toml.
     """
 
     harness_home: Path
@@ -123,6 +124,7 @@ class DashboardConfig:
     build_lock_remote: str = ""
     done_window_s: float = 21600.0
     fleet_status_command: tuple[str, ...] = ()
+    fleet_environment: tuple[tuple[str, str], ...] = ()
     fleet_interval_s: float = 30.0
     fleet_timeout_s: float = 45.0
     flow_animate_s: float = 20.0
@@ -515,6 +517,7 @@ exit 0
             completed: subprocess.CompletedProcess[str] = subprocess.run(
                 list(self.config.fleet_status_command), capture_output=True, text=True,
                 timeout=self.config.fleet_timeout_s, stdin=subprocess.DEVNULL,
+                env=dict(os.environ, **dict(self.config.fleet_environment)),
             )
             try:
                 report: FleetReport = FleetParser.parse(completed.stdout)

@@ -293,7 +293,8 @@ class DashboardApp:
         "GH_TOKEN", "GH_REPO", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD", "DEVICE_PROBE_CMD",
         "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
         "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG",
-        "BUILD_LOCK_DIR", "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD", *LABEL_KEYS,
+        "BUILD_LOCK_DIR", "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD",
+        "FLEET_CONFIG", *LABEL_KEYS,
     })
     URL_FILE_NAME: ClassVar[str] = "dashboard.url"
 
@@ -312,7 +313,7 @@ class DashboardApp:
         def path_setting(key: str) -> str:
             """
             Args:
-                key: A path key: HARNESS_STATE, USAGE_CACHE or WORKTREE_ROOT.
+                key: A path key: HARNESS_STATE, USAGE_CACHE, WORKTREE_ROOT or FLEET_CONFIG.
 
             Returns:
                 The environment's value, else the file's with `$HOME`, `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`
@@ -332,6 +333,10 @@ class DashboardApp:
         repo: str | None = options.repo or env_values.get("GH_REPO") or os.environ.get("GH_REPO") \
             or self.derived_repo(harness_home) or None
         usage_cache: str = options.usage_cache or path_setting("USAGE_CACHE") or "~/.claude/usage-cache.json"
+        # What a tick's fleet finds in its environment, so FLEET_STATUS_CMD reads the same fleet.toml.
+        fleet_environment: dict[str, str] = dict(command_placeholders)
+        if path_setting("FLEET_CONFIG"):
+            fleet_environment["FLEET_CONFIG"] = path_setting("FLEET_CONFIG")
         self.config: DashboardConfig = DashboardConfig(
             harness_home=harness_home,
             harness_state=harness_state,
@@ -361,6 +366,7 @@ class DashboardApp:
             build_lock_names=self.parse_build_lock_names(env_values.get("BUILD_LOCK_NAMES", "")),
             done_window_s=options.done_hours * 3600,
             fleet_status_command=command_setting("FLEET_STATUS_CMD"),
+            fleet_environment=tuple(fleet_environment.items()),
             fleet_interval_s=options.fleet_interval,
         )
         github: GitHubClient | None = GitHubClient(repo, self.github_token or None, options.gh) if repo else None

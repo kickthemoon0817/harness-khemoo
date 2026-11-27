@@ -39,7 +39,7 @@ The dashboard reads the same file without sourcing it. It matches plain `KEY=val
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
 `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`), those two and `$HOME`. A path key from the environment wins over the file's. An
+`WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
 empty `GH_REPO` is derived through `bin/instance-lib.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
@@ -221,7 +221,7 @@ Every source below is optional. While its keys are empty, its panel stays off th
 | `DEVICE_PROBE_CMD` | the device row of each machine, under a 5 s timeout. Split shell-style and run without a shell on this host. On each remote host ssh hands it to the remote user's shell, as one command whose words are each quoted, so that shell runs the same words and expands nothing in them. A probe that needs a shell names one: `sh -c '...'` |
 | `RUN_QUEUE_GLOB`, `RUN_QUEUE_HOLDER`, `RUN_QUEUE_STOP_WORDS`, `RUN_QUEUE_LOG` | run queues on the flow board |
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
-| `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell |
+| `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and any `FLEET_CONFIG` in its environment as a tick's fleet has them, so a plain `fleet status --json` reads the instance's fleet.toml |
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has

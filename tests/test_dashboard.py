@@ -1266,7 +1266,7 @@ class HttpServerTest(unittest.TestCase):
             "LANE_LABEL", "FIRST_LABEL", "LOW_LABEL", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD",
             "DEVICE_PROBE_CMD", "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
             "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG", "BUILD_LOCK_DIR",
-            "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD"}))
+            "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD", "FLEET_CONFIG"}))
 
     @linux_only
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
@@ -1794,6 +1794,24 @@ class InstanceConfigTest(unittest.TestCase):
                          ("fleet", "--config", str(harness.home / "instance" / "fleet.toml"), "status", "--json"))
         self.assertEqual(config.worktree_root, str(harness.home / "trees"))
         self.assertEqual(config.run_queue_log, "queue.log")
+
+    def test_fleet_runs_with_the_instance_a_tick_gives_it(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        env_file: Path = harness.home / "instance" / "harness.env"
+        with patch.dict(os.environ):
+            for key in ("HARNESS_ENV", "HARNESS_INSTANCE_DIR", "FLEET_CONFIG"):
+                os.environ.pop(key, None)
+            bare = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                ["--harness-home", str(harness.home)])).config
+            env_file.write_text(env_file.read_text() + "FLEET_CONFIG=$HARNESS_INSTANCE_DIR/fleets/lab.toml\n")
+            configured = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                ["--harness-home", str(harness.home)])).config
+        instance: tuple[tuple[str, str], ...] = (("HARNESS_HOME", str(harness.home)),
+                                                 ("HARNESS_INSTANCE_DIR", str(harness.home / "instance")))
+        self.assertEqual(bare.fleet_environment, instance)
+        self.assertEqual(configured.fleet_environment,
+                         (*instance, ("FLEET_CONFIG", str(harness.home / "instance" / "fleets" / "lab.toml"))))
 
     def test_state_and_usage_cache_come_from_the_env_file_and_the_environment_wins(self) -> None:
         harness: FixtureHarness = FixtureHarness()
