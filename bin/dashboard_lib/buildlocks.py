@@ -23,7 +23,7 @@ class BuildLockReader:
     the lock file for the holder and from the working directory for a waiter, else from the tick above it.
     """
 
-    LOCK_FILE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^pid (\d+), ([^,]*)")
+    LOCK_FILE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^pid ([0-9]{1,9}), ([^,]*)")
 
     def __init__(self, lock_names: dict[str, str], lock_dir: Path, local_file: str, remote_file: str,
                  timeout_s: float, worktree_root: str = "") -> None:

@@ -4,6 +4,7 @@ records the Devices and Agent sessions panels show.
 """
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -233,6 +234,9 @@ class FleetParser:
         labels: dict[str, Any] = cls._get(entry, "labels", dict, path)
         if not all(isinstance(value, str) for value in labels.values()):
             raise ValueError(f"fleet output: {path}.labels holds a non-string")
+        # The issue label becomes an int; int() refuses a string past 4300 digits.
+        if "issue" in labels and not re.fullmatch(r"[0-9]{1,9}", labels["issue"]):
+            raise ValueError(f"fleet output: {path}.labels.issue is not an issue number")
         return FleetSession(
             device=device, id=cls._get(entry, "id", str, path), adapter=cls._get(entry, "adapter", str, path),
             origin=origin, state=state_text, running=kind == "running",

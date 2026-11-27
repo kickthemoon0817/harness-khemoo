@@ -662,7 +662,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             notes.append(f'<li>{self._pill(self.STATUS_LEVELS.get(device.get("state", ""), "idle"), "device " + device.get("state", ""))} '
                          f'{self._issue_ref(device.get("issue"), device.get("holder"))} for {self._duration(device.get("held_s"))}</li>')
         priority: list[str] = leases.get("operator_priority", [])
-        notes.append('<li>operator priority: ' + (" > ".join(self._issue_ref(int(item) if item.isdigit() else None, item)
+        notes.append('<li>operator priority: ' + (" > ".join(self._issue_ref(StateParsers._optional_int(item), item)
                                                             for item in priority) or '<span class="note">none</span>')
                      + "</li>")
         for wait in leases.get("waits", []):

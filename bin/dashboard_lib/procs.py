@@ -35,7 +35,7 @@ class ProcessScanner:
 
     CLAUDE_BINARIES: ClassVar[frozenset[str]] = frozenset({"claude", "claude-code", "node"})
     LANDING_MARK: ClassVar[str] = "This tick is the merge slot's landing tick"
-    SLOT_LOCK_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"/locks/slot(\d+)\.lock$")
+    SLOT_LOCK_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"/locks/slot([0-9]{1,9})\.lock$")
     TOOL_COMMAND_MAX_CHARS: ClassVar[int] = 160
 
     def __init__(self, harness_state_dir: Path, proc_root: Path = Path("/proc")) -> None:

@@ -1943,11 +1943,25 @@ class FleetPanelTest(unittest.TestCase):
         broken["devices"][0]["status"]["metrics"]["cpu_percent"] = float("nan")
         self.assertIn("cpu_percent", self.read(json.dumps(broken))["fleet"]["error"])
 
-    def test_a_label_that_is_not_an_ascii_number_names_no_issue(self) -> None:
+    def test_an_issue_label_that_is_not_a_short_ascii_number_is_a_source_error(self) -> None:
+        self.read()
         document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
-        document["devices"][0]["sessions"][0]["labels"] = {"issue": "\u00b2"}
-        document["devices"][0]["sessions"][0]["cwd"] = "/srv/other"
-        self.assertIsNone(self.read(json.dumps(document))["fleet"]["sessions"][0]["issue"])
+        for label in ("\u00b2", "9" * 5000, "1234567890"):
+            document["devices"][0]["sessions"][0]["labels"] = {"issue": label}
+            snapshot: JsonDict = self.read(json.dumps(document))
+            self.assertIn("labels.issue is not an issue number", snapshot["fleet"]["error"])
+            self.assertEqual(snapshot["fleet"]["sessions"][0]["issue"], 42, "the last good read stays")
+            HtmlRenderer().render(snapshot, 30)
+
+    def test_huge_numbers_in_paths_and_state_files_read_as_no_number(self) -> None:
+        huge: str = "9" * 5000
+        self.assertIsNone(StateParsers.issue_from_path(f"/srv/work/app-{huge}", "/srv/work"))
+        self.assertIsNone(StateParsers.issue_from_path(f"/x/2026-11-26-{huge}-slug/runs", ""))
+        self.assertIsNone(StateParsers.parse_claim(f"claim.{huge}", f"1 2 2026-11-26T00:00:00Z"))
+        self.assertEqual(StateParsers.parse_streaks(f"h ok {huge} 1 1\n"), {})
+        self.assertEqual(IssueQueue.parse_dependencies(f"Depends on: #{huge}"), ())
+        self.assertEqual(StateParsers.parse_lease_status(f"slot 1 HELD {huge} 7 2026-11-26T00:00:00Z (alive)\n")
+                         .slots[0].issue, None)
 
     def test_a_partial_result_shows_each_device_error(self) -> None:
         snapshot: JsonDict = self.read(exit_code=1)

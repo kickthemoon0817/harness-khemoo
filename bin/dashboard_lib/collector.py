@@ -4,7 +4,6 @@ Gathers the dashboard's data on a cadence per source and assembles one JSON-read
 import json
 import logging
 import os
-import re
 import shlex
 import socket
 import subprocess
@@ -498,7 +497,7 @@ exit 0
                 timeout=self.config.claimable_timeout_s, env=environment, stdin=subprocess.DEVNULL,
             )
             output: str = completed.stdout.strip()
-            if completed.returncode != 0 or not output.isdigit():
+            if completed.returncode != 0 or StateParsers._optional_int(output) is None:
                 raise RuntimeError(self.github.redact(f"queue count exit {completed.returncode}: "
                                                       f"{(completed.stderr or output).strip()[-200:]}"))
             self._store("claimable_sh", SourceResult(int(output), started, duration_s=self.clock() - started,
@@ -556,7 +555,7 @@ exit 0
         sessions: list[JsonDict] = []
         for session in report.sessions if report else ():
             labels: dict[str, str] = dict(session.labels)
-            issue: int | None = int(labels["issue"]) if re.fullmatch(r"[0-9]+", labels.get("issue", "")) else None
+            issue: int | None = int(labels["issue"]) if "issue" in labels else None
             issue_source: str = "label" if issue is not None else ""
             if issue is None and session.cwd:
                 issue = StateParsers.issue_from_path(session.cwd, self.config.worktree_root)
@@ -657,8 +656,8 @@ exit 0
         paused_result: SourceResult | None = self._result("paused")
         paused_state: JsonDict = paused_result.data if paused_result else {"paused": False, "reason": ""}
         live_standard_ticks: int = sum(1 for tick in ticks if tick.lane != "landing")
-        last_allowed: int | None = int(last_allocator.fields["allowed"]) \
-            if last_allocator and last_allocator.fields.get("allowed", "").isdigit() else None
+        last_allowed: int | None = StateParsers._optional_int(last_allocator.fields.get("allowed", "")) \
+            if last_allocator else None
         work_waiting: bool = (waiting_count > 0 and last_allowed is not None and live_standard_ticks < last_allowed
                               and not paused_state.get("paused") and usage.get("allowed_band") != "none")
 

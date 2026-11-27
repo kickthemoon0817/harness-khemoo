@@ -53,7 +53,7 @@ class RunQueueReader:
     """
 
     STAMP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) (.*)$")
-    HOLDER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^holder (\d+) start ")
+    HOLDER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^holder ([0-9]{1,9}) start ")
     WANT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bwant=(\S+)")
     REMOTE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bremote=(\S+)")
     JOB_START_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
@@ -63,7 +63,7 @@ class RunQueueReader:
     RELEASED_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^RELEASED \S+ (\S+)")
     HOST_FIELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bhost=(\S+)")
     DOCKER_HOST_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bDOCKER_HOST=ssh://(\S+)")
-    ISSUE_ARGUMENT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|\s)--issue\s+(\d+)\b")
+    ISSUE_ARGUMENT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|\s)--issue\s+([0-9]{1,9})\b")
 
     def __init__(self, folder_glob: str, holder_name: str, stop_words: tuple[str, ...], window_s: float,
                  log_name: str = "queue.log", worktree_root: str = "") -> None:
