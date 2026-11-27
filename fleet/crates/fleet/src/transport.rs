@@ -27,6 +27,23 @@ use crate::registry::{Device, Timeouts, Transport};
 /// so ssh never blocks on a full pipe.
 const SSH_STDERR_TAIL: usize = 2048;
 
+/// Given before the device's own options. ssh keeps the first value it sees for an option,
+/// so neither those nor `~/.ssh/config` can turn agent or X11 forwarding, port forwards or a
+/// local command back on: a compromised device must not reach the hub's ssh agent.
+const SSH_HARDENING: &[&str] = &[
+    "-T",
+    "-a",
+    "-x",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "PermitLocalCommand=no",
+];
+
 /// The byte stream under a [`Connection`], whichever transport opened it.
 pub enum Stream {
     Unix(UnixStream),
@@ -110,7 +127,7 @@ fn spawn_ssh(
     remote_command: &[String],
 ) -> Result<SshStream, WireError> {
     let mut cmd = Command::new(program);
-    cmd.args(["-T", "-o", "BatchMode=yes"]);
+    cmd.args(SSH_HARDENING);
     for o in options {
         cmd.arg("-o").arg(o);
     }

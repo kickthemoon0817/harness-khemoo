@@ -256,10 +256,22 @@ frame. The role granted is at most `[unix] max_role`.
 The hub runs, as an argv with no shell:
 
 ```text
-ssh -T -o BatchMode=yes [-o OPTION]... -- TARGET fleetd --stdio
+ssh -T -a -x -o BatchMode=yes -o ClearAllForwardings=yes -o ForwardAgent=no \
+    -o PermitLocalCommand=no [-o OPTION]... -- TARGET fleetd --stdio
 ```
 
 and speaks the protocol over the child's stdin and stdout. ssh does the authentication.
+
+A device is less trusted than the hub, and a compromised one must not be able to use the hub's
+ssh agent, X display or local ports to reach other machines. The fixed options therefore turn off
+agent and X11 forwarding, every port forward, and `LocalCommand`. ssh keeps the first value it
+obtains for an option, and command-line options come before `~/.ssh/config`, so neither the
+user's ssh config nor a device's `ssh_options` can turn them back on. On top of that, fleet.toml
+refuses `ssh_options` whose key, in any case, is `ForwardAgent`, `ForwardX11`,
+`ForwardX11Trusted`, `ProxyCommand`, `LocalCommand`, `PermitLocalCommand`, `RemoteCommand`,
+`LocalForward`, `RemoteForward`, `DynamicForward`, `Tunnel`, `KnownHostsCommand`, `Include` or
+`Match`: each forwards to the device, runs a command on the hub, or reads further config that
+could. Those belong in the user's own `~/.ssh/config` if they are wanted at all.
 `fleetd --stdio` is a relay: it reads the client's `Hello`, connects to the running daemon's unix
 socket, completes the handshake there asking for the lesser of the client's role, `--role` and
 `[stdio] max_role`, returns the granted `Hello` to the client, and then copies bytes both ways
@@ -690,7 +702,7 @@ is an error.
 | `auto` | boolean | true | all | whether `--device auto` may pick it |
 | `socket` | path | `$XDG_STATE_HOME/fleetd/fleetd.sock`, else `~/.local/state/fleetd/fleetd.sock` | local | fleetd's socket |
 | `target` | string | required | ssh | the ssh destination, `host` or `user@host`; must not begin with `-` |
-| `ssh_options` | array of strings | `[]` | ssh | each passed as `-o OPTION`; each must be `Key=value` |
+| `ssh_options` | array of strings | `[]` | ssh | each passed as `-o OPTION`; each must be `Key=value`, with a key not on the [refused list](#ssh) |
 | `remote_command` | array of strings | `["fleetd", "--stdio"]` | ssh | appended after the target; ignored by a pinned `command=` |
 | `address` | string | required | tls | `host:port`; the host may be an IP or a DNS name |
 | `server_name` | string | the device's `<name>` | tls | the DNS SAN the server certificate must carry |
