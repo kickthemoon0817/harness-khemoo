@@ -118,16 +118,27 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
   # The harness's own runs here (a tick's, or a lane run marked WORV_LOCAL_LANE=1 by
   # bin/build_host.sh or bin/slow_set.sh) share the owner's machine: one at a time under
   # LOCAL_LANE_LOCK, each bounded by LOCAL_LANE_CPUS and LOCAL_LANE_MEMORY, a compile's jobs by
-  # LOCAL_LANE_MAX_JOBS. The owner's own runs through this shim are left as given.
+  # LOCAL_LANE_MAX_JOBS. A lane run starts only once the host has its memory bound plus
+  # LOCAL_LANE_SPARE_MIB available (kits on this host's card hold 10+ GB each), waiting while it
+  # does not. The owner's own runs through this shim are left as given.
   if [ "$lane" = 1 ] && [ "${cmd[1]:-}" = run ]; then
-    max_jobs=${LOCAL_LANE_MAX_JOBS:-6}
+    max_jobs=${LOCAL_LANE_MAX_JOBS:-4}
     for ((k = 2; k < ${#cmd[@]}; k++)); do
       case "${cmd[$k]}" in
         WORV_BUILD_JOBS=*) j=${cmd[$k]#WORV_BUILD_JOBS=}; [[ "$j" =~ ^[0-9]+$ ]] && [ "$j" -gt "$max_jobs" ] && cmd[$k]="WORV_BUILD_JOBS=$max_jobs" ;;
       esac
     done
-    cmd=("${cmd[0]}" run --cpus="${LOCAL_LANE_CPUS:-8}" --memory="${LOCAL_LANE_MEMORY:-16g}" "${cmd[@]:2}")
+    lane_mem=${LOCAL_LANE_MEMORY:-12g}
+    cmd=("${cmd[0]}" run --cpus="${LOCAL_LANE_CPUS:-8}" --memory="$lane_mem" "${cmd[@]:2}")
     exec 7>"${LOCAL_LANE_LOCK:-/tmp/worv-local-lane.lock}" && flock 7
+    case "$lane_mem" in *g|*G) need=$(( ${lane_mem%[gG]} * 1024 )) ;; *m|*M) need=${lane_mem%[mM]} ;; *) need=0 ;; esac
+    need=$(( need + ${LOCAL_LANE_SPARE_MIB:-4096} )); said=""
+    while :; do
+      avail=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "${LOCAL_LANE_MEMINFO:-/proc/meminfo}" 2>/dev/null)
+      [[ "$avail" =~ ^[0-9]+$ ]] && [ "$avail" -lt "$need" ] || break
+      [ -n "$said" ] || { echo "remote-docker: lane run waits for ${need} MiB available on this host (${avail} MiB now)" >&2; said=1; }
+      sleep "${LOCAL_LANE_MEM_POLL_S:-15}"
+    done
   fi
   # A container writes as root, so each writable bind under the user's tmp_workspace is handed back
   # to the user once a foreground run ends; the next host-side step writes there.
