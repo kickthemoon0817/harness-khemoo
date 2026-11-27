@@ -3,14 +3,15 @@
 ## Starting and stopping
 
 ```bash
+./bin/tick.sh check           # what the instance resolves to; exit 1 names what is missing
 ./bin/tick.sh                 # one firing, right now
 crontab -e                    # */2 * * * * /path/to/harness/bin/tick.sh
 crontab -r                    # stop spawning; in-flight ticks finish on their own
 ```
 
 To stop **after current work completes** — the usual way to shut down — remove the cron first,
-then wait for the running ticks to exit. Never kill a tick mid-session: it may hold a lease or
-a live resource that its own teardown is responsible for releasing.
+then wait for the running ticks to exit. Never kill a tick mid-session: it may hold a claim, the merge lock
+or a resource the instance gave it, which its own teardown is responsible for releasing.
 
 ```bash
 crontab -r
@@ -27,7 +28,8 @@ cron line or a `state/paused` file stops each chain at its next tick boundary.
 pgrep -cf '^claude -p'                     # live ticks
 tail -5 state/logs/allocator.log           # sizing decisions
 ls -lt state/logs | head                   # recent ticks (0 bytes = still running)
-cat state/locks/*.lease 2>/dev/null        # who holds the exclusive resource
+cat state/locks/claim.* 2>/dev/null        # local claims: issue, PID, since
+bin/merge-lock.sh status                   # who holds the merge slot
 gh issue list --label ai:wip               # what is claimed right now
 ```
 
@@ -39,6 +41,9 @@ gh issue list --label ai:wip               # what is claimed right now
 
 Usage in both windows, the cap that implies, how many slots are held, how many issues are
 unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
+Other lines name a state the launcher noticed, logged once rather than at every firing: `held: <reason>`
+(the instance's `hooks/hold`), `instance incomplete: <item>`, `hooks/env.sh failed`, a model that
+hit its usage limit, or no fresh usage reading.
 
 ## Is it stuck?
 
@@ -47,24 +52,25 @@ Usually not. Check in this order:
 1. **`pgrep -cf '^claude -p'` returns 0 and the queue is non-empty.** Look at the newest log:
    an `exit=1` trailer with a short duration means API or network failure — cron retries by
    itself. No trailer at all means the tick died without finishing; see LESSONS.
-2. **A tick has run for ages.** Check whether it holds the lease and whether its session is
-   alive. Long verification runs are expected; compare against your budget.
-3. **Nothing spawns although slots are free.** Check `allocator.log`: usage may have hit a
-   band that caps at 0, or `claimable` may be 0 because every issue carries the WIP label.
+2. **A tick has run for ages.** Check what it holds and whether its process is alive. Long verification runs are expected; compare against your budget.
+3. **Nothing spawns although slots are free.** Check `allocator.log`: the instance may be held
+   or incomplete, usage may have hit a band that caps at 0, or `claimable` may be 0 because every
+   issue carries the WIP label.
 4. **Everything looks idle mid-turn.** You are probably between firings. Wait two minutes.
 
 ## Recovery
 
-**Orphaned lease.** Read the lease file, test the PID with `kill -0`. If dead, clean up
-whatever it left running, then delete the lease. Ticks do this automatically; do it by hand
-only when no tick is running.
+**Orphaned claim or merge lock.** `bin/claim.sh status <issue>` and `bin/merge-lock.sh status`
+print `ORPHAN` when the holder PID is dead. The next acquire takes it over, so there is nothing to
+delete. Clean up whatever the dead tick left running first.
 
 **Stuck claims.** `ai:wip` on an issue whose claiming PID is gone is resumable by design —
 a later tick continues from the recorded state. Remove the label by hand only if you want the
 work abandoned rather than resumed.
 
-**Container or service died.** The harness does not restart infrastructure. Bring it back
-before the next firing, or add a liveness check to your runbook's setup step.
+**Container or service died.** The harness does not restart infrastructure. Bring it back,
+and give the instance a `hooks/hold` that holds the harness while it is down, so no tick spends
+its claim finding that out.
 
 **After an outage.** Nothing to repair: slots released with their processes, and claims are
 liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manually.

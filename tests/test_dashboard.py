@@ -517,8 +517,8 @@ class RedactionTest(unittest.TestCase):
         self.assertEqual(CommandRedactor.summarize("cat /very/long/path/to/some/evidence/folder/with/a/file.log"),
                          "cat \u2026/file.log")
         self.assertEqual(CommandRedactor.summarize(""), "")
-        self.assertEqual(CommandRedactor.summarize_argv(("bash", "/h/bin/arm_queue.sh", "--issue", "2490", "--packet",
-                                                         "/p")), "arm_queue.sh --issue 2490 \u2026")
+        self.assertEqual(CommandRedactor.summarize_argv(("bash", "/h/bin/run_queue.sh", "--issue", "2490", "--packet",
+                                                         "/p")), "run_queue.sh --issue 2490 \u2026")
         self.assertEqual(CommandRedactor.summarize_argv(("python3", "/h/bin/x.py", "--token", "abc")),
                          "x.py --token [redacted]")
 
