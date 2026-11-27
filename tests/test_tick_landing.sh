@@ -7,8 +7,10 @@ H=$(mktemp -d)
 holders=()
 cleanup() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$H"; }
 trap cleanup EXIT
-mkdir -p "$H/bin" "$H/config" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin" "$H/livebin"
-cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/remote-env.sh" "$H/bin/"
+mkdir -p "$H/bin" "$H/prompts" "$H/instance/prompts" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin" "$H/livebin"
+cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+echo "Core rules." > "$H/prompts/tick-core.md"
+cp "$here/tests/fixtures/instance/prompts/tick.md" "$H/instance/prompts/tick.md"
 cat > "$H/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$2" | head -1 >> "$FAKE_LANES"
@@ -27,10 +29,9 @@ cat > "$H/fakebin/crontab" <<'EOF'
 echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
 EOF
 chmod +x "$H/fakebin/claude" "$H/fakebin/queue" "$H/fakebin/crontab" "$H/livebin/claude"
-cat > "$H/config/harness.env" <<EOF
+cat > "$H/instance/harness.env" <<EOF
 TARGET_REPO=$H/target
 WORKTREE_ROOT=$H/worktrees
-PLAN_DIR=$H/plan
 QUEUE_DEPTH_CMD=$H/fakebin/queue
 CLAUDE_BIN=$H/fakebin/claude
 CLAUDE_FLAGS=

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Autonomous issue harness — tick launcher.
 #
-# Two modes:
+# Three modes:
 #   tick.sh                       launcher: decide how many ticks to run, spawn them
+#   tick.sh check                 print what the instance resolves to; exit 1 if it is incomplete
 #   tick.sh runner <max> <delay>  internal: hold a slot and run exactly one tick
 #   tick.sh runner <max> <delay> landing
-#                                 internal: one tick that claims only a merge slot's ai:ready issue
+#                                 internal: one tick that claims only a merge slot's ready issue
 #
 # The launcher is invoked from cron every couple of minutes. It sizes the pool from
 # live API rate-limit headroom AND the number of unclaimed issues, then spawns enough
@@ -13,35 +14,59 @@
 # to do) costs no API calls.
 set -u
 
-HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=/dev/null
-[ -r "$HARNESS_HOME/config/harness.env" ] && . "$HARNESS_HOME/config/harness.env"
-
-: "${HARNESS_STATE:=$HARNESS_HOME/state}"
-: "${TARGET_REPO:?set TARGET_REPO in config/harness.env}"
-: "${WORKTREE_ROOT:?set WORKTREE_ROOT in config/harness.env}"
-: "${PLAN_DIR:?set PLAN_DIR in config/harness.env}"
-# The prompts name these by variable, so the tick's shell must carry them. NUCLEUS_HOST stays
-# out: exported, it would outrank the operator's state/nucleus/host redirect in nucleus_ok.sh.
-export HARNESS_HOME TARGET_REPO WORKTREE_ROOT PLAN_DIR ASSET_COPY_DIR
+. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+harness_load
 : "${ISSUE_LABEL:=ai}"
 : "${WIP_LABEL:=ai:wip}"
+: "${READY_LABEL:=ai:ready}"
+: "${SIGNOFF_LABEL:=ai:signoff}"
+: "${OPERATOR_LABEL:=ai:operator}"
+: "${LONG_LABEL:=ai:long}"
+: "${TICK_BUDGET_MIN:=120}"
+: "${LONG_TICK_BUDGET_MIN:=240}"
 : "${MAX_SLOTS:=8}"
 : "${STAGGER_SECONDS:=8}"
 : "${HEARTBEAT_INTERVAL:=1800}"
 : "${LOG_RETENTION:=200}"
+: "${HOLD_TIMEOUT_S:=5}"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/usage-lib.sh"
 : "${CLAUDE_BIN:=claude}"
 # Set, but possibly empty: an explicit `CLAUDE_FLAGS=` means "pass no flags".
 [ -z "${CLAUDE_FLAGS+x}" ] && CLAUDE_FLAGS="--dangerously-skip-permissions"
-export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
+# Cron gives a bare PATH; the instance's bin/ stays first, as harness_load put it.
+export PATH="$HARNESS_INSTANCE_DIR/bin:${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 
 LOGS="$HARNESS_STATE/logs"
 LOCKS="$HARNESS_STATE/locks"
 mkdir -p "$LOGS" "$LOCKS"
-# shellcheck source=/dev/null
-. "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
+CORE_PROMPT="$HARNESS_HOME/prompts/tick-core.md"
+INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
+
+# The launcher fires every couple of minutes: a state that persists is logged once, not each time.
+log_changed() {  # $1 = message
+    tail -1 "$LOGS/allocator.log" 2>/dev/null | cut -d' ' -f2- | grep -qxF -- "$1" \
+        || echo "$(date -u +%Y%m%dT%H%M%SZ) $1" >> "$LOGS/allocator.log"
+}
+
+# Prints one line per thing the instance lacks; a tick cannot run without any of them.
+instance_missing() {
+    if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
+    else
+        [ -n "${TARGET_REPO:-}" ] || echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
+        [ -n "${WORKTREE_ROOT:-}" ] || echo "$HARNESS_ENV_FILE: WORKTREE_ROOT unset"
+    fi
+    [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
+    [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
+}
+
+if [ "${1:-}" != check ]; then
+    harness_hook env.sh; rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] \
+        || log_changed "hooks/env.sh failed (exit $rc); ticks run without it"
+fi
+export TARGET_REPO WORKTREE_ROOT
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
 compute_want() {
@@ -49,7 +74,7 @@ compute_want() {
     # QUEUE_DEPTH_CMD (config) may replace the count with a project-aware one, e.g.
     # bin/claimable.sh, which also excludes issues whose dependencies are still open.
     if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
-        claimable=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$ISSUE_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
+        claimable=$(queue_depth "$ISSUE_LABEL")
     else
         claimable=$(gh issue list --repo "${GH_REPO:-}" --label "$ISSUE_LABEL" --state open --limit 100 \
             --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length" 2>/dev/null)
@@ -86,59 +111,105 @@ pick_model() {  # $1 = models already tried this tick
 }
 
 # The harness is paused when its cron line is commented out or state/paused exists, and held
-# while Nucleus has refused connections for NUCLEUS_HOLD_MIN (10) minutes on end
-# (state/nucleus/status, bin/nucleus_probe.sh): no kit can boot then, and a tick would spend its
-# claim finding that out. The launcher starts nothing and a runner chains nothing while paused or
-# held; a tick already running finishes its own claim, and the hold lifts with the probe's next ok.
-nucleus_held() {
-    local st since
-    st=$(cat "$HARNESS_STATE/nucleus/status" 2>/dev/null) || return 1
-    [[ "$st" == *"result=fail"* ]] || return 1
-    since=$(grep -o 'fail_since=[0-9]*' <<< "$st" | cut -d= -f2)
-    [ -n "$since" ] && [ $(( $(date +%s) - since )) -ge $(( ${NUCLEUS_HOLD_MIN:-10} * 60 )) ]
-}
+# while the instance's hooks/hold says so (exit 0; its first line of output is the reason): an
+# installation holds while something every tick needs is down, so no tick spends its claim
+# finding that out. The launcher starts nothing and a runner chains nothing while paused or held;
+# a tick already running finishes its own claim. A hook that fails or hangs past HOLD_TIMEOUT_S
+# holds nothing, so a broken hook cannot stop the harness.
 harness_paused() {
+    local out
     [ -e "$HARNESS_STATE/paused" ] && return 0
-    if nucleus_held; then
-        mkdir -p "$LOGS" 2>/dev/null
-        tail -1 "$LOGS/allocator.log" 2>/dev/null | grep -q 'held: nucleus down' \
-            || echo "$(date -u +%Y%m%dT%H%M%SZ) held: nucleus down since $(date -u -d "@$(grep -o 'fail_since=[0-9]*' "$HARNESS_STATE/nucleus/status" | cut -d= -f2)" +%FT%TZ)" >> "$LOGS/allocator.log"
+    if out=$(HOOK_TIMEOUT_S="$HOLD_TIMEOUT_S" harness_hook hold 2>/dev/null); then
+        out=$(printf '%s\n' "$out" | head -1)
+        log_changed "held: ${out:-hooks/hold}"
         return 0
     fi
     crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh' || return 0
     return 1
 }
 
-# The fable lane: an issue labelled FABLE_LABEL (the operator sets it on difficult or important
-# issues) is worked on FABLE_MODEL. A tick runs on that lane while claimable fable issues outnumber
-# the live fable ticks, and its prompt tells it to claim only those; other ticks leave them alone.
-# While FABLE_MODEL cools down on its usage limit, any tick may claim them, so none waits on it.
-: "${FABLE_MODEL:=claude-fable-5-1}"
-: "${FABLE_LABEL:=ai:fable}"
-fable_cooling() {
-    local stamp="$MODEL_COOL/$FABLE_MODEL"
+# Every queue count goes through QUEUE_DEPTH_CMD with the labels it gates on.
+queue_depth() {  # $1 = the label to count
+    GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" SIGNOFF_LABEL="$SIGNOFF_LABEL" \
+        OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" LOW_LABEL="${LOW_LABEL:-}" \
+        LANE_LABEL="${LANE_LABEL:-}" $QUEUE_DEPTH_CMD 2>/dev/null
+}
+
+# The model lane: an issue labelled LANE_LABEL (the operator sets it on difficult or important
+# issues) is worked on LANE_MODEL. A tick runs on that lane while claimable lane issues outnumber
+# the live lane ticks, and its prompt tells it to claim only those; other ticks leave them alone.
+# While LANE_MODEL cools down on its usage limit, any tick may claim them, so none waits on it.
+# The lane is off unless both are set.
+: "${LANE_MODEL:=}"
+: "${LANE_LABEL:=}"
+lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
+lane_cooling() {
+    local stamp="$MODEL_COOL/$LANE_MODEL"
     [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
 }
-fable_lane() {  # true when this tick should run on the fable lane
-    [ -n "$FABLE_MODEL" ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
-    fable_cooling && return 1
-    local want_f young_f=0 pid age
-    want_f=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$FABLE_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
-    [[ "$want_f" =~ ^[0-9]+$ ]] && [ "$want_f" -gt 0 ] || return 1
-    # The count excludes issues a live tick holds, so only a fable tick young enough
+lane_wanted() {  # true when this tick should run on the model lane
+    lane_on && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
+    lane_cooling && return 1
+    local want_l young_l=0 pid age
+    want_l=$(queue_depth "$LANE_LABEL")
+    [[ "$want_l" =~ ^[0-9]+$ ]] && [ "$want_l" -gt 0 ] || return 1
+    # The count excludes issues a live tick holds, so only a lane tick young enough
     # to be still choosing its issue stands for one of them (compute_want's rule).
-    for pid in $(pgrep -f -- "claude -p .*--model $FABLE_MODEL" 2>/dev/null); do
+    for pid in $(pgrep -f -- "claude -p .*--model $LANE_MODEL" 2>/dev/null); do
         age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young_f=$(( young_f + 1 ))
+        [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young_l=$(( young_l + 1 ))
     done
-    [ "$young_f" -lt "$want_f" ]
+    [ "$young_l" -lt "$want_l" ]
 }
 
 # A merge slot's landing tick: it may start past the width the usage windows allow, so it
 # claims nothing but an issue waiting for the slot and never chains.
-: "${READY_LABEL:=ai:ready}"
 LANDING_MARK="This tick is the merge slot's landing tick"
 LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
+
+# The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
+# the key's value through a sed escape, never eval, so a value cannot run as code.
+PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
+compose_prompt() {  # $1 = the lane line
+    local k v subst=()
+    for k in $PROMPT_KEYS; do
+        v=$(printf '%s' "${!k:-}" | tr '\n' ' ' | sed 's/[\\&|]/\\&/g')
+        subst+=(-e "s|{{$k}}|$v|g")
+    done
+    printf '%s\n\n' "$1"
+    sed "${subst[@]}" "$CORE_PROMPT"
+    printf '\n## This installation\n\n'
+    sed "${subst[@]}" "$INSTANCE_PROMPT"
+}
+
+# ----------------------------------------------------------------- check mode
+if [ "${1:-}" = check ]; then
+    echo "harness home:  $HARNESS_HOME"
+    echo "instance:      $HARNESS_INSTANCE_DIR"
+    echo "config:        $HARNESS_ENV_FILE"
+    echo "state:         $HARNESS_STATE"
+    echo "target repo:   ${TARGET_REPO:-}"
+    echo "worktree root: ${WORKTREE_ROOT:-}"
+    echo "repository:    ${GH_REPO:-(gh infers it from the target repo)}"
+    echo "queue:         ${QUEUE_DEPTH_CMD:-gh issue list --label $ISSUE_LABEL}"
+    echo "models:        $(model_list)"
+    if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; else echo "model lane:    off"; fi
+    for h in env.sh hold worktree-busy worktree-remove; do
+        if [ -e "$HARNESS_INSTANCE_DIR/hooks/$h" ]; then echo "hook $h: present"; else echo "hook $h: none"; fi
+    done
+    if out=$(HOOK_TIMEOUT_S="$HOLD_TIMEOUT_S" harness_hook hold 2>/dev/null); then
+        echo "hold:          held: $(printf '%s\n' "$out" | head -1)"
+    else
+        echo "hold:          not held"
+    fi
+    missing=$(instance_missing)
+    if [ -n "$missing" ]; then
+        printf '%s\n' "$missing" | sed 's/^/missing: /'
+        exit 1
+    fi
+    echo "instance complete"
+    exit 0
+fi
 
 # ---------------------------------------------------------------- runner mode
 # bash parses this whole block when a runner starts, so a running runner keeps
@@ -185,28 +256,28 @@ if [ "${1:-}" = "runner" ]; then
                     break
                 fi
                 lane="$LANDING_LANE"
-            elif fable_lane && [[ " $tried " != *" $FABLE_MODEL "* ]]; then
-                model="$FABLE_MODEL"
-                lane="This tick runs on $FABLE_MODEL, the fable lane: claim only an issue labelled \`$FABLE_LABEL\`. If none is claimable, print a one-line summary and end."
+            elif lane_wanted && [[ " $tried " != *" $LANE_MODEL "* ]]; then
+                model="$LANE_MODEL"
+                lane="This tick runs on $LANE_MODEL, the model lane: claim only an issue labelled \`$LANE_LABEL\`. If none is claimable, print a one-line summary and end."
             else
                 model=$(pick_model "$tried")
                 if [ -z "$model" ]; then
                     echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
                     break
                 fi
-                if fable_cooling; then
-                    lane="This tick runs on $model. $FABLE_MODEL is cooling down on its usage limit, so an issue labelled \`$FABLE_LABEL\` may be claimed too."
+                if ! lane_on; then
+                    lane="This tick runs on $model."
+                elif lane_cooling; then
+                    lane="This tick runs on $model. $LANE_MODEL is cooling down on its usage limit, so an issue labelled \`$LANE_LABEL\` may be claimed too."
                 else
-                    lane="This tick runs on $model: never claim an issue labelled \`$FABLE_LABEL\`; those are worked on the fable lane."
+                    lane="This tick runs on $model: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
                 fi
             fi
             flags="$(printf '%s' "$CLAUDE_FLAGS" | sed -E 's/--model[= ][^ ]+//') --model $model"
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
             log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
-            "$CLAUDE_BIN" -p "$lane
-
-$(cat "$HARNESS_HOME/prompts/tick-prompt.md")" $flags >>"$log" 2>&1
+            "$CLAUDE_BIN" -p "$(compose_prompt "$lane")" $flags >>"$log" 2>&1
             rc=$?
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s model=$model" >>"$log"
@@ -241,6 +312,16 @@ fi
 # -------------------------------------------------------------- launcher mode
 
 harness_paused && exit 0
+missing=$(instance_missing)
+if [ -n "$missing" ]; then
+    # Say so at most hourly; `tick.sh check` names everything that is missing.
+    stamp="$LOCKS/instance-incomplete.stamp"
+    if [ ! -f "$stamp" ] || [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -ge 3600 ]; then
+        touch "$stamp"
+        echo "$(date -u +%Y%m%dT%H%M%SZ) instance incomplete: $(printf '%s\n' "$missing" | head -1)" >>"$LOGS/allocator.log"
+    fi
+    exit 0
+fi
 
 # 1. Cheapest gate: if every slot is held there is nothing to decide.
 busy=0; free=0; s=1
@@ -251,8 +332,8 @@ while [ "$s" -le "$MAX_SLOTS" ]; do
     s=$(( s + 1 ))
 done
 [ "$free" -eq 0 ] && exit 0
-# Every model cooling down and no fable lane to run: a runner would only log that nothing ran.
-[ -z "$(pick_model "")" ] && ! fable_lane && exit 0
+# Every model cooling down and no model lane to run: a runner would only log that nothing ran.
+[ -z "$(pick_model "")" ] && ! lane_wanted && exit 0
 
 compute_allowed
 if [ "$pct" = "?" ]; then
@@ -275,13 +356,13 @@ fi
 spawn=$(( allowed - busy ))
 [ "$spawn" -gt "$want" ] && spawn=$want
 [ "$spawn" -lt 0 ] && spawn=0
-# A landing needs no card and little budget, but in a full pool it waits for a slot to free,
+# A landing needs little budget, but in a full pool it waits for a slot to free,
 # which can outlast the merge slot. With every allowed slot held and no young tick about to
 # claim, one landing tick starts past the width for an issue waiting for the slot.
 if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
     && ! pgrep -f -- "claude -p $LANDING_MARK" >/dev/null 2>&1; then
-    ready=$(GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$READY_LABEL" WIP_LABEL="$WIP_LABEL" $QUEUE_DEPTH_CMD 2>/dev/null)
+    ready=$(queue_depth "$READY_LABEL")
     if [[ "$ready" =~ ^[0-9]+$ ]] && [ "$ready" -gt 0 ]; then
         slotmax=$(( busy + 1 )); [ "$slotmax" -gt "$MAX_SLOTS" ] && slotmax=$MAX_SLOTS
         echo "$(date -u +%Y%m%dT%H%M%SZ) five=${five:-?}% week=${week:-?}% allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
