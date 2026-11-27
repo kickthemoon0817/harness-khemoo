@@ -18,5 +18,21 @@
  {
   "text": "--issue 2490 --queue arms.queue",
   "kept": "--issue 2490"
+ },
+ {
+  "text": "ssh -p 22 host",
+  "kept": "-p 22 host"
+ },
+ {
+  "text": "mkdir -p d",
+  "kept": "-p d"
+ },
+ {
+  "text": "docker run -p 8080:80 img",
+  "kept": "-p 8080:80"
+ },
+ {
+  "text": "curl -u alice https://x",
+  "kept": "-u alice"
  }
 ]

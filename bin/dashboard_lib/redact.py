@@ -14,7 +14,9 @@ class CommandRedactor:
     Secret-looking values: `KEY=value` and `--flag value` / `--flag=value` where the name holds TOKEN, KEY, SECRET,
     PASS, AUTH, CRED, COOKIE or SESSION (any case); the value of a header whose name holds one of them
     (`Authorization:`, `Proxy-Authorization:`, `X-Api-Key:`, `Cookie:`) and `Bearer` credentials; URL userinfo
-    with a password, and any userinfo of an http(s) URL; GitHub, GitLab, Slack, AWS and `sk-` token shapes; hex
+    with a password, and any userinfo of an http(s) URL; the password of `curl -u user:password`, of `sshpass -p`
+    and `docker login -p`, and of a glued `mysql -pVALUE`, but no other command's `-p`, which is a port or a parent
+    flag to most tools; GitHub, GitLab, Slack, AWS and `sk-` token shapes; hex
     runs of 32 characters or more; and base64-like runs of 32 or more mixing upper case, lower case and digits.
 
     `redact` masks them in free text (a log line) that is shown as it is. `summarize` works on what the shell
@@ -45,6 +47,15 @@ class CommandRedactor:
         rf"(?i)(?<![\w-])([A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*\s*:\s*)(?:(?:bearer|token|basic|digest)\s+)?"
         r"(?!//)[^\s'\"]+"
     )
+    CURL_USER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?<![\w.-])(curl\b[^;&|]*?\s(?:-u\s*|--user(?:=|\s+))[^\s:;&|]+:)[^\s;&|]+"
+    )
+    PASSWORD_FLAG_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?<![\w.-])((?:sshpass|(?:docker|podman)\s+login)\b[^;&|]*?\s-p\s*"
+        r"|(?:mysql|mysqldump|mysqladmin|mariadb)\b[^;&|]*?\s-p)[^\s;&|]+"
+    )
+    MYSQL_COMMANDS: ClassVar[frozenset[str]] = frozenset({"mysql", "mysqldump", "mysqladmin", "mariadb"})
+    PASSWORD_COMMANDS: ClassVar[frozenset[str]] = MYSQL_COMMANDS | {"curl", "sshpass", "docker", "podman"}
     HEADER_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^([A-Za-z0-9_-]+):(\S*)$")
     FLAG_WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^--?[A-Za-z][A-Za-z0-9_-]*(?:=.*)?$")
     BEARER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+")
@@ -92,6 +103,8 @@ class CommandRedactor:
         masked: str = CommandRedactor.SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group(1)}={mask}", text)
         masked = CommandRedactor.SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}{mask}",
                                                          masked)
+        masked = CommandRedactor.CURL_USER_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
+        masked = CommandRedactor.PASSWORD_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
         masked = CommandRedactor.SECRET_HEADER_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
         masked = CommandRedactor.BEARER_PATTERN.sub(lambda match: f"{match.group(1)}{mask}", masked)
         masked = CommandRedactor.URL_PASSWORD_PATTERN.sub(lambda match: f"{match.group(1)}{mask}@", masked)
@@ -177,8 +190,9 @@ class CommandRedactor:
         `--token -abc` masks `-abc`. A header word whose name
         holds a secret word (`Authorization:`, `X-Api-Key:`, `Cookie:`), `Bearer`, or `Authorization:Bearer`
         masks the words after it up to the next flag or operator but `;`, keeping an auth scheme that comes right
-        after a bare header name; a header word carrying its value (`X-Api-Key:abc`) loses that value too. Every
-        other word is masked on its own.
+        after a bare header name; a header word carrying its value (`X-Api-Key:abc`) loses that value too. After a
+        command that takes a short password flag, that flag's value is masked (see _password_flag). Every other
+        word is masked on its own.
 
         Args:
             words: Dequoted words and operators.
@@ -191,13 +205,22 @@ class CommandRedactor:
         masking: str = ""
         scheme_may_follow: bool = False
         value_owed: bool = False
+        password_commands: set[str] = set()
+        password_owed: str = ""
         for word in words:
             if CommandRedactor._is_punctuation(word):
                 redacted.append(word)
+                password_commands.clear()
+                password_owed = ""
                 if not (masking == "header" and word == ";"):
                     masking = ""
                     value_owed = False
                 scheme_may_follow = False
+                continue
+            if password_owed:
+                redacted.append(CommandRedactor.MASK if password_owed == "password"
+                                else CommandRedactor._mask_userinfo(word))
+                password_owed = ""
                 continue
             if masking:
                 if value_owed:
@@ -215,6 +238,12 @@ class CommandRedactor:
             masking = ""
             scheme_may_follow = False
             value_owed = False
+            if os.path.basename(word) in CommandRedactor.PASSWORD_COMMANDS or word == "login":
+                password_commands.add(os.path.basename(word))
+            password_word, password_owed = CommandRedactor._password_flag(word, password_commands)
+            if password_word != word or password_owed:
+                redacted.append(password_word)
+                continue
             if CommandRedactor.SECRET_FLAG_WORD_PATTERN.match(word):
                 redacted.append(word)
                 masking = "flag"
@@ -242,6 +271,45 @@ class CommandRedactor:
                 continue
             redacted.append(CommandRedactor._redact_word(word, depth))
         return redacted
+
+    @staticmethod
+    def _password_flag(word: str, commands: set[str]) -> tuple[str, str]:
+        """
+        Masks a short password flag, read only once a command that takes one has appeared in this simple command,
+        wrappers such as `sudo` or `timeout` allowed before it: to `ssh`, `mkdir` and most others `-p` is a port or
+        a parent flag. `mysql -p` alone prompts, so only its glued `-pVALUE` carries a password.
+
+        Args:
+            word: One dequoted word.
+            commands: The password-taking commands, and `login`, met so far in this simple command.
+
+        Returns:
+            The word, with a glued-on value masked, and what the next word owes: "password", "userinfo" or "".
+        """
+        if "curl" in commands:
+            if word in ("-u", "--user"):
+                return word, "userinfo"
+            for flag in ("--user=", "-u"):
+                if word.startswith(flag) and len(word) > len(flag):
+                    return flag + CommandRedactor._mask_userinfo(word[len(flag):]), ""
+        spaced: bool = "sshpass" in commands or ("login" in commands and bool(commands & {"docker", "podman"}))
+        if word == "-p" and spaced:
+            return word, "password"
+        if word.startswith("-p") and len(word) > 2 and (spaced or commands & CommandRedactor.MYSQL_COMMANDS):
+            return "-p" + CommandRedactor.MASK, ""
+        return word, ""
+
+    @staticmethod
+    def _mask_userinfo(value: str) -> str:
+        """
+        Args:
+            value: A `user:password` value; a bare user makes curl prompt for the password.
+
+        Returns:
+            The value with the part after the first colon masked.
+        """
+        user, colon, _ = value.partition(":")
+        return f"{user}:{CommandRedactor.MASK}" if colon else value
 
     @staticmethod
     def _redact_word(word: str, depth: int) -> str:
