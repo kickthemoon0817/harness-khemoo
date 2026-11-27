@@ -17,12 +17,16 @@ is the smallest complete one.
 
 The config cannot name the directory it is read from, so `HARNESS_INSTANCE_DIR` and `HARNESS_ENV`
 come from the environment only. `harness_load` sources the config, puts `$HARNESS_INSTANCE_DIR/bin`
-first on PATH, and exports `HARNESS_HOME`, `HARNESS_INSTANCE_DIR`, `HARNESS_STATE` and each name in
-`TICK_EXPORTS`. A name in `TICK_EXPORTS` that is not a valid variable name is reported on stderr and
-skipped. `tick.sh` also exports `TARGET_REPO` and `WORKTREE_ROOT`. No other config key reaches a
-tick's environment unless `TICK_EXPORTS` lists it. That includes `GH_TOKEN` and the
-`PUBLIC_RECORD_*` keys that the lint reads. `pr_sweep.sh` and `worktree_gc.sh` export every key,
-because cron gives them no environment and `gh` reads `GH_TOKEN`.
+first on PATH, and exports `HARNESS_HOME`, `HARNESS_INSTANCE_DIR`, `HARNESS_STATE`, `GH_REPO` and each
+name in `TICK_EXPORTS`. An empty `GH_REPO` is derived from the `origin` remote of `TARGET_REPO`, as the
+`[HOST/]OWNER/NAME` that `gh --repo` takes, so every `gh` call and queue count names the same
+repository. A name in `TICK_EXPORTS` that is not a valid variable name is reported on stderr and
+skipped.
+
+`tick.sh` also exports `TARGET_REPO` and `WORKTREE_ROOT`. No other config key reaches a tick's
+environment unless `TICK_EXPORTS` lists it. That includes `GH_TOKEN` and the `PUBLIC_RECORD_*` keys
+that the lint reads. `pr_sweep.sh` and `worktree_gc.sh` export every key, because cron gives them no
+environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines, keeps
 only the keys it uses, and does no `$` expansion.
@@ -39,11 +43,30 @@ only the keys it uses, and does no `$` expansion.
 | `bin/` | optional | the instance's scripts, first on PATH |
 | `tests/test_*.sh`, `tests/test_*.py` | optional | run by `tests/run.sh` after the core suites |
 
-When a required file is missing, or `TARGET_REPO` or `WORKTREE_ROOT` is unset, the launcher starts
-nothing. It logs `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log`
-at most once an hour. `bin/tick.sh check` prints the resolved paths, repository, queue command,
-models, lane, each hook's presence and the hold state. It prints `missing: <item>` for each gap
-and exits 1, or prints `instance complete` and exits 0.
+The instance is usable when the required files are readable, `TARGET_REPO` is a git checkout,
+`WORKTREE_ROOT` exists or its nearest existing parent is a writable directory, `GH_REPO` is set or
+derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is set, and `CLAUDE_BIN`
+resolves on the PATH. Until then the launcher starts nothing. It logs
+`instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log` at most once an
+hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, `CLAUDE_BIN`, models,
+lane, each hook's state (`present`, `none`, or `present but not executable (ignored)`), the hold state,
+and whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
+`bin/tick.sh`). It prints `missing: <item>` for each gap and exits 1, or prints `instance complete`
+and exits 0.
+
+## Queue count
+
+`QUEUE_DEPTH_CMD` prints how many issues carrying `ISSUE_LABEL` a tick could claim, as one integer.
+It runs with `GH_REPO`, `ISSUE_LABEL` (the label being counted), `WIP_LABEL`, `SIGNOFF_LABEL`,
+`OPERATOR_LABEL`, `FIRST_LABEL`, `LOW_LABEL`, `LANE_LABEL` and, when the config sets it, `GH_TOKEN` in
+its environment. The value is a command line that `tick.sh` splits on whitespace, without quoting, so
+no path in it may contain a space. Unset, the launcher counts the open `ISSUE_LABEL` issues without
+`WIP_LABEL` with `gh issue list`, run in `TARGET_REPO`, and the model lane and landing ticks stay off.
+
+A count that fails or prints anything but an integer is an error, logged to `allocator.log` as
+`ERROR queue count failed (label <l>: exit <n>, output '...', stderr '...')`. The launcher then counts
+one claimable issue, so a GitHub outage does not stop every slot: the tick that starts ends early when
+it finds nothing. A failed lane or landing count starts no lane or landing tick.
 
 ## Hooks
 

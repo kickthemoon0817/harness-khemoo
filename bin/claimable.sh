@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Dependency-aware queue depth: open ISSUE_LABEL issues without WIP_LABEL whose
 # "Depends on:" issue numbers are all closed, and which are not parked for the
-# owner (SIGNOFF_LABEL). Prints one integer.
+# owner (SIGNOFF_LABEL). Prints one integer, or nothing and exits non-zero when GitHub cannot be read.
 # Priority: an issue labelled LOW_LABEL counts only when no other
 # issue of the list is claimable, and none labelled FIRST_LABEL is claimable anywhere; an
 # issue labelled LANE_LABEL (the model lane; off when empty) without FIRST_LABEL counts only
 # while no FIRST_LABEL issue is claimable anywhere. So low-priority work and lane work wait for
 # the take-first queue.
 set -u
-: "${GH_REPO:?}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"; : "${SIGNOFF_LABEL:=ai:signoff}"
+: "${GH_REPO:?claimable.sh needs GH_REPO (owner/name)}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"; : "${SIGNOFF_LABEL:=ai:signoff}"
 : "${OPERATOR_LABEL:=ai:operator}"
 : "${FIRST_LABEL:=ai:first}"; : "${LOW_LABEL:=ai:low}"; : "${LANE_LABEL:=}"
 # A tick takes a local claim (bin/claim.sh) before its claim comment reaches GitHub.
 CLAIM_LOCKS="${HARNESS_STATE:-${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/state}/locks"
 json=$(gh issue list --repo "$GH_REPO" --label "$ISSUE_LABEL" --state open --limit 100 \
-    --json number,body,labels 2>/dev/null) || { echo 1; exit 0; }
+    --json number,body,labels) || { echo "claimable.sh: gh issue list failed" >&2; exit 1; }
 # The issue list goes through a file, never argv: forty issue bodies exceed ARG_MAX,
 # and the heredoc below already owns stdin.
 list_file=$(mktemp); trap 'rm -f "$list_file"' EXIT; printf '%s' "$json" > "$list_file"

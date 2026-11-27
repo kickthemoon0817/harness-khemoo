@@ -85,7 +85,10 @@ mkdir -p "$H/st/locks"; echo "2 $$ 2026-09-28T00:00:00Z" > "$H/st/locks/claim.2"
 out=$(HARNESS_STATE="$H/st" count); check "a live local claim under HARNESS_STATE is left out" '[ "$out" = 1 ]' "$out"
 
 reset; touch "$FX/fail"
-out=$(count); check "a failed issue list still prints 1" '[ "$out" = 1 ]' "$out"
+out=$(count 2>/dev/null); rc=$?
+check "a failed issue list prints no count and exits non-zero" '[ -z "$out" ] && [ "$rc" -ne 0 ]' "rc=$rc out=$out"
+reset; out=$(GH_REPO= count 2>&1); rc=$?
+check "an unset GH_REPO prints no count and exits non-zero" '[ "$rc" -ne 0 ] && ! [[ "$out" =~ ^[0-9]+$ ]]' "rc=$rc out=$out"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

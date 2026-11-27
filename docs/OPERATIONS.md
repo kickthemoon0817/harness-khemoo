@@ -43,7 +43,9 @@ Usage in both windows, the cap that implies, how many slots are held, how many i
 unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
 Other lines name a state the launcher noticed, logged once rather than at every firing: `held: <reason>`
 (the instance's `hooks/hold`), `instance incomplete: <item>`, `hooks/env.sh failed`, a model that
-hit its usage limit, or no fresh usage reading.
+hit its usage limit, or no fresh usage reading. A line with `ERROR queue count failed` means the
+queue count could not be read (a GitHub outage, or a broken `QUEUE_DEPTH_CMD`); the launcher then
+counts one claimable issue so a tick still runs.
 
 ## Is it stuck?
 

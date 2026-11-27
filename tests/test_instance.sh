@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercises bin/tick.sh against an instance overlay in a scratch harness home: the instance's
-# required files, its hooks, the composed prompt and `tick.sh check`. A fake claude records its
-# prompt and environment; a fake queue command answers per label.
+# required files, its hooks, the composed prompt, the queue count and `tick.sh check`. A fake claude
+# records its prompt and environment; a fake queue command answers per label.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -21,13 +21,15 @@ printf '%s\n' "$*" >> "$FAKE_ARGS"
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
+[ -e "$FAKE_QUEUE_FAILS" ] && { echo "queue service unreachable" >&2; exit 1; }
 case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) echo 1 ;; esac
 EOF
 cat > "$H/fakebin/crontab" <<'EOF'
 #!/usr/bin/env bash
-echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
+[ -e "$FAKE_NO_CRON" ] || echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
 EOF
 chmod +x "$H/fakebin/"*
+git -C "$H/target" init -q
 # The fixture's values, with a repository name that a naive substitution would mangle.
 write_env() {
     { grep -v '^GH_REPO=\|^TARGET_REPO=\|^WORKTREE_ROOT=' "$here/tests/fixtures/instance/harness.env"
@@ -48,7 +50,8 @@ EOF
       printf '%s\n' "$@"; } > "$I/harness.env"
 }
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.txt" FAKE_ENV="$H/env.txt" \
-    FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt"
+    FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" \
+    FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_NO_CRON="$H/no-cron"
 LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
@@ -80,7 +83,48 @@ write_env "WORKTREE_ROOT="
 check "check exits 1 when a required key is empty" '[ "$rc" -eq 1 ] && grep -q "WORKTREE_ROOT unset" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 write_env
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
-check "check exits 0 on a complete instance" '[ "$rc" -eq 0 ] && grep -q "instance complete" "$H/check.txt" && grep -q "model lane:    off" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check "check exits 0 on a complete instance" '[ "$rc" -eq 0 ] && grep -q "instance complete" "$H/check.txt" && grep -q "model lane:    off" "$H/check.txt" && grep -q "paused:        no" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+
+# check names each way an instance is unusable, one line each.
+check_with() {  # extra harness.env lines; leaves the output in $H/check.txt and the status in rc
+    write_env "$@"; "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+}
+check_with "TARGET_REPO=$H"
+check "check fails when TARGET_REPO is not a git checkout" '[ "$rc" -eq 1 ] && grep -q "missing: a git checkout at TARGET_REPO ($H)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+: > "$H/plain-file"
+check_with "WORKTREE_ROOT=$H/plain-file/trees"
+check "check fails when WORKTREE_ROOT cannot be created" '[ "$rc" -eq 1 ] && grep -q "missing: a WORKTREE_ROOT that exists or can be created" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "WORKTREE_ROOT=$H/not-yet/trees"
+check "a WORKTREE_ROOT that can be created passes" '[ "$rc" -eq 0 ] && [ ! -e "$H/not-yet" ]' "rc=$rc $(cat "$H/check.txt")"
+check_with "QUEUE_DEPTH_CMD=\"$H/plain-file --flag\""
+check "check fails when QUEUE_DEPTH_CMD is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable QUEUE_DEPTH_CMD ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "CLAUDE_BIN=no-such-claude"
+check "check fails when CLAUDE_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable CLAUDE_BIN (no-such-claude)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "GH_REPO="
+check "check fails when GH_REPO is unset and the origin names none" '[ "$rc" -eq 1 ] && grep -q "GH_REPO unset" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+git -C "$H/target" remote add origin git@github.com:derived-org/derived-repo.git
+check_with "GH_REPO="
+check "an unset GH_REPO is derived from the origin remote" '[ "$rc" -eq 0 ] && grep -q "repository:    derived-org/derived-repo" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+launch
+check "the derived GH_REPO reaches the prompt" 'sed -n 3p "$FAKE_PROMPT" | grep -q "^Core rules for derived-org/derived-repo:"' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
+git -C "$H/target" remote remove origin
+printf '#!/usr/bin/env bash\nexit 0\n' > "$I/hooks/worktree-busy"; chmod -x "$I/hooks/worktree-busy"
+check_with
+check "check reports a hook that is not executable as ignored" 'grep -q "hook worktree-busy: present but not executable (ignored)" "$H/check.txt" && grep -q "hook worktree-remove: none" "$H/check.txt"' "$(cat "$H/check.txt")"
+rm -f "$I/hooks/worktree-busy"
+touch "$H/state/paused"; check_with
+check "check reports state/paused" 'grep -q "paused:        yes, $H/state/paused exists" "$H/check.txt"' "$(cat "$H/check.txt")"
+rm -f "$H/state/paused"; touch "$FAKE_NO_CRON"; check_with
+check "check reports a missing cron line as paused" 'grep -q "paused:        yes, no active crontab line" "$H/check.txt"' "$(cat "$H/check.txt")"
+rm -f "$FAKE_NO_CRON"
+
+# The template's placeholder paths and empty GH_REPO cannot pass.
+T="$H/template-instance"; cp -r "$here/templates/instance" "$T"; mv "$T/harness.env.example" "$T/harness.env"
+HARNESS_INSTANCE_DIR="$T" "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "the template's placeholders fail check" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: a git checkout at TARGET_REPO (/path/to/checkout)" "$H/check.txt" && grep -q "missing: a WORKTREE_ROOT that exists or can be created (/path/to/worktrees)" "$H/check.txt" && grep -q "GH_REPO unset" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+write_env
 
 # The prompt: lane line, blank line, core rules, then the installation's own, with keys substituted.
 cat > "$I/hooks/env.sh" <<'EOF'
@@ -95,6 +139,19 @@ check "the core rules follow, with keys substituted literally" \
 check "the installation section comes last" \
     '[ "$(sed -n 5p "$FAKE_PROMPT")" = "## This installation" ] && tail -1 "$FAKE_PROMPT" | grep -qF "Fake installation rules for o/r&x|y\\z: work only issues labelled \`ai\`."' "$(cat "$FAKE_PROMPT")"
 check "hooks/env.sh exports and TICK_EXPORTS reach the tick" '[ "$(cat "$FAKE_ENV")" = "sourced exported" ]' "$(cat "$FAKE_ENV" 2>/dev/null)"
+
+# A failed queue count is an error in the log, and still counts one issue so a tick runs.
+touch "$FAKE_QUEUE_FAILS"
+launch
+check "a failed queue count is logged as an error and a tick still runs" \
+    'grep -q "ERROR queue count failed (label ai: exit 1, output .*, stderr .queue service unreachable.); counting 1 claimable issue" "$LOG" && [ -s "$FAKE_PROMPT" ]' "log=$(cat "$LOG")"
+printf '#!/usr/bin/env bash\n' > "$H/fakebin/silent-queue"; chmod +x "$H/fakebin/silent-queue"
+write_env "QUEUE_DEPTH_CMD=$H/fakebin/silent-queue"
+launch
+check "an empty queue count is logged as an error, not read as a count" \
+    'grep -q "ERROR queue count failed (label ai: exit 0, output .., " "$LOG"' "log=$(cat "$LOG")"
+rm -f "$FAKE_QUEUE_FAILS"
+write_env
 
 printf 'false\n' > "$I/hooks/env.sh"
 launch

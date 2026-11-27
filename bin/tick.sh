@@ -52,10 +52,26 @@ log_changed() {  # $1 = message
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
+    local root argv
     if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
     else
-        [ -n "${TARGET_REPO:-}" ] || echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
-        [ -n "${WORKTREE_ROOT:-}" ] || echo "$HARNESS_ENV_FILE: WORKTREE_ROOT unset"
+        if [ -z "${TARGET_REPO:-}" ]; then echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
+        elif ! git -C "$TARGET_REPO" rev-parse --git-dir >/dev/null 2>&1; then
+            echo "a git checkout at TARGET_REPO ($TARGET_REPO)"
+        fi
+        if [ -z "${WORKTREE_ROOT:-}" ]; then echo "$HARNESS_ENV_FILE: WORKTREE_ROOT unset"
+        else
+            # A tick creates the root on its first worktree, so its nearest existing ancestor must allow that.
+            root=$WORKTREE_ROOT
+            while [ ! -e "$root" ] && [ "$root" != / ]; do root=$(dirname "$root"); done
+            [ -d "$root" ] && [ -w "$root" ] || echo "a WORKTREE_ROOT that exists or can be created ($WORKTREE_ROOT)"
+        fi
+        [ -n "${GH_REPO:-}" ] || echo "$HARNESS_ENV_FILE: GH_REPO unset, and TARGET_REPO's origin names no repository"
+        if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
+            read -r -a argv <<<"$QUEUE_DEPTH_CMD"
+            type -P -- "${argv[0]}" >/dev/null || echo "an executable QUEUE_DEPTH_CMD (${argv[0]})"
+        fi
+        type -P -- "$CLAUDE_BIN" >/dev/null || echo "an executable CLAUDE_BIN ($CLAUDE_BIN)"
     fi
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
@@ -71,15 +87,14 @@ export TARGET_REPO WORKTREE_ROOT
 # Sets claimable, young and want: queued issues not already about to be claimed.
 compute_want() {
     local pid age
-    # QUEUE_DEPTH_CMD (config) may replace the count with a project-aware one, e.g.
-    # bin/claimable.sh, which also excludes issues whose dependencies are still open.
-    if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
-        claimable=$(queue_depth "$ISSUE_LABEL")
+    if queue_depth "$ISSUE_LABEL"; then
+        claimable=$queue_n
     else
-        claimable=$(gh issue list --repo "${GH_REPO:-}" --label "$ISSUE_LABEL" --state open --limit 100 \
-            --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length" 2>/dev/null)
+        # A GitHub outage must not stop every slot: one tick still runs, and it ends early when it
+        # finds nothing to claim. A broken count command looks the same, so it is logged as an error.
+        log_changed "ERROR queue count failed ($queue_error); counting 1 claimable issue"
+        claimable=1
     fi
-    [ -z "$claimable" ] && claimable=1   # gh failed: assume one, let the tick sort it out
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     young=0
@@ -110,6 +125,8 @@ pick_model() {  # $1 = models already tried this tick
     done
 }
 
+cron_active() { crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh'; }
+
 # The harness is paused when its cron line is commented out or state/paused exists, and held
 # while the instance's hooks/hold says so (exit 0; its first line of output is the reason): an
 # installation holds while something every tick needs is down, so no tick spends its claim
@@ -124,15 +141,34 @@ harness_paused() {
         log_changed "held: ${out:-hooks/hold}"
         return 0
     fi
-    crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh' || return 0
+    cron_active || return 0
     return 1
 }
 
-# Every queue count goes through QUEUE_DEPTH_CMD with the labels it gates on.
+# Counts the claimable issues labelled $1 into queue_n, through QUEUE_DEPTH_CMD with the labels it
+# gates on, else through gh in the target checkout. A count that fails or prints anything but a
+# number sets queue_error instead and returns 1, so no caller mistakes it for a count.
+# QUEUE_DEPTH_CMD is a command line split on whitespace, without quoting: no path in it may hold a space.
 queue_depth() {  # $1 = the label to count
-    GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" SIGNOFF_LABEL="$SIGNOFF_LABEL" \
-        OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" LOW_LABEL="${LOW_LABEL:-}" \
-        LANE_LABEL="${LANE_LABEL:-}" $QUEUE_DEPTH_CMD 2>/dev/null
+    local out rc err token=()
+    err=$(mktemp)
+    # gh reads the config's token, which the count command gets though a tick does not.
+    [ -n "${GH_TOKEN:-}" ] && token=(GH_TOKEN="$GH_TOKEN")
+    if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
+        # shellcheck disable=SC2086
+        out=$(env ${token[@]+"${token[@]}"} GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" \
+            SIGNOFF_LABEL="$SIGNOFF_LABEL" OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" \
+            LOW_LABEL="${LOW_LABEL:-}" LANE_LABEL="${LANE_LABEL:-}" $QUEUE_DEPTH_CMD 2>"$err")
+    else
+        out=$(cd "$TARGET_REPO" && env ${token[@]+"${token[@]}"} gh issue list --repo "${GH_REPO:-}" --label "$1" \
+            --state open --limit 100 \
+            --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length" 2>"$err")
+    fi
+    rc=$?
+    queue_error="label $1: exit $rc, output '$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-60)', stderr '$(tail -n 1 "$err" | cut -c1-160)'"
+    rm -f "$err"
+    [ "$rc" -eq 0 ] && [[ "$out" =~ ^[0-9]+$ ]] || return 1
+    queue_n=$out
 }
 
 # The model lane: an issue labelled LANE_LABEL (the operator sets it on difficult or important
@@ -151,8 +187,12 @@ lane_wanted() {  # true when this tick should run on the model lane
     lane_on && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
     lane_cooling && return 1
     local want_l young_l=0 pid age
-    want_l=$(queue_depth "$LANE_LABEL")
-    [[ "$want_l" =~ ^[0-9]+$ ]] && [ "$want_l" -gt 0 ] || return 1
+    if ! queue_depth "$LANE_LABEL"; then
+        log_changed "ERROR lane queue count failed ($queue_error); no lane tick"
+        return 1
+    fi
+    want_l=$queue_n
+    [ "$want_l" -gt 0 ] || return 1
     # The count excludes issues a live tick holds, so only a lane tick young enough
     # to be still choosing its issue stands for one of them (compute_want's rule).
     for pid in $(pgrep -f -- "claude -p .*--model $LANE_MODEL" 2>/dev/null); do
@@ -190,18 +230,28 @@ if [ "${1:-}" = check ]; then
     echo "state:         $HARNESS_STATE"
     echo "target repo:   ${TARGET_REPO:-}"
     echo "worktree root: ${WORKTREE_ROOT:-}"
-    echo "repository:    ${GH_REPO:-(gh infers it from the target repo)}"
-    echo "queue:         ${QUEUE_DEPTH_CMD:-gh issue list --label $ISSUE_LABEL}"
+    echo "repository:    ${GH_REPO:-(unset)}"
+    echo "queue:         ${QUEUE_DEPTH_CMD:-gh issue list --label $ISSUE_LABEL, in the target repo}"
+    echo "claude:        $CLAUDE_BIN"
     echo "models:        $(model_list)"
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; else echo "model lane:    off"; fi
+    # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
     for h in env.sh hold worktree-busy worktree-remove; do
-        if [ -e "$HARNESS_INSTANCE_DIR/hooks/$h" ]; then echo "hook $h: present"; else echo "hook $h: none"; fi
+        f="$HARNESS_INSTANCE_DIR/hooks/$h"
+        if [ ! -e "$f" ]; then hs=none
+        elif [[ "$h" == *.sh ]]; then if [ -r "$f" ]; then hs=present; else hs="present but not readable (ignored)"; fi
+        elif [ -x "$f" ]; then hs=present
+        else hs="present but not executable (ignored)"; fi
+        echo "hook $h: $hs"
     done
     if out=$(HOOK_TIMEOUT_S="$HOLD_TIMEOUT_S" harness_hook hold 2>/dev/null); then
         echo "hold:          held: $(printf '%s\n' "$out" | head -1)"
     else
         echo "hold:          not held"
     fi
+    if [ -e "$HARNESS_STATE/paused" ]; then echo "paused:        yes, $HARNESS_STATE/paused exists"
+    elif ! cron_active; then echo "paused:        yes, no active crontab line runs bin/tick.sh"
+    else echo "paused:        no"; fi
     missing=$(instance_missing)
     if [ -n "$missing" ]; then
         printf '%s\n' "$missing" | sed 's/^/missing: /'
@@ -362,8 +412,10 @@ spawn=$(( allowed - busy ))
 if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
     && ! pgrep -f -- "claude -p $LANDING_MARK" >/dev/null 2>&1; then
-    ready=$(queue_depth "$READY_LABEL")
-    if [[ "$ready" =~ ^[0-9]+$ ]] && [ "$ready" -gt 0 ]; then
+    ready=0
+    if queue_depth "$READY_LABEL"; then ready=$queue_n
+    else log_changed "ERROR ready queue count failed ($queue_error); no landing tick"; fi
+    if [ "$ready" -gt 0 ]; then
         slotmax=$(( busy + 1 )); [ "$slotmax" -gt "$MAX_SLOTS" ] && slotmax=$MAX_SLOTS
         echo "$(date -u +%Y%m%dT%H%M%SZ) five=${five:-?}% week=${week:-?}% allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
             >>"$LOGS/allocator.log"
