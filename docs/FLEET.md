@@ -654,9 +654,9 @@ TARGET_REPO = "/srv/work/repo"
 
 fleet reads `--config PATH`, else `$FLEET_CONFIG`, else `$HARNESS_INSTANCE_DIR/fleet.toml`. An
 empty `$FLEET_CONFIG` or `$HARNESS_INSTANCE_DIR` counts as unset, so resolution falls through to
-the next source. No path, a missing file, a TOML error, an unknown key, a wrong type or a value outside its range is
-an error that names the key, and fleet exits 2. Relative paths resolve against the directory of
-fleet.toml; a leading `~/` expands to `$HOME`.
+the next source. No path, a missing file, a TOML error, an unknown key, a wrong type or a value
+outside its range is an error that names the key, and fleet exits 2. Relative paths resolve
+against the directory of fleet.toml; a leading `~/` expands to `$HOME`.
 
 ### Top level
 
