@@ -245,7 +245,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         """
-        Logs the method, path and status, never the query (it carries the access token) or the headers.
+        Logs the request line and status, with the access token in the query masked, and never the headers.
 
         Args:
             format: The format string.

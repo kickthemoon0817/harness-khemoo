@@ -33,6 +33,11 @@ case "${1:-}" in
     p=$(running_pid) || { echo "not running"; exit 0; }
     kill "$p"
     for _ in $(seq 1 25); do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$p"
+      for _ in $(seq 1 10); do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done
+      if kill -0 "$p" 2>/dev/null; then echo "pid $p is still alive after SIGKILL" >&2; exit 1; fi
+    fi
     rm -f "$PIDFILE" "$URLFILE"
     echo "stopped pid $p"; exit 0 ;;
 esac
@@ -52,10 +57,13 @@ setsid nohup python3 "$here/dashboard.py" --harness-home "$H" --data-dir "$DATA"
   >> "$LOG" 2>&1 < /dev/null &
 pid=$!
 echo "$pid $PORT" > "$PIDFILE"
+# The URL file names the port the server bound, which differs from $PORT under --port 0.
 for _ in $(seq 1 150); do
   if [ -s "$URLFILE" ] && IFS= read -r url < "$URLFILE" &&
-    printf 'url = "http://127.0.0.1:%s/healthz?t=%s"\n' "$PORT" "${url##*\?t=}" |
+    printf 'url = "%s/healthz?t=%s"\n' "${url%%/\?t=*}" "${url##*\?t=}" |
       curl -qsf --config - --max-time 2 > /dev/null 2>&1; then
+    bound="${url#http://127.0.0.1:}"
+    echo "$pid ${bound%%/*}" > "$PIDFILE"
     cat "$URLFILE"; exit 0
   fi
   kill -0 "$pid" 2>/dev/null || break
