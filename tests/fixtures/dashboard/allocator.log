@@ -1,0 +1,6 @@
+20261126T010013Z slot2 chains tick 4 after 4521s: pct=49% allowed=10 claimable=1 young=0
+20261126T011002Z five=0% week=50% allowed=10 busy=5 claimable=1 -> spawning 1
+20261126T011500Z slot3 claude-fable-5-2 hit its usage limit; cooling 1800s
+20261126T012000Z no fresh usage reading in /home/x/.claude/usage-cache.json; starting nothing
+20261126T012604Z five=0% week=51% allowed=10 busy=6 ready=1 -> spawning 1 landing tick
+20261126T013206Z slot5 chains tick 3 after 4193s: pct=52% allowed=10 claimable=2 young=0

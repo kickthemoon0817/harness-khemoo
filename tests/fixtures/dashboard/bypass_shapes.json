@@ -1,0 +1,323 @@
+[
+ {
+  "shape": "flag value quoted with a space",
+  "command": "tool --token \"qf1alpha qf1beta\" --verbose",
+  "argv": [
+   "tool",
+   "--token",
+   "qf1alpha qf1beta",
+   "--verbose"
+  ],
+  "secrets": [
+   "qf1alpha",
+   "qf1beta"
+  ]
+ },
+ {
+  "shape": "assignment quoted with a space",
+  "command": "GH_TOKEN=\"qa2alpha qa2beta\" tool run",
+  "argv": [
+   "tool",
+   "GH_TOKEN=qa2alpha qa2beta"
+  ],
+  "secrets": [
+   "qa2alpha",
+   "qa2beta"
+  ]
+ },
+ {
+  "shape": "flag value in adjacent quotes",
+  "command": "tool --password 'cq4'\"alpha\" --next",
+  "argv": [
+   "tool",
+   "--password",
+   "cq4alpha",
+   "--next"
+  ],
+  "secrets": [
+   "cq4alpha",
+   "alpha"
+  ]
+ },
+ {
+  "shape": "escaped quotes in an assignment",
+  "command": "tool TOKEN=\\\"es3alpha\\\" --next",
+  "argv": [
+   "tool",
+   "TOKEN=\"es3alpha\"",
+   "--next"
+  ],
+  "secrets": [
+   "es3alpha"
+  ]
+ },
+ {
+  "shape": "escaped quotes in a flag value",
+  "command": "tool --api-key=\\\"es3beta\\\"",
+  "argv": [
+   "tool",
+   "--api-key=\"es3beta\""
+  ],
+  "secrets": [
+   "es3beta"
+  ]
+ },
+ {
+  "shape": "flag with its value in the next word",
+  "command": "tool --api-key fv5alpha --secret 'fv5beta' x",
+  "argv": [
+   "tool",
+   "--api-key",
+   "fv5alpha",
+   "--secret",
+   "fv5beta",
+   "x"
+  ],
+  "secrets": [
+   "fv5alpha",
+   "fv5beta"
+  ]
+ },
+ {
+  "shape": "nested -c, one level",
+  "command": "bash -c 'curl --token n1alpha https://example.com/x'",
+  "argv": [
+   "bash",
+   "-c",
+   "curl --token n1alpha https://example.com/x"
+  ],
+  "secrets": [
+   "n1alpha"
+  ]
+ },
+ {
+  "shape": "nested -c, two levels",
+  "command": "bash -c \"bash -c 'tool --password n2alpha GH_TOKEN=n2beta'\"",
+  "argv": [
+   "bash",
+   "-c",
+   "bash -c 'tool --password n2alpha GH_TOKEN=n2beta'"
+  ],
+  "secrets": [
+   "n2alpha",
+   "n2beta"
+  ]
+ },
+ {
+  "shape": "nested -c, two levels, escaped",
+  "command": "bash -c \"bash -c \\\"tool --token n3alpha\\\"\"",
+  "argv": [
+   "bash",
+   "-c",
+   "bash -c \"tool --token n3alpha\""
+  ],
+  "secrets": [
+   "n3alpha"
+  ]
+ },
+ {
+  "shape": "nested -c with a quoted flag value",
+  "command": "sh -c 'tool --token \"n4alpha n4beta\"'",
+  "argv": [
+   "sh",
+   "-c",
+   "tool --token \"n4alpha n4beta\""
+  ],
+  "secrets": [
+   "n4alpha",
+   "n4beta"
+  ]
+ },
+ {
+  "shape": "unbalanced double quote",
+  "command": "tool --name \"ub6alpha ub6beta",
+  "argv": null,
+  "secrets": [
+   "ub6alpha",
+   "ub6beta"
+  ]
+ },
+ {
+  "shape": "unbalanced single quote",
+  "command": "tool PASSWORD='ub6gamma --next ub6delta",
+  "argv": null,
+  "secrets": [
+   "ub6gamma",
+   "ub6delta"
+  ]
+ },
+ {
+  "shape": "authorization split into words",
+  "command": "curl -H Authorization: Bearer as7alpha https://x",
+  "argv": [
+   "curl",
+   "-H",
+   "Authorization:",
+   "Bearer",
+   "as7alpha",
+   "https://x"
+  ],
+  "secrets": [
+   "as7alpha"
+  ]
+ },
+ {
+  "shape": "bearer as its own word",
+  "command": "tool Bearer as7beta --next",
+  "argv": [
+   "tool",
+   "Bearer",
+   "as7beta",
+   "--next"
+  ],
+  "secrets": [
+   "as7beta"
+  ]
+ },
+ {
+  "shape": "Proxy-Authorization header in one quoted word",
+  "command": "curl -H 'Proxy-Authorization: Basic hd1alpha' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Proxy-Authorization: Basic hd1alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd1alpha"
+  ]
+ },
+ {
+  "shape": "Authorization:Bearer with the credential in the next word",
+  "command": "curl -H Authorization:Bearer hd2alpha https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Authorization:Bearer",
+   "hd2alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd2alpha"
+  ]
+ },
+ {
+  "shape": "Authorization:Bearer and credential in one quoted word",
+  "command": "curl -H 'Authorization:Bearer hd2beta' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Authorization:Bearer hd2beta",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd2beta"
+  ]
+ },
+ {
+  "shape": "X-Api-Key header in one quoted word",
+  "command": "curl -H 'X-Api-Key: hd3alpha' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key: hd3alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd3alpha"
+  ]
+ },
+ {
+  "shape": "X-Api-Key header with its value attached",
+  "command": "curl -H X-Api-Key:hd4alpha https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key:hd4alpha",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "hd4alpha"
+  ]
+ },
+ {
+  "shape": "Cookie header with several pairs",
+  "command": "curl -H 'Cookie: session=ck1alpha; other=ck1beta' https://example.com/x",
+  "argv": [
+   "curl",
+   "-H",
+   "Cookie: session=ck1alpha; other=ck1beta",
+   "https://example.com/x"
+  ],
+  "secrets": [
+   "ck1alpha",
+   "ck1beta"
+  ]
+ },
+ {
+  "shape": "secret flag followed by another secret flag",
+  "command": "tool --token --password fl1alpha",
+  "argv": [
+   "tool",
+   "--token",
+   "--password",
+   "fl1alpha"
+  ],
+  "secrets": [
+   "fl1alpha"
+  ]
+ },
+ {
+  "shape": "secret flag followed by two values",
+  "command": "tool --api-key fl2alpha fl2beta --x",
+  "argv": [
+   "tool",
+   "--api-key",
+   "fl2alpha",
+   "fl2beta",
+   "--x"
+  ],
+  "secrets": [
+   "fl2alpha",
+   "fl2beta"
+  ]
+ },
+ {
+  "shape": "secret flag value that starts with a dash",
+  "command": "tool --token -qd1alpha --verbose",
+  "argv": [
+   "tool",
+   "--token",
+   "-qd1alpha",
+   "--verbose"
+  ],
+  "secrets": [
+   "qd1alpha"
+  ]
+ },
+ {
+  "shape": "secret flag value that starts with two dashes",
+  "command": "tool --password --qd2alpha",
+  "argv": [
+   "tool",
+   "--password",
+   "--qd2alpha"
+  ],
+  "secrets": [
+   "qd2alpha"
+  ]
+ },
+ {
+  "shape": "header value that starts with a dash",
+  "command": "curl -H 'X-Api-Key: -qd3alpha' https://example.invalid",
+  "argv": [
+   "curl",
+   "-H",
+   "X-Api-Key: -qd3alpha",
+   "https://example.invalid"
+  ],
+  "secrets": [
+   "qd3alpha"
+  ]
+ }
+]

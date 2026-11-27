@@ -1,0 +1,10 @@
+{
+   "locks": [
+      {"pid": 1331, "mode": "WRITE", "path": "/run/nvidia-persistenced/lock"},
+      {"pid": 2387677, "mode": "WRITE*", "path": "/tmp/worv-dev-build-remote-5090.lock"},
+      {"pid": 2131760, "mode": "WRITE*", "path": "/tmp/worv-dev-build-remote-5090.lock"},
+      {"pid": 2131760, "mode": "WRITE*", "path": "/tmp/worv-dev-build-remote-5090.lock"},
+      {"pid": 1660457, "mode": "WRITE", "path": "/tmp/worv-fast-set-remote-5090.lock"},
+      {"pid": 99, "mode": "READ*", "path": "/tmp/worv-dev-build-remote-w03.lock"}
+   ]
+}

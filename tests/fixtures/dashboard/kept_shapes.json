@@ -1,0 +1,38 @@
+[
+ {
+  "text": "DOCKER_HOST=ssh://worv@10.50.1.6",
+  "kept": "ssh://worv@10.50.1.6"
+ },
+ {
+  "text": "WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote-5090.lock",
+  "kept": "/tmp/worv-dev-build-remote-5090.lock"
+ },
+ {
+  "text": "/home/khemoo/tmp_workspace/artifacts/manure-plan/evidence/2026-11-26-2464-unit-rest-rowwatch",
+  "kept": "2026-11-26-2464-unit-rest-rowwatch"
+ },
+ {
+  "text": "tools/dev/iter.sh build worv.env.manure",
+  "kept": "iter.sh build worv.env.manure"
+ },
+ {
+  "text": "--issue 2490 --queue arms.queue",
+  "kept": "--issue 2490"
+ },
+ {
+  "text": "ssh -p 22 host",
+  "kept": "-p 22 host"
+ },
+ {
+  "text": "mkdir -p d",
+  "kept": "-p d"
+ },
+ {
+  "text": "docker run -p 8080:80 img",
+  "kept": "-p 8080:80"
+ },
+ {
+  "text": "curl -u alice https://x",
+  "kept": "-u alice"
+ }
+]
