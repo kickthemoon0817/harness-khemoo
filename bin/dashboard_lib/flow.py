@@ -85,7 +85,7 @@ class FlowBuilder:
         """
         Args:
             labels: The harness's label names.
-            device_tags: Remote host to its short tag (`worv@10.50.1.6` to `5090`); `local` is this host.
+            device_tags: Remote host to its short tag (`user@host-a` to `a`); `local` is this host.
             done_window_s: How long a closed issue stays in the done column.
         """
         self.labels: QueueLabels = labels

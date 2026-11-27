@@ -279,7 +279,7 @@ class PublicRecordLint:
             True when every sample behaves as the contract says.
         """
         bad_body: str = "\n".join([
-            "Packet: `~/tmp_workspace/artifacts/manure-plan/evidence/2026-11-03-x/INDEX.md` on 10.50.2.178.",
+            "Packet: `~/tmp_workspace/artifacts/manure-plan/evidence/2026-11-03-x/INDEX.md` on 192.0.2.178.",
             "Lease: slot 1 (`worv-iter`), pid 2421513, budget 120 min, cubin b034f353dfa4, `lease.sh acquire`.",
             "Operator (05:31Z) accepted it; land in the 06:00Z slot; log at /tmp/mg/run.log. Then `ai:ready` (mine).",
         ])
@@ -295,10 +295,10 @@ class PublicRecordLint:
             "Claimed. Starting with the walk stage's split on 994809f4b, then the hold.",
             "", "<details><summary>Harness trace</summary>", "",
             "harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min",
-            "host khemoo, slot 1, worktree /home/khemoo/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137",
+            "host host-a, slot 1, worktree /home/you/tmp_workspace/ai-worktrees/mpm-2137, lease.sh acquire 2137",
             "</details>",
         ])
-        old_style_comment: str = ("harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget 120 min "
+        old_style_comment: str = ("harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host host-a), budget 120 min "
                                   "(labels: ai,ai:plan). Claim time 2026-11-03T09:06:50Z.")
         passed: bool = True
 

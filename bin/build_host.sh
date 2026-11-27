@@ -15,12 +15,15 @@
 # Only when every host is left out are they all candidates again. The first host whose lock is free
 # wins. When every lock is taken, the host with the fewest waiters wins, the earlier on a tie.
 #
-#   BUILD_LOCK_NAMES  "<user@host>=<name> …" (default: the two harness hosts' names)
+#   BUILD_LOCK_NAMES  "<user@host>=<name> …" (config/harness.env; a host left out is named from its address)
 #   BUILD_LOCK_DIR    where the locks live (default /tmp)
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 S="${HARNESS_STATE:-$H/state}"
-: "${BUILD_LOCK_NAMES:=worv@10.50.1.6=5090 worv@worv-worker-03.local=w03}"
+# Only this one key is taken from config/harness.env, in a subshell, so the caller's environment
+# (the state folder, the lock folder, a BUILD_LOCK_NAMES set even to empty) still wins.
+[ -z "${BUILD_LOCK_NAMES+x}" ] && [ -r "$H/config/harness.env" ] && BUILD_LOCK_NAMES=$(HARNESS_HOME="$H"; . "$H/config/harness.env" >/dev/null 2>&1; printf '%s' "${BUILD_LOCK_NAMES:-}")
+: "${BUILD_LOCK_NAMES:=}"
 : "${BUILD_LOCK_DIR:=/tmp}"
 mapfile -t hosts < <(grep -v '^[[:space:]]*$' "$S/locks/harness-first-remote-only" 2>/dev/null)
 [ "${#hosts[@]}" -gt 0 ] || { echo "build_host: no harness host is named" >&2; exit 1; }

@@ -5,16 +5,18 @@ including `runbook.md` and `design.md` where they conflict.
 
 ## Hosts (owner, 2026-11-21, 2026-11-23)
 
-Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) and `worv@10.50.1.6` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; an arm that copies a tree goes to the first host. A compile goes where `bin/build_host.sh` says (below). Kits, tests with a card, AOT, device suites and cost reads go there, never to this host's own card. This host's CPU takes compiles when `bin/build_host.sh` names its local lane (owner, 2026-11-26); the shim refuses a tick's container with a card on the local daemon. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
+Host names, addresses and paths here are placeholders; `tick-prompt.md`'s PLACEHOLDERS paragraph says where each real value lives.
+
+Harness work runs on the remote cards alone: `<gpu-host-b>` (RTX 5080) and `<gpu-host-a>` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; an arm that copies a tree goes to the first host. A compile goes where `bin/build_host.sh` says (below). Kits, tests with a card, AOT, device suites and cost reads go there, never to this host's own card. This host's CPU takes compiles when `bin/build_host.sh` names its local lane (owner, 2026-11-26); the shim refuses a tick's container with a card on the local daemon. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
 
 Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
 
 | host | compile lock (`WORV_DEV_BUILD_LOCK=`) | suite lock (`flock`) |
 |---|---|---|
-| `worv@10.50.1.6` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
-| `worv@worv-worker-03.local` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
+| `<gpu-host-a>` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
+| `<gpu-host-b>` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
 
-**Which host compiles (operator, 2026-11-26).** Before each `tools/dev/iter.sh build`, run `eval "$(<harness>/bin/build_host.sh)"`. It exports `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` for the first host whose compile lock is free, and leaves out a host that a cost read holds whole. It also leaves out the card a waiting cost read asks for, so that card can go quiet (a wait for any card keeps the quieter unheld host free). When every lock is taken, it picks the host with the fewest waiters. The build's outputs copy back here, so the arms may run on either card. Never queue a compile behind another host's compile while the other lane is free. With `state/local-cpu-lane` present, this host is a third lane, after the remote ones: its export line names `DOCKER_HOST=unix:///var/run/docker.sock`, the host's own dev build lock (shared with the owner's builds) and the builder image the file names. Every line sets `WORV_BUILDER_IMAGE`, so eval it again before each compile. The local lane is for compiles and card-less host tests; a device run, AOT or anything with a card stays on a remote host. CPU-only suites belong on it, so the remote cards stay free for runs that need one: the scheduled slow and fast sets run there, and a device-record run's host stage runs there too, before it takes a remote card for the device stage alone.
+**Which host compiles (operator, 2026-11-26).** Before each `tools/dev/iter.sh build`, run `eval "$($HARNESS_HOME/bin/build_host.sh)"`. It exports `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` for the first host whose compile lock is free, and leaves out a host that a cost read holds whole. It also leaves out the card a waiting cost read asks for, so that card can go quiet (a wait for any card keeps the quieter unheld host free). When every lock is taken, it picks the host with the fewest waiters. The build's outputs copy back here, so the arms may run on either card. Never queue a compile behind another host's compile while the other lane is free. With `state/local-cpu-lane` present, this host is a third lane, after the remote ones: its export line names `DOCKER_HOST=unix:///var/run/docker.sock`, the host's own dev build lock (shared with the owner's builds) and the builder image the file names. Every line sets `WORV_BUILDER_IMAGE`, so eval it again before each compile. The local lane is for compiles and card-less host tests; a device run, AOT or anything with a card stays on a remote host. CPU-only suites belong on it, so the remote cards stay free for runs that need one: the scheduled slow and fast sets run there, and a device-record run's host stage runs there too, before it takes a remote card for the device stage alone.
 
 - **Never build or run a suite on a host whose card a cost read holds** (`lease.sh status`: a live `remote-all` on its slots). Use the other host's lane, so the read times the engine and not a compile.
 - **Choosing a lane for a build or a suite.** Take the host whose lock is free. If both are free, take the one with the lower load1 per core (`ssh <host> cat /proc/loadavg; nproc`). If both are held, wait on the one with the shorter holder. Put that host in `DOCKER_HOST=ssh://<host>`.
@@ -64,7 +66,7 @@ The owner: "each job takes excessive testing time, just implement and only check
    (override 14).
 6. `runbook.md` — for the **mechanics only**, as listed below.
 
-The plan's working copy is `/home/khemoo/tmp_workspace/artifacts/manure-plan/`. The same text is in the
+The plan's working copy is `$PLAN_DIR/`. The same text is in the
 repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read it there.
 
 ## Which issue
@@ -127,7 +129,7 @@ overridden below.
 1. **No gate verdict is acceptance (V1, V3).** `manure_gate.sh`'s PASS/FAIL line is a diagnostic.
    Acceptance is the evidence packet (V2) and, for behaviour changes, the owner.
 2. **Evidence packet for every PR** under
-   `/home/khemoo/tmp_workspace/artifacts/manure-plan/evidence/<YYYY-MM-DD>-<issue#>-<slug>/` with an
+   `$PLAN_DIR/evidence/<YYYY-MM-DD>-<issue#>-<slug>/` with an
    `INDEX.md` naming every file (run, commit, scenario, camera, moment, what it shows). Never
    overwrite an evidence folder; a re-run gets a new one (V5.6). It holds, as the step needs:
    the fail-on-head fixture output (failing on head, passing on the fix), reference cases with
@@ -227,10 +229,10 @@ overridden below.
      - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
        compile only) serves one compile at a time for every tick on this host. When it is held at all (operator,
        2026-11-16: a first waiter sat 40 minutes behind two compiles and missed its merge slot), or the local load1 is
-       past twice `nproc`, build and run host suites on a remote host instead: the first of `worv@10.50.1.6` and  (See "Hosts" above.)
-       `worv@worv-worker-03.local` whose `REMOTE_CARD_HOST=<host> bin/remote_room.sh` prints `ok` and whose card no
+       past twice `nproc`, build and run host suites on a remote host instead: the first of `<gpu-host-a>` and  (See "Hosts" above.)
+       `<gpu-host-b>` whose `REMOTE_CARD_HOST=<host> bin/remote_room.sh` prints `ok` and whose card no
        cost read holds (`lease.sh status`: no live `remote-all` on its slots):
-       `DOCKER_HOST=ssh://<host> PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
+       `DOCKER_HOST=ssh://<host> PATH=$HARNESS_HOME/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
        (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
        a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
      - **One fast set per host at a time.** The doctest runner shards a suite over min(nproc, 8) processes, so two or
@@ -259,11 +261,11 @@ overridden below.
        - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run
          `bin/remote_room.sh` (`--render` for a rendering kit). Use the remote lane only when it prints `ok`; on `busy`
          run the work locally. A lease grants a remote slot under the same check.
-       - Two remote hosts take explicit runs: `worv@worv-worker-03.local` (16 GB card, shared) and `worv@10.50.1.6`  (See "Hosts" above.)
+       - Two remote hosts take explicit runs: `<gpu-host-b>` (16 GB card, shared) and `<gpu-host-a>`  (See "Hosts" above.)
          (24 GB card, the faster CPU, usually free). Check a host with `REMOTE_CARD_HOST=<host> bin/remote_room.sh` and
-         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `worv@10.50.1.6` when both print `ok`.  (See "Hosts" above.)
-       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@worv-worker-03.local
-         PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
+         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `<gpu-host-a>` when both print `ok`.  (See "Hosts" above.)
+       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://<gpu-host-b>
+         PATH=$HARNESS_HOME/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
          `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
          cron slow set runs on the local host every third hour.
      - **While the local host is off** (`lease.sh local --off`, only on the owner's word), builds, AOT, tests and kits
@@ -299,13 +301,13 @@ overridden below.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
-     - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (no `--want-host`, so the queue takes the first card that is free and quiet). Only a phase read against the 150 ms bar needs worker-03, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read; `bin/card_dispatch.sh` unpins a queue that waits 5+ minutes on a busy card while another is free, idle and quiet, by writing `any` to its `<runs>/want-host`. A queue that reads the bar passes `--bar-read` to `bin/arm_queue.sh`, and is never moved. A whole-card run that times nothing, such as a render pair for V5, takes `--acquire-args "--all-remote --no-cost"`: the card still runs nothing else, but the host's load is not read and its builds go on beside it, so a render never waits for the build host to go quiet.
+     - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (no `--want-host`, so the queue takes the first card that is free and quiet). Only a phase read against the 150 ms bar needs `<gpu-host-b>`, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read; `bin/card_dispatch.sh` unpins a queue that waits 5+ minutes on a busy card while another is free, idle and quiet, by writing `any` to its `<runs>/want-host`. A queue that reads the bar passes `--bar-read` to `bin/arm_queue.sh`, and is never moved. A whole-card run that times nothing, such as a render pair for V5, takes `--acquire-args "--all-remote --no-cost"`: the card still runs nothing else, but the host's load is not read and its builds go on beside it, so a render never waits for the build host to go quiet.
 - **Work while a queue waits (operator, 2026-11-26).** A queue waiting for a card needs no watching: the runner polls and the stall watch reports a long wait. While it waits, do the issue's card-free work: the next Ask's design, code, compile and host cases. Do it in a separate worktree on its own branch, because an arm reads the queued trees' `bin/`; never rebuild or edit a tree a live queue may still run. Never spend a wait in a sleep loop, and never pause an issue for want of a card while card-free work is left. A device-record or other card run takes its card only for its device stage: host suites first, with no card.
 - **Readings ride with the change (operator, 2026-11-26).** A reading that only measures (a bar table, an attribution, a setting read alone) is part of the issue whose change it decides, never an issue of its own; its numbers go in that issue's packet. A test-only issue exists only for the daily full regression, its device run, and a failing gate.
 - **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
        (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
        and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
-       `setsid nohup <harness>/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue
+       `setsid nohup $HARNESS_HOME/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue
        --deadline <epoch> [--acquire-args "--all-remote"] [--collect /tmp/<file>,…] >/dev/null 2>&1 &`.
        - Poll `<packet>/runs/status` until its last line is `RELEASED`. Exit 4 is no lease by the deadline, 3 an early
          end (STOP, the deadline, a lost lease).
@@ -728,10 +730,10 @@ overridden below.
 10. **Names.** Review scenarios are RS1–RS7; tasks are S1–S3 (owner decision D9).
 11. **PhysX only** (owner decision D10): no Newton backend work. Newton appears only in Probe B,
     standalone, outside Kit.
-12. **Never write to, reconfigure or restart** the Nucleus server 10.50.2.21, and never change an
+12. **Never write to, reconfigure or restart** the Nucleus server <nucleus-server>, and never change an
     asset on it. Reading is what every run does, so a read-only stage open for evidence is fine.
-    **Robot asset tests run on copies** in `omniverse://10.50.1.117/Users/sungminkim/` (owner,
-    2026-09-24): copy the USD from 10.50.2.21, edit and load only the copy, and never commit a catalog
+    **Robot asset tests run on copies** in `<asset-copy-dir>` (owner,
+    2026-09-24): copy the USD from <nucleus-server>, edit and load only the copy, and never commit a catalog
     URL that points into that directory. Promoting a tested asset is the owner's job.
     **Never touch** the owner's own Isaac Sim or GUI sessions, the
     operator's working checkout, `master`, or a PR you did not open (runbook.md's resume exception
@@ -761,7 +763,7 @@ overridden below.
     hosts, PIDs, cubin hashes, merge slots and "(mine)" in the bodies, and no packet INDEX.md
     committed since 2026-09-25 while every PR cited one. So:
     - **Every body is linted before it is posted.** Write it to a file, run
-      `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr|issue|comment <file>`,
+      `$HARNESS_HOME/bin/public_record_lint.py --kind pr|issue|comment <file>`,
       and post with `--body-file` only when it exits 0. A blocking finding is rewritten, never
       posted around. Warnings name shorthand to define on first use (`glossary.md`).
     - **A PR body has the sections of `public-record.md`**, in its order: Summary (with

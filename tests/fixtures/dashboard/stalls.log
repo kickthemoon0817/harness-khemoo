@@ -1,5 +1,5 @@
 2026-11-25T11:00:01Z STALL lock_wait /tmp/worv-x.lock holder runs git push https://bob:stall-pass-1@example.com/r.git with GH_TOKEN=stall-token-1
-2026-11-25T12:06:11Z STALL host_degraded worv@10.0.0.6 moved last at 2026-11-25T12:06:02Z, 3 bad probes in a row now; last probe: slow, upload 0.31 MB/s, connect 0.16 s
+2026-11-25T12:06:11Z STALL host_degraded ci@192.0.2.6 moved last at 2026-11-25T12:06:02Z, 3 bad probes in a row now; last probe: slow, upload 0.31 MB/s, connect 0.16 s
 2026-11-25T13:05:01Z STALL lock_wait /tmp/worv-dev-build-remote-w03.lock 2 waiting (pids 3056785 3052674), 2 of them 15+ min, longest 15 min; holder pid 3032812, up 16 min (bash tools/dev/iter.sh build worv.env.manure)
 garbage line
-2026-11-25T19:25:01Z STALL gpu_idle worv@worker-a.local card 0 % and load under a quarter of the cores on all 10 probes of the last 30 min (memory used 31 MiB) while 0 lock waiter(s) and allocator line '20261125T190721Z slot2 chains tick 4 after 3401s: pct=42% allowed=10 claimable=1 young=0'
+2026-11-25T19:25:01Z STALL gpu_idle ci@worker-a.local card 0 % and load under a quarter of the cores on all 10 probes of the last 30 min (memory used 31 MiB) while 0 lock waiter(s) and allocator line '20261125T190721Z slot2 chains tick 4 after 3401s: pct=42% allowed=10 claimable=1 young=0'

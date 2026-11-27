@@ -15,7 +15,7 @@ cp "$here/bin/arm_queue.sh" "$H/bin/"
 export T CTR CALLS HARNESS_HOME=$H
 
 # lease.sh: each acquire takes the next line of $T/lease.seq, else $T/lease.default.
-#   grant[:host]  a remote slot on worv@<host> (default hostA), container iter-<host>
+#   grant[:host]  a remote slot on ci@<host> (default hostA), container iter-<host>
 #   local         a local slot (no DOCKER_HOST); busy / yield  a refusal (exit 1)
 cat > "$H/bin/lease.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -27,8 +27,8 @@ case "$1" in
     case "$reply" in
       grant*)
         h=${reply#grant}; h=${h#:}; h=${h:-hostA}
-        echo "ACQUIRED slot=4 file=$T/lease.4 container=iter-$h domain=80 remote=worv@$h exclusive=all-remote"
-        echo "export MANURE_GATE_LEASE_FILE=$T/lease.4 WORV_ITER_CONTAINER=iter-$h ROS_DOMAIN_ID=80 DOCKER_HOST=ssh://worv@$h PATH=$T/shim:\$PATH" ;;
+        echo "ACQUIRED slot=4 file=$T/lease.4 container=iter-$h domain=80 remote=ci@$h exclusive=all-remote"
+        echo "export MANURE_GATE_LEASE_FILE=$T/lease.4 WORV_ITER_CONTAINER=iter-$h ROS_DOMAIN_ID=80 DOCKER_HOST=ssh://ci@$h PATH=$T/shim:\$PATH" ;;
       local)
         echo "ACQUIRED slot=1 file=$T/lease.1 container=iter-local domain=77"
         echo "export MANURE_GATE_LEASE_FILE=$T/lease.1 WORV_ITER_CONTAINER=iter-local ROS_DOMAIN_ID=77" ;;
@@ -155,13 +155,13 @@ check "it acquires, brings tree A up, runs, renews, brings tree B up, runs, stop
    [ "$(at "iter down")" -lt "$(at "lease release 2464")" ]' "$(calls)"
 check "the lease is held as the queue's own PID on every call" 'one_holder' "holder=$(holder) $(grep '^lease ' "$CALLS")"
 check "iter.sh runs under the export line, with the issue exported" \
-  'grep -q "iter up .* tree=A container=iter-hostA docker_host=ssh://worv@hostA issue=2464" "$CALLS" && grep -q "iter sidecar tree=A container=iter-hostA" "$CALLS"' "$(calls)"
+  'grep -q "iter up .* tree=A container=iter-hostA docker_host=ssh://ci@hostA issue=2464" "$CALLS" && grep -q "iter sidecar tree=A container=iter-hostA" "$CALLS"' "$(calls)"
 check "a bare scenario name, the flags and each kit setting reach the runner" \
   'grep -qx "runner scenario_run.py run tools/eval/scenarios/RS1.toml --run-mode lockstep_sync --no-moments --through-sim-s 13 --kit-setting /exts/a=1 --kit-setting /exts/b=2 --out $P/runs/RS1-c container=iter-hostA" "$CALLS"' "$(calls)"
 check "a scenario path is passed as written, and the extra extension is mounted beside the base set" \
   'grep -q "runner scenario_run.py run scen/RS2.toml --run-mode lockstep_sync --out $P/runs/RS2-c" "$CALLS" && grep -q "iter up worv.core.runtime .*worv.robots.teleport worv.robots.lifecycle tree=B" "$CALLS"' "$(calls)"
 check "status carries the grant, both arms start and end, ALLDONE, and RELEASED last" \
-  'st | grep -q "^granted: export MANURE_GATE_LEASE_FILE=" && st | grep -q "^RS1-c start .* slot=iter-hostA domain=80 scenario=RS1 .*setting=\[/exts/a=1,/exts/b=2\] flags=\[--no-moments,--through-sim-s,13\] host=worv@hostA" &&
+  'st | grep -q "^granted: export MANURE_GATE_LEASE_FILE=" && st | grep -q "^RS1-c start .* slot=iter-hostA domain=80 scenario=RS1 .*setting=\[/exts/a=1,/exts/b=2\] flags=\[--no-moments,--through-sim-s,13\] host=ci@hostA" &&
    st | grep -q "^RS1-c rc=0 end " && st | grep -q "^RS2-c rc=0 end " && st | grep -q "^ALLDONE arms.queue " && [[ "$(last_st)" == "RELEASED arms.queue "* ]]' "$(st)"
 check "each arm has its output folder, runner log and card-memory log" \
   '[ -f "$P/runs/RS1-c/run.json" ] && [ -f "$P/runs/RS1-c.out" ] && grep -q "card_used_mib=1234" "$P/runs/RS1-c-gpu.log"' "$(ls "$P/runs")"
@@ -241,7 +241,7 @@ printf 'grant\nyield\nbusy\ngrant:hostB\n' > "$T/lease.seq"; run_q; rc=$?
 check "a refused renewal stops the container at once and polls again" \
   'st | grep -q "^YIELD before RS2-c " && [ "$(at "lease acquire" 2)" -lt "$(at "iter down")" ] && [ "$(at "iter down")" -lt "$(at "lease acquire" 3)" ]' "$(st) $(calls)"
 check "after the new grant the arm runs on the new slot and host" \
-  '[ "$rc" -eq 0 ] && grep -q "iter up .* tree=B container=iter-hostB docker_host=ssh://worv@hostB" "$CALLS" && st | grep -q "^RS2-c start .*slot=iter-hostB .*host=worv@hostB" && st | grep -q "^RS2-c rc=0 end"' "rc=$rc $(st)"
+  '[ "$rc" -eq 0 ] && grep -q "iter up .* tree=B container=iter-hostB docker_host=ssh://ci@hostB" "$CALLS" && st | grep -q "^RS2-c start .*slot=iter-hostB .*host=ci@hostB" && st | grep -q "^RS2-c rc=0 end"' "rc=$rc $(st)"
 
 new_case "$A|RS1-c|RS1|||||" "$B|RS2-c|RS2|||||"
 printf 'grant\nyield\nlocal\n' > "$T/lease.seq"; run_q; rc=$?
@@ -249,30 +249,30 @@ check "a new grant on the local card drops the remote host the last export line 
   '[ "$rc" -eq 0 ] && grep -q "iter up .* tree=B container=iter-local docker_host= issue=2464" "$CALLS" && st | grep -q "^RS2-c start .*host=local"' "rc=$rc $(calls)"
 
 new_case "$A|RS1-c|RS1|||||"
-printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host worv@hostA; rc=$?
+printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host ci@hostA; rc=$?
 check "--want-host releases a grant on another host and keeps polling" \
-  '[ "$rc" -eq 0 ] && grep -q "grant on worv@hostB, not worv@hostA: released" "$P/runs/lease.log" && [ "$(at "lease release")" -lt "$(at "lease acquire" 2)" ] && grep -q "container=iter-hostA" "$CALLS" && [ "$(n_calls "iter-hostB")" -eq 0 ]' "rc=$rc $(calls)"
+  '[ "$rc" -eq 0 ] && grep -q "grant on ci@hostB, not ci@hostA: released" "$P/runs/lease.log" && [ "$(at "lease release")" -lt "$(at "lease acquire" 2)" ] && grep -q "container=iter-hostA" "$CALLS" && [ "$(n_calls "iter-hostB")" -eq 0 ]' "rc=$rc $(calls)"
 check "--want-host asks the lease for that host alone" \
-  'grep -q "lease acquire 2464 .*want=worv@hostA" "$CALLS" && ! grep "lease acquire" "$CALLS" | tail -1 | grep -q "want= "' "$(calls)"
+  'grep -q "lease acquire 2464 .*want=ci@hostA" "$CALLS" && ! grep "lease acquire" "$CALLS" | tail -1 | grep -q "want= "' "$(calls)"
 
 new_case "$A|RS1-c|RS1|||||"
 mkdir -p "$P/runs"; echo any > "$P/runs/want-host"
-printf 'grant:hostB\n' > "$T/lease.seq"; run_q --want-host worv@hostA; rc=$?
+printf 'grant:hostB\n' > "$T/lease.seq"; run_q --want-host ci@hostA; rc=$?
 check "a want-host override of any unpins the queue: it asks with no host and keeps a grant elsewhere" \
-  '[ "$rc" -eq 0 ] && grep -q "want-host override: worv@hostA -> any" "$P/runs/lease.log" && ! grep -q "not worv@hostA: released" "$P/runs/lease.log" && grep -q "container=iter-hostB" "$CALLS"' "rc=$rc $(cat "$P/runs/lease.log") $(calls)"
+  '[ "$rc" -eq 0 ] && grep -q "want-host override: ci@hostA -> any" "$P/runs/lease.log" && ! grep -q "not ci@hostA: released" "$P/runs/lease.log" && grep -q "container=iter-hostB" "$CALLS"' "rc=$rc $(cat "$P/runs/lease.log") $(calls)"
 
 new_case "$A|RS1-c|RS1|||||"
 mkdir -p "$P/runs"; echo any > "$P/runs/want-host"
-printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host worv@hostA --bar-read; rc=$?
+printf 'grant:hostB\ngrant:hostA\n' > "$T/lease.seq"; run_q --want-host ci@hostA --bar-read; rc=$?
 check "a bar read keeps its host: the override is not read and a grant elsewhere is released" \
-  '[ "$rc" -eq 0 ] && ! grep -q "want-host override" "$P/runs/lease.log" && grep -q "grant on worv@hostB, not worv@hostA: released" "$P/runs/lease.log" && grep -q "^holder .* bar=1 " "$P/runs/lease.log"' "rc=$rc $(cat "$P/runs/lease.log")"
+  '[ "$rc" -eq 0 ] && ! grep -q "want-host override" "$P/runs/lease.log" && grep -q "grant on ci@hostB, not ci@hostA: released" "$P/runs/lease.log" && grep -q "^holder .* bar=1 " "$P/runs/lease.log"' "rc=$rc $(cat "$P/runs/lease.log")"
 
 new_case "$A|RS1-c|RS1|||||"
 run_q --runner baseline --host-load; rc=$?
 check "--runner baseline runs pbd_baseline.py with the engine arm" \
   'grep -q "runner pbd_baseline.py run tools/eval/scenarios/RS1.toml --arm engine --run-mode lockstep_sync --out" "$CALLS"' "$(calls)"
 check "--host-load samples the remote host and records the load and the lease" \
-  'grep -q "^ssh .*worv@hostA cat /proc/loadavg" "$CALLS" && st | grep -q "^RS1-c start .*load=0.50,0.40,0.30 card_apps=\[4242, 5000 MiB;\]" && st | grep -q "^RS1-c lease slot 4 HELD" && grep -q "0.50 0.40 0.30;4242" "$P/runs/host-load.log"' "$(st)"
+  'grep -q "^ssh .*ci@hostA cat /proc/loadavg" "$CALLS" && st | grep -q "^RS1-c start .*load=0.50,0.40,0.30 card_apps=\[4242, 5000 MiB;\]" && st | grep -q "^RS1-c lease slot 4 HELD" && grep -q "0.50 0.40 0.30;4242" "$P/runs/host-load.log"' "$(st)"
 
 new_case "$A|RS1-c|RS1|||||"
 run_q --nucleus-check; rc=$?

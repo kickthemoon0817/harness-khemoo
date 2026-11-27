@@ -1,18 +1,18 @@
 # Runbook — worv.env.manure continuum engine harness (mission 4)
 
 Read by every tick before it does anything. Repo: `MaumAI-Company/isaac_sim`, checkout at
-`/home/khemoo/tmp_workspace/isaac_sim` (TARGET_REPO — never edit it; it is the user's
+`$TARGET_REPO` (never edit it; it is the user's
 working checkout). Work branch: `ai/manure-mpm` (cut from `ai/manure` @ 0c1920c3, which holds mission 1: the field
 engine, contracts, gates). Never modify `master`, `ai/manure`, `feature/*`, `fix/*`, or any branch a
 tick did not create. Harness home:
-`/home/khemoo/tmp_workspace/claude-issue-harness` (state under `state/`).
+`$HARNESS_HOME` (state under `state/`).
 
 ## Mission (mission 4, 2026-09-19: roadmap revision 5 — the "Plan of record" block at the top of design.md binds over anything below that conflicts)
 
 Replace the kinematic material model of `worv.env.manure` with a real one: a WoRV-owned MLS-MPM
 continuum solver (Warp kernels, AOT cubins, launched from C++) coupled TWO WAYS to the PhysX loader
 through `omni::physx::IPhysx`, with the landed `HeapField` as the far representation. The binding
-design is `/home/khemoo/tmp_workspace/claude-issue-harness/prompts/design.md` — read it in full
+design is `$HARNESS_HOME/prompts/design.md` — read it in full
 before claiming. The plan of record is roadmap revision 5 (issue #1104); its programme, owner
 decisions and verified reports are under `~/tmp_workspace/artifacts/manure-literature/`. Do not
 re-litigate its decisions, and never build on the five it reverses; record a blocking
@@ -65,9 +65,9 @@ read-only.
 ## Tick procedure
 
 1. **Setup** — `git fetch origin`. Every push and
-   branch mutation runs under `flock /home/khemoo/tmp_workspace/claude-issue-harness/state/locks/stack.lock`.
+   branch mutation runs under `flock $HARNESS_HOME/state/locks/stack.lock`.
    Never run `git checkout`, `git stash`, `git clean` or any edit in TARGET_REPO itself.
-2. **Claim** — first take the local claim: `/home/khemoo/tmp_workspace/claude-issue-harness/bin/claim.sh acquire <N>`.
+2. **Claim** — first take the local claim: `$HARNESS_HOME/bin/claim.sh acquire <N>`.
    `BUSY` means another live tick holds the issue: pick the next claimable one, and post nothing on this one.
    Only on `ACQUIRED` add `ai:wip` and post the claim comment: one sentence in plain words of what
    is being started, then a `<details><summary>Harness trace</summary>` block holding the protocol
@@ -75,7 +75,7 @@ read-only.
    the worktree (`public-record.md`). The launcher finds the protocol line inside the block; in the
    open it is a blocking lint finding. The PID must be the long-lived `claude -p` process, never a tool
    shell (those die within seconds and would look orphaned). Get it ONLY with
-   `PID=$(/home/khemoo/tmp_workspace/claude-issue-harness/bin/tick-pid.sh)` in the same command
+   `PID=$($HARNESS_HOME/bin/tick-pid.sh)` in the same command
    that posts the comment; never use `$$`, `$PPID` or a PID copied from earlier output,
    and verify with `ps -o args= -p <PID>` before posting. Liveness rule: a claim is held
    while that PID is alive (`kill -0`); a dead claimant's issue is resumable from its recorded
@@ -93,10 +93,10 @@ read-only.
    PAUSE MEANS END: the pausing comment is the last thing a tick does before its summary. Nothing
    runs after it — no suite, no re-check, no extra probe. If more work is worth doing, it is the
    next tick's, from the recipe.
-3. **Implement** — worktree: FIRST check whether `/home/khemoo/tmp_workspace/ai-worktrees/mpm-<issue#>`
+3. **Implement** — worktree: FIRST check whether `$WORKTREE_ROOT/mpm-<issue#>`
    already exists (a killed tick leaves one, with uncommitted work and no commits). If it does, `cd`
    into it, read `git status` and the files, and CONTINUE that work; never delete it or start a
-   parallel branch. Otherwise create it: `git worktree add /home/khemoo/tmp_workspace/ai-worktrees/mpm-<issue#> -b ai/<issue#>-<slug> origin/ai/manure-mpm`
+   parallel branch. Otherwise create it: `git worktree add $WORKTREE_ROOT/mpm-<issue#> -b ai/<issue#>-<slug> origin/ai/manure-mpm`
    (after `git fetch`). If a later issue builds on an unmerged sibling PR, branch from that
    PR's branch instead and say so in the PR body. Follow the repo `CLAUDE.md` hard rules
    exactly (orchestrator phase, no per-tick pxr, pxr and usdrt never in one TU, settings via
@@ -133,7 +133,7 @@ read-only.
    Python gates: `python3 tools/test/test_extension_version_gate.py`,
    `python3 tools/test/test_kit_settings_parity.py`, `python3 tools/test/test_build_native_checks.py`.
 4. **Verify** — run the target slice the issue names. For every fix the FIRST verification is the new test failing on the unfixed head (check it out, run it, quote the failure), then passing on the fix. Kit-level runs need the resource lease
-   (below) and these steps from the worktree root: `cp /home/khemoo/tmp_workspace/isaac_sim/env/nucleus.env env/`;
+   (below) and these steps from the worktree root: `cp $TARGET_REPO/env/nucleus.env env/`;
    `tools/dev/iter.sh up worv.env.manure worv.robots.catalog <other touched native exts>`;
    `WORV_SIM_ROBOT=s76 WORV_ENVIRONMENT=TestPlane_bigtrimesh_ai414 WORV_KIT_ARGS="--exec /tmp/mg/lights.py" tools/dev/iter.sh kit`
    (`WORV_KIT_ARGS` passthrough landed in mission 1; `iter.sh kit` does NOT forward `WORV_GPU_PHYSICS`,
@@ -165,7 +165,7 @@ read-only.
    conventional-commit title (no parentheses) and a body written to `public-record.md` (Summary
    with `Fixes #<issue>`, Why, What changed, How to verify, Evidence, Principle checks, Scope and
    limits), linted clean with
-   `/home/khemoo/tmp_workspace/claude-issue-harness/bin/public_record_lint.py --kind pr <file>`
+   `$HARNESS_HOME/bin/public_record_lint.py --kind pr <file>`
    and posted with `--body-file`. Leave reviewers EMPTY.
 6. **Land, by base branch** — PRs into `ai/manure-mpm` MAY be merged by the tick that opened them
    once M1 is green for the change and the issue's own gate passed (`gh pr merge --merge
@@ -180,7 +180,7 @@ read-only.
    PHYSICS FIRST: an issue whose ask is a material, exchange, coupling or surface behaviour outranks any gate, tools, probe or perf issue for the card and for the claim — but only while it still has a user-visible symptom. Once a physics issue's remaining scope is host/device consistency or internal tidiness, or an operator comment on it says it yields, it drops BELOW the release issue, and a tick that has spent three claims on it without landing says so and takes the release instead; claimable.sh order follows the issue, and a tools tick yields the lease to a physics tick that is waiting.
    LIVE VERDICT SIZE: ONE draw for a fix; three only when the issue's verdict is a rate or a distribution over draws (say so in the PR); six only on the release image; a settle window only where a clause reads settle-end; a diagnostic drive reads the drive alone.
    (For the release image's single perf reading) the BASE CONTROL is CACHED per base commit: `bin/perf_control.sh dir` prints a usable cached control for the current `origin/ai/manure-mpm` head (empty when none), `bin/perf_control.sh tree` gives the shared built+AOT'd base worktree (`ai-worktrees/base-<sha>`, never deleted by a tick), and `bin/perf_control.sh new` a dir to run a fresh control arm into. Run the fix arm FIRST; then `perf_control.sh check <fix RESULTS.md>` — it accepts the cache only when it is under 24 h old and the fix arm's idle p50 is within 0.5 ms of the cached control's (the host-state check that made the control same-session). Accepted: pass it as `MANURE_PERF_CONTROL` to re-read the bands and do not run a control arm. Refused: run one control arm into `perf_control.sh new` and it becomes the cache. One control arm per base commit per day is the budget; a tick never rebuilds a base worktree that `tree` already holds.
-   Nucleus preflight before ANY kit launch: run `/home/khemoo/tmp_workspace/claude-issue-harness/bin/nucleus_ok.sh` (exit 0 = go). It returns at once when the host-side probe (cron, every minute) shows `10.50.2.21:3009` stable for 5 minutes; only without a fresh reading does it fall back to the 5-minute in-line loop. Never write your own probe loop. The server flaps (2026-09-07, 2026-09-14): a kit launched into a flap logs `resolveServerPath failed` after ~130 s, pushes host load past 20, and the arm is void. If the loop fails, pause the claim and do not take the lease.
+   Nucleus preflight before ANY kit launch: run `$HARNESS_HOME/bin/nucleus_ok.sh` (exit 0 = go). It returns at once when the host-side probe (cron, every minute) shows `<nucleus-server>:3009` stable for 5 minutes; only without a fresh reading does it fall back to the 5-minute in-line loop. Never write your own probe loop. The server flaps (2026-09-07, 2026-09-14): a kit launched into a flap logs `resolveServerPath failed` after ~130 s, pushes host load past 20, and the arm is void. If the loop fails, pause the claim and do not take the lease.
    Never search the filesystem from `/` or `/mnt`: headers live in the builder image (`docker run --rm worv-builder:isaac6 find /opt /isaac-sim -name Version.h`) or under the worktree. A `find`/`bfs` rooted at `/` crawls the NFS and CIFS shares, sits in D-state for hours after the tick exits, and its threads alone push load1 past the 16-core bound every live arm is fenced on (four such crawls held every tick's live arm off for a whole morning on 2026-09-10).
    Never `pkill -f <pattern>` on a bare command name: four ticks share this host. Stop your own processes by the PID you recorded when you started them, or anchor the pattern on your own worktree path (`pkill -f '<worktree>/.*build'`), and never on `claude`, `kit`, `docker` or `python` alone.
    Any script that launches, stops or restarts a kit (`iter.sh kit`, `manure_gate.sh`, `manure_perf_ab.sh`, `manure_teardown_gate.sh`, a smoke run of any of them) runs ONLY under the lease; there is no unleased smoke run. A tick without the lease must not touch `worv-iter`.
@@ -200,7 +200,7 @@ The card takes up to three kit sessions at once. Each GPU slot is its own lease 
 `iter.sh up/kit/topics`, kit session, device doctest run or perf measurement requires a slot:
 
 - Take, check and drop a slot ONLY through
-  `/home/khemoo/tmp_workspace/claude-issue-harness/bin/lease.sh acquire <issue#>`. It prints
+  `$HARNESS_HOME/bin/lease.sh acquire <issue#>`. It prints
   `ACQUIRED slot=K …` and an `export …` line, or BUSY with every holder and exits 1.
   `lease.sh release <issue#>` and `lease.sh status` complete the set. It takes the flocks, refuses a
   live holder, computes the tick PID itself, and only lets the holder release. A bare write to a lease

@@ -6,7 +6,7 @@ landings and health signals, as an auto-refreshing page (`/`) and as JSON (`/api
     dashboard.py [--harness-home DIR] [--port 8787] [--data-dir DIR] [--queue-label LABEL]
     dashboard.py --once            print one snapshot as JSON and exit
 
-From <harness home>/config/harness.env it reads GH_TOKEN, GH_REPO and the label keys the scripts use, and no other
+From <harness home>/config/harness.env it reads GH_TOKEN, GH_REPO, BUILD_LOCK_NAMES and the label keys the scripts use, and no other
 key; the token reaches `gh` through its environment and is never shown. bin/dashboard.sh starts this detached.
 """
 import argparse
@@ -281,7 +281,7 @@ class DashboardApp:
         "ISSUE_LABEL": "queue", "WIP_LABEL": "wip", "SIGNOFF_LABEL": "signoff", "OPERATOR_LABEL": "operator",
         "READY_LABEL": "ready", "FABLE_LABEL": "fable", "FIRST_LABEL": "first", "LOW_LABEL": "low",
     }
-    ENV_KEYS: ClassVar[frozenset[str]] = frozenset({"GH_TOKEN", "GH_REPO", *LABEL_KEYS})
+    ENV_KEYS: ClassVar[frozenset[str]] = frozenset({"GH_TOKEN", "GH_REPO", "BUILD_LOCK_NAMES", *LABEL_KEYS})
     URL_FILE_NAME: ClassVar[str] = "dashboard.url"
 
     def __init__(self, options: argparse.Namespace) -> None:
@@ -307,7 +307,8 @@ class DashboardApp:
             remote_interval_s=options.remote_interval,
             claimable_interval_s=options.claimable_interval,
             evidence_root=Path(options.evidence_root).expanduser(),
-            build_lock_names=self.parse_build_lock_names(options.build_locks),
+            build_lock_names=self.parse_build_lock_names(
+                options.build_locks or env_values.get("BUILD_LOCK_NAMES") or os.environ.get("BUILD_LOCK_NAMES", "")),
             build_lock_dir=Path(options.build_lock_dir),
             done_window_s=options.done_hours * 3600,
         )
@@ -438,9 +439,9 @@ class DashboardApp:
                             default=os.environ.get("EVIDENCE_ROOT", "~/tmp_workspace/artifacts/manure-plan/evidence"),
                             help="folder of evidence packets whose runs*/ folders bin/arm_queue.sh writes")
         parser.add_argument("--build-locks",
-                            default=os.environ.get("BUILD_LOCK_NAMES",
-                                                   "worv@10.50.1.6=5090 worv@worv-worker-03.local=w03"),
-                            help="'<user@host>=<name> ...': each remote host's build lock name, as bin/build_host.sh")
+                            default=None,
+                            help="'<user@host>=<name> ...': each remote host's build lock name, as bin/build_host.sh "
+                                 "(default: BUILD_LOCK_NAMES from config/harness.env)")
         parser.add_argument("--build-lock-dir", default=os.environ.get("BUILD_LOCK_DIR", "/tmp"))
         parser.add_argument("--done-hours", type=float, default=6.0, help="how long a closed issue stays as done")
         parser.add_argument("--once", action="store_true", help="print one JSON snapshot and exit")

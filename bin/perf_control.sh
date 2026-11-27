@@ -14,8 +14,9 @@
 #                                        that fix arm (age + idle p50 within tolerance)
 set -euo pipefail
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-REPO=/home/khemoo/tmp_workspace/isaac_sim
-WT_ROOT=/home/khemoo/tmp_workspace/ai-worktrees
+# shellcheck source=/dev/null
+[ -r "$H/config/harness.env" ] && . "$H/config/harness.env"
+REPO="${TARGET_REPO:?set TARGET_REPO in config/harness.env}"
 : "${MAX_AGE_H:=24}" "${IDLE_TOL_MS:=0.5}"
 mode="${1:?dir|new|tree|check}"; shift
 case "$mode" in check) fix="${1:?fix RESULTS.md}"; shift;; esac
@@ -25,12 +26,13 @@ case "$mode" in
   dir)  [ -s "$cache/RESULTS.md" ] && echo "$cache" || true ;;
   new)  mkdir -p "$cache"; echo "$cache" ;;
   tree)
-    wt="$WT_ROOT/base-$sha"
+    wt="${WORKTREE_ROOT:?set WORKTREE_ROOT in config/harness.env}/base-$sha"
+    : "${WORV_IMAGE:?set WORV_IMAGE in config/harness.env}"
     if [ ! -d "$wt" ]; then
       git -C "$REPO" fetch -q origin ai/manure-mpm
       git -C "$REPO" worktree add -q --detach "$wt" "$sha"
       cp "$REPO/env/nucleus.env" "$wt/env/" 2>/dev/null || true
-      ( cd "$wt" && WORV_IMAGE="${WORV_IMAGE:-docker-pri.maum.ai:443/worv/isaac_sim:3.0.19-manure-mpm}" \
+      ( cd "$wt" && WORV_IMAGE="$WORV_IMAGE" \
           tools/dev/iter.sh build worv.comm.base worv.comm.ros2 worv.env.manure >"$wt/.perf-control-build.log" 2>&1 )
       rm -f "$wt/extensions/env/worv.env.manure/data/"*.cubin "$wt/extensions/env/worv.env.manure/data/"*.ptx
       docker run --rm -u "$(id -u):$(id -g)" --runtime=runc \

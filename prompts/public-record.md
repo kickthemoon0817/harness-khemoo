@@ -33,7 +33,7 @@ the recipe), they go in a **comment**, at its end, under a collapsed block, and 
 <details><summary>Harness trace</summary>
 
 harness tick 2026-11-03T04:30:40Z pid 2421513 claiming, budget 120 min
-host khemoo, slot 2, worktree ai-worktrees/mpm-2137 at 249643293, lease 2137 held 04:31Z–05:20Z,
+host <harness-host>, slot 2, worktree ai-worktrees/mpm-2137 at 249643293, lease 2137 held 04:31Z–05:20Z,
 resume: build, then RS1–RS6 identity against parent-8cc9dd2e8
 </details>
 ```
@@ -138,7 +138,7 @@ harness tick pid <PID> checkpoint <n> at <UTC timestamp>
 harness tick pid <PID> pausing|withdrawing|releasing
 ```
 
-Never in the open. "harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget
+Never in the open. "harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host <harness-host>), budget
 120 min (labels: ai,ai:plan)" as a comment's visible text is the record written for one machine,
 and the lint blocks it.
 

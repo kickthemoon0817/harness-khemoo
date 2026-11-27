@@ -203,7 +203,7 @@ HARNESS_HOME=/path/to/live/harness DASHBOARD_PORT=8790 bin/dashboard.sh   # read
 `bin/build_host.sh` reads them), how long a closed issue stays as done, and `--once`, which
 prints one JSON snapshot and exits. The dashboard writes only its own history, GitHub cache, flow state,
 URL, pid file and log, under `state/dashboard/` (`DASHBOARD_DATA_DIR`). From `config/harness.env` it reads `GH_TOKEN`,
-`GH_REPO` and the label keys (`ISSUE_LABEL`, `WIP_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`,
+`GH_REPO`, `BUILD_LOCK_NAMES` and the label keys (`ISSUE_LABEL`, `WIP_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`,
 `READY_LABEL`, `FABLE_LABEL`, `FIRST_LABEL`, `LOW_LABEL`) and no other key; `--queue-label`
 overrides `ISSUE_LABEL`. The token reaches `gh` only through its environment and is removed from
 every response. Every GitHub call is a read.

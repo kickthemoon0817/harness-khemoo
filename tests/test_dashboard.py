@@ -255,7 +255,7 @@ class FixtureHarness:
             gh_binary=str(self.home / "bin" / "gh"), remote_interval_s=0,
             crontab_command=(str(self.home / "bin" / "crontab"),),
             evidence_root=self.home / "evidence", build_lock_dir=self.home / "buildlocks",
-            build_lock_names=(("worv@worker-a.local", "wa"), ("worv@10.0.0.6", "laptop")),
+            build_lock_names=(("ci@worker-a.local", "wa"), ("ci@192.0.2.6", "laptop")),
         )
         fields.update(overrides)
         return DashboardConfig(**fields)
@@ -323,7 +323,7 @@ class ParserTest(unittest.TestCase):
     def test_host_health_rows(self) -> None:
         rows = StateParsers.parse_host_health_tsv((FIXTURES / "host_health.tsv").read_text())
         self.assertEqual(len(rows), 6)
-        self.assertEqual(rows[0].host, "worv@worker-a.local")
+        self.assertEqual(rows[0].host, "ci@worker-a.local")
         self.assertEqual(rows[0].upload_mb_s, 65.68)
         self.assertEqual(rows[2].gpu_util_pct, 32.0)
         self.assertTrue(rows[3].upload_timed_out)
@@ -335,15 +335,15 @@ class ParserTest(unittest.TestCase):
 
     def test_streaks(self) -> None:
         streaks = StateParsers.parse_streaks((FIXTURES / "host_health.streaks").read_text())
-        self.assertEqual(streaks["worv@10.0.0.6"].state, "demoted")
-        self.assertEqual(streaks["worv@10.0.0.6"].bad_probes, 3)
-        self.assertEqual(streaks["worv@worker-a.local"].good_probes, 275)
+        self.assertEqual(streaks["ci@192.0.2.6"].state, "demoted")
+        self.assertEqual(streaks["ci@192.0.2.6"].bad_probes, 3)
+        self.assertEqual(streaks["ci@worker-a.local"].good_probes, 275)
 
     def test_lease_status(self) -> None:
         status = StateParsers.parse_lease_status((FIXTURES / "lease_status.txt").read_text())
-        self.assertEqual([card.host for card in status.remote_cards], ["worv@worker-a.local", "worv@10.0.0.6"])
+        self.assertEqual([card.host for card in status.remote_cards], ["ci@worker-a.local", "ci@192.0.2.6"])
         self.assertEqual(status.remote_cards[1].first_slot, 6)
-        self.assertEqual(status.harness_only_hosts, ("worv@10.0.0.6", "worv@worker-a.local"))
+        self.assertEqual(status.harness_only_hosts, ("ci@192.0.2.6", "ci@worker-a.local"))
         self.assertTrue(status.local_card_off)
         by_slot: dict[int | None, LeaseSlot] = {slot.slot: slot for slot in status.slots}
         self.assertEqual(len(status.slots), 7)
@@ -354,8 +354,8 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(by_slot[4].issue, 2490)
         self.assertEqual(by_slot[4].tags, ("remote-all", "render"))
         self.assertEqual(by_slot[4].domain, 80)
-        self.assertEqual(by_slot[4].host, "worv@worker-a.local")
-        self.assertEqual(by_slot[6].host, "worv@10.0.0.6")
+        self.assertEqual(by_slot[4].host, "ci@worker-a.local")
+        self.assertEqual(by_slot[6].host, "ci@192.0.2.6")
         self.assertIsNotNone(status.device)
         self.assertEqual((status.device.issue, status.device.tags), (2466, ("device",)))
         self.assertEqual(status.operator_priority, ("2490", "2488"))
@@ -487,7 +487,7 @@ class RedactionTest(unittest.TestCase):
 
     def test_summary_names_the_working_command_briefly(self) -> None:
         self.assertEqual(CommandRedactor.summarize(
-            "cd /w/mpm-2494 && ls env/nucleus.env 2>/dev/null; DOCKER_HOST=ssh://worv@h timeout 1500 "
+            "cd /w/mpm-2494 && ls env/nucleus.env 2>/dev/null; DOCKER_HOST=ssh://ci@h timeout 1500 "
             "tools/dev/iter.sh build worv.env.manure > /tmp/p/build1.log 2>&1; echo rc=$?"),
             "timeout 1500 tools/dev/iter.sh build worv.env.manure +1 more")
         self.assertEqual(CommandRedactor.summarize(
@@ -821,7 +821,7 @@ class CollectorAndPageTest(unittest.TestCase):
     def test_every_panel_has_data(self) -> None:
         snapshot = self.snapshot
         self.assertEqual([machine["key"] for machine in snapshot["machines"]],
-                         ["local", "worv@worker-a.local", "worv@10.0.0.6"])
+                         ["local", "ci@worker-a.local", "ci@192.0.2.6"])
         worker = snapshot["machines"][1]
         self.assertEqual((worker["status"], worker["upload_mb_s"], worker["load1"]), ("ok", 64.1, 5.5))
         self.assertEqual(worker["gpu"]["util_pct"], 63.0)
@@ -892,7 +892,7 @@ class CollectorAndPageTest(unittest.TestCase):
 
     def test_page_renders_every_panel_and_escapes(self) -> None:
         page: str = HtmlRenderer().render(self.snapshot, 30)
-        for expected in ("Harness status", '<meta http-equiv="refresh" content="30;url=/', "worv@worker-a.local",
+        for expected in ("Harness status", '<meta http-equiv="refresh" content="30;url=/', "ci@worker-a.local",
                          "moved last (3 bad probes)", "GPU slots and leases", "whole card", "operator priority",
                          "Running ticks", "#2464", "Opus 5.5", "Claimable", "from this read (ai:plan)",
                          "claimable.sh 2", "held back by the first-before-low gate: 2", "#2503",
@@ -1219,8 +1219,8 @@ class HttpServerTest(unittest.TestCase):
         overridden = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base + ["--queue-label", "ai"]))
         self.assertEqual(overridden.config.labels.queue, "ai")
         self.assertEqual(dashboard.DashboardApp.ENV_KEYS, frozenset({
-            "GH_TOKEN", "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL", "READY_LABEL",
-            "FABLE_LABEL", "FIRST_LABEL", "LOW_LABEL"}))
+            "GH_TOKEN", "GH_REPO", "BUILD_LOCK_NAMES", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL",
+            "READY_LABEL", "FABLE_LABEL", "FIRST_LABEL", "LOW_LABEL"}))
 
     @linux_only
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
@@ -1293,14 +1293,14 @@ class RunQueueTest(unittest.TestCase):
     def test_a_queue_running_an_arm(self) -> None:
         lease = RunQueueReader.parse_lease_log((self.QUEUES / "running" / "lease.log").read_text())
         self.assertEqual((lease.holder_pid, lease.want, lease.busy_since, lease.last_host),
-                         (4101, "any", None, "worv@10.50.1.6"))
+                         (4101, "any", None, "ci@192.0.2.60"))
         status = RunQueueReader.parse_status((self.QUEUES / "running" / "status").read_text())
         self.assertEqual((status.arm, status.arm_host, status.arm_started, status.finished_at),
-                         ("RS6-on-s1323-render", "worv@10.50.1.6", "2026-11-26T03:03:10Z", None))
+                         ("RS6-on-s1323-render", "ci@192.0.2.60", "2026-11-26T03:03:10Z", None))
 
     def test_a_queue_waiting_for_a_card_keeps_only_the_last_holders_busy_streak(self) -> None:
         lease = RunQueueReader.parse_lease_log((self.QUEUES / "waiting" / "lease.log").read_text())
-        self.assertEqual((lease.holder_pid, lease.want), (4201, "worv@10.50.1.6"))
+        self.assertEqual((lease.holder_pid, lease.want), (4201, "ci@192.0.2.60"))
         self.assertEqual((lease.busy_since, lease.busy_reason),
                          ("2026-11-26T02:40:00Z", "no remote card is free, alone and quiet"))
         self.assertIsNone(RunQueueReader.parse_status((self.QUEUES / "waiting" / "status").read_text()).arm)
@@ -1308,7 +1308,7 @@ class RunQueueTest(unittest.TestCase):
     def test_a_released_queue_is_finished(self) -> None:
         status = RunQueueReader.parse_status((self.QUEUES / "finished" / "status").read_text())
         self.assertEqual((status.arm, status.finished_at, status.granted_host),
-                         (None, "2026-11-26T02:51:16Z", "worv@worv-worker-03.local"))
+                         (None, "2026-11-26T02:51:16Z", "ci@worker-b.local"))
 
     def test_read_queues_names_state_issue_and_liveness(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1349,8 +1349,8 @@ class BuildLockTest(unittest.TestCase):
         self.addCleanup(harness.close)
         holder_pid, waiter_pid = harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
         scanner: ProcessScanner = ProcessScanner(harness.state)
-        lanes = BuildLockReader({"worv@worker-a.local": "wa"}, harness.home / "buildlocks", 5).read_lanes(
-            ["worv@worker-a.local", "worv@10.0.0.6"], scanner.scan_processes(), {})
+        lanes = BuildLockReader({"ci@worker-a.local": "wa"}, harness.home / "buildlocks", 5).read_lanes(
+            ["ci@worker-a.local", "ci@192.0.2.6"], scanner.scan_processes(), {})
         by_name = {lane.name: lane for lane in lanes}
         self.assertEqual(sorted(by_name), ["10-0-0-6", "local", "wa"])
         self.assertEqual((by_name["wa"].holder.pid, by_name["wa"].holder.issue), (holder_pid, 2495))
@@ -1369,20 +1369,20 @@ class FlowBuilderTest(unittest.TestCase):
         landing = TickProcess(12, "claude-opus-5-5", "Opus 5.5", "landing", 120, 2, None, 2201, "claim", None,
                               None, 0)
         running = RunQueue("2026-11-26-2502-x", "runs", 2502, 41, True, "running", "any", "RS6-p1",
-                           "worv@10.0.0.6", "2026-11-26T01:30:00Z", None, None, "worv@10.0.0.6", None, self.NOW)
-        waiting = RunQueue("2026-11-26-2490-x", "runs", 2490, 42, True, "waiting_card", "worv@10.0.0.6", None, None,
+                           "ci@192.0.2.6", "2026-11-26T01:30:00Z", None, None, "ci@192.0.2.6", None, self.NOW)
+        waiting = RunQueue("2026-11-26-2490-x", "runs", 2490, 42, True, "waiting_card", "ci@192.0.2.6", None, None,
                            None, "2026-11-26T01:28:00Z", "kit limit GH_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
                            None, None, self.NOW)
-        lanes = (BuildLane("wa", "worv@worker-a.local", "/l/wa", LockParty(51, 2495, "mpm-2495", True),
+        lanes = (BuildLane("wa", "ci@worker-a.local", "/l/wa", LockParty(51, 2495, "mpm-2495", True),
                            (LockParty(52, 2388, "mpm-2388", True),)),)
         slots = (LeaseSlot(4, "held", "2488", 2488, 61, "2026-11-26T01:00:00Z", 80, ("remote-all", "no-cost"),
-                           "worv@worker-a.local"),)
+                           "ci@worker-a.local"),)
         machines = [
             {"key": "local", "name": "box", "status": "ok", "gpu": {"name": "RTX", "util_pct": 5.0}, "load1": 1.0,
              "nproc": 8},
-            {"key": "worv@worker-a.local", "name": "worv@worker-a.local", "status": "ok",
+            {"key": "ci@worker-a.local", "name": "ci@worker-a.local", "status": "ok",
              "gpu": {"util_pct": 40.0, "mem_used_mb": 5000.0, "mem_total_mb": 16000.0}, "load1": 4.0, "nproc": 16},
-            {"key": "worv@10.0.0.6", "name": "worv@10.0.0.6", "status": "ok", "gpu": {"util_pct": 0.0},
+            {"key": "ci@192.0.2.6", "name": "ci@192.0.2.6", "status": "ok", "gpu": {"util_pct": 0.0},
              "load1": 2.0, "nproc": 24},
         ]
         fields: dict[str, Any] = dict(
@@ -1393,7 +1393,7 @@ class FlowBuilderTest(unittest.TestCase):
         return FlowInputs(**fields)
 
     def builder(self) -> FlowBuilder:
-        return FlowBuilder(QueueLabels(queue="ai:plan"), {"worv@worker-a.local": "wa", "worv@10.0.0.6": "laptop"},
+        return FlowBuilder(QueueLabels(queue="ai:plan"), {"ci@worker-a.local": "wa", "ci@192.0.2.6": "laptop"},
                            6 * 3600)
 
     def test_each_issue_lands_in_its_column(self) -> None:
@@ -1427,22 +1427,22 @@ class FlowBuilderTest(unittest.TestCase):
         flow = self.builder().build(self.inputs())
         edges = sorted((edge["issue"], edge["device"], edge["lane"], edge["kind"]) for edge in flow["edges"])
         self.assertEqual(edges, [
-            (2388, "worv@worker-a.local", "compile", "waits"),
-            (2488, "worv@worker-a.local", "card", "holds"),
-            (2490, "worv@10.0.0.6", "card", "waits"),
-            (2495, "worv@worker-a.local", "compile", "holds"),
-            (2502, "worv@10.0.0.6", "card", "holds"),
+            (2388, "ci@worker-a.local", "compile", "waits"),
+            (2488, "ci@worker-a.local", "card", "holds"),
+            (2490, "ci@192.0.2.6", "card", "waits"),
+            (2495, "ci@worker-a.local", "compile", "holds"),
+            (2502, "ci@192.0.2.6", "card", "holds"),
         ])
         device = {item["key"]: item for item in flow["devices"]}
-        self.assertTrue(device["worv@10.0.0.6"]["idle_with_queue"])
-        self.assertEqual(device["worv@10.0.0.6"]["idle_flag"], "card idle, queue waiting")
+        self.assertTrue(device["ci@192.0.2.6"]["idle_with_queue"])
+        self.assertEqual(device["ci@192.0.2.6"]["idle_flag"], "card idle, queue waiting")
         held = self.builder().build(self.inputs(lease_slots=(LeaseSlot(
-            6, "held", "2502", 2502, 62, "2026-11-26T01:00:00Z", 82, ("remote-all",), "worv@10.0.0.6"),)))
-        self.assertEqual({item["key"]: item for item in held["devices"]}["worv@10.0.0.6"]["idle_flag"],
+            6, "held", "2502", 2502, 62, "2026-11-26T01:00:00Z", 82, ("remote-all",), "ci@192.0.2.6"),)))
+        self.assertEqual({item["key"]: item for item in held["devices"]}["ci@192.0.2.6"]["idle_flag"],
                          "0 % while held, queue waiting")
-        self.assertFalse(device["worv@worker-a.local"]["idle_with_queue"])
-        self.assertEqual(device["worv@worker-a.local"]["holders"], ["#2488 slot 4 remote-all no-cost"])
-        self.assertEqual(device["worv@worker-a.local"]["compile"], "compile: #2495, 1 waiting")
+        self.assertFalse(device["ci@worker-a.local"]["idle_with_queue"])
+        self.assertEqual(device["ci@worker-a.local"]["holders"], ["#2488 slot 4 remote-all no-cost"])
+        self.assertEqual(device["ci@worker-a.local"]["compile"], "compile: #2495, 1 waiting")
         for edge in flow["edges"]:
             self.assertEqual(edge["y2"], device[edge["device"]]["y"] + device[edge["device"]]["h"])
 
@@ -1528,10 +1528,10 @@ class FlowPageTest(unittest.TestCase):
         self.addCleanup(harness.close)
         tick_pid: int = harness.start_fake_tick(issue=2464, slot=3)
         harness.start_fake_queue(2502, "runs-render", (FIXTURES / "runqueues" / "running" / "status").read_text()
-                                 .replace("worv@10.50.1.6", "worv@10.0.0.6"),
+                                 .replace("ci@192.0.2.60", "ci@192.0.2.6"),
                                  "holder {pid} start 2026-11-26T01:20:00Z queue=/q want=any deadline=1\n")
         harness.start_fake_queue(2504, "runs", "", "holder {pid} start 2026-11-26T01:20:00Z queue=/q "
-                                 "want=worv@10.0.0.6 deadline=1\n2026-11-26T01:30:00Z BUSY kit limit 2/2\n")
+                                 "want=ci@192.0.2.6 deadline=1\n2026-11-26T01:30:00Z BUSY kit limit 2/2\n")
         harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
         clock_epoch: list[float] = [FixtureHarness.PINNED_EPOCH]
         collector: Collector = harness.collector(clock=lambda: clock_epoch[0])

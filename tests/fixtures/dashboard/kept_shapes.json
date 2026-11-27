@@ -1,14 +1,14 @@
 [
  {
-  "text": "DOCKER_HOST=ssh://worv@10.50.1.6",
-  "kept": "ssh://worv@10.50.1.6"
+  "text": "DOCKER_HOST=ssh://ci@192.0.2.60",
+  "kept": "ssh://ci@192.0.2.60"
  },
  {
   "text": "WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote-5090.lock",
   "kept": "/tmp/worv-dev-build-remote-5090.lock"
  },
  {
-  "text": "/home/khemoo/tmp_workspace/artifacts/manure-plan/evidence/2026-11-26-2464-unit-rest-rowwatch",
+  "text": "/home/you/tmp_workspace/artifacts/manure-plan/evidence/2026-11-26-2464-unit-rest-rowwatch",
   "kept": "2026-11-26-2464-unit-rest-rowwatch"
  },
  {

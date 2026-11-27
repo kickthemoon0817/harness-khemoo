@@ -6,9 +6,11 @@
 set -u
 HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # state/nucleus/host, when present, names the asset server runs load from (the operator's
-# redirect while the primary is down); NUCLEUS_HOST in the environment still wins.
+# redirect while the primary is down); NUCLEUS_HOST in the environment still wins, and
+# config/harness.env's comes last. That file is read in a subshell so it cannot outrank either.
 [ -z "${NUCLEUS_HOST:-}" ] && [ -s "$HARNESS_HOME/state/nucleus/host" ] && NUCLEUS_HOST=$(tr -d '[:space:]' < "$HARNESS_HOME/state/nucleus/host")
-: "${NUCLEUS_HOST:=10.50.2.21}"; : "${NUCLEUS_PORT:=3009}"; : "${NUCLEUS_STABLE_S:=300}"
+[ -z "${NUCLEUS_HOST:-}" ] && [ -r "$HARNESS_HOME/config/harness.env" ] && NUCLEUS_HOST=$(. "$HARNESS_HOME/config/harness.env" >/dev/null 2>&1; printf '%s' "${NUCLEUS_HOST:-}")
+: "${NUCLEUS_HOST:?set NUCLEUS_HOST in config/harness.env}"; : "${NUCLEUS_PORT:=3009}"; : "${NUCLEUS_STABLE_S:=300}"
 status="$HARNESS_HOME/state/nucleus/status"
 now=$(date +%s)
 if [ -r "$status" ]; then

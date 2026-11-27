@@ -1,2 +1,2 @@
-holder 4300 start 2026-11-26T02:40:00Z queue=/e/q want=worv@worv-worker-03.local deadline=1795700000
-2026-11-26T02:40:01Z ACQUIRED slot=4 remote=worv@worv-worker-03.local
+holder 4300 start 2026-11-26T02:40:00Z queue=/e/q want=ci@worker-b.local deadline=1795700000
+2026-11-26T02:40:01Z ACQUIRED slot=4 remote=ci@worker-b.local

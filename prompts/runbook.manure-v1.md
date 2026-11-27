@@ -1,10 +1,10 @@
 # Runbook — worv.env.manure production runtime harness
 
 Read by every tick before it does anything. Repo: `MaumAI-Company/isaac_sim`, checkout at
-`/home/khemoo/tmp_workspace/isaac_sim` (TARGET_REPO — never edit it; it is the user's
+`$TARGET_REPO` (never edit it; it is the user's
 working checkout). Work branch: `ai/manure` (cut from `master` @ db9d98b9). Never modify
 `master`, `feature/*`, `fix/*`, or any branch a tick did not create. Harness home:
-`/home/khemoo/tmp_workspace/claude-issue-harness` (state under `state/`).
+`$HARNESS_HOME` (state under `state/`).
 
 ## Mission
 
@@ -80,12 +80,12 @@ Design (decided, do not re-litigate; tracking issue #647 holds the rationale):
 ## Tick procedure
 
 1. **Setup** — `git fetch origin`. Every push and
-   branch mutation runs under `flock /home/khemoo/tmp_workspace/claude-issue-harness/state/locks/stack.lock`.
+   branch mutation runs under `flock $HARNESS_HOME/state/locks/stack.lock`.
    Never run `git checkout`, `git stash`, `git clean` or any edit in TARGET_REPO itself.
 2. **Claim** — add `ai:wip`, comment `harness tick <UTC timestamp> pid <PID> claiming
    (host <hostname>)`. The PID must be the long-lived `claude -p` process, never a tool
    shell (those die within seconds and would look orphaned). Get it ONLY with
-   `PID=$(/home/khemoo/tmp_workspace/claude-issue-harness/bin/tick-pid.sh)` in the same command
+   `PID=$($HARNESS_HOME/bin/tick-pid.sh)` in the same command
    that posts the comment; never use `$$`, `$PPID` or a PID copied from earlier output,
    and verify with `ps -o args= -p <PID>` before posting. Liveness rule: a claim is held
    while that PID is alive (`kill -0`); a dead claimant's issue is resumable from its recorded
@@ -97,7 +97,7 @@ Design (decided, do not re-litigate; tracking issue #647 holds the rationale):
    PR, worktree, exact resume recipe>` — the launcher counts an issue whose claimants have all
    withdrawn, paused or died as claimable again, so a successor spawns for it.
    saying so and END THE TICK immediately — do not audit, do not start a kit session.
-3. **Implement** — worktree: `git worktree add /home/khemoo/tmp_workspace/ai-worktrees/manure-<issue#> -b ai/<issue#>-<slug> origin/ai/manure`
+3. **Implement** — worktree: `git worktree add $WORKTREE_ROOT/manure-<issue#> -b ai/<issue#>-<slug> origin/ai/manure`
    (after `git fetch`). If a later issue builds on an unmerged sibling PR, branch from that
    PR's branch instead and say so in the PR body. Follow the repo `CLAUDE.md` hard rules
    exactly (orchestrator phase, no per-tick pxr, pxr and usdrt never in one TU, settings via
@@ -114,7 +114,7 @@ Design (decided, do not re-litigate; tracking issue #647 holds the rationale):
    Python gates: `python3 tools/test/test_extension_version_gate.py`,
    `python3 tools/test/test_kit_settings_parity.py`, `python3 tools/test/test_build_native_checks.py`.
 4. **Verify** — run the target slice the issue names. Kit-level runs need the resource lease
-   (below) and these steps from the worktree root: `cp /home/khemoo/tmp_workspace/isaac_sim/env/nucleus.env env/`;
+   (below) and these steps from the worktree root: `cp $TARGET_REPO/env/nucleus.env env/`;
    `tools/dev/iter.sh up worv.env.manure worv.robots.catalog <other touched native exts>`;
    `WORV_SIM_ROBOT=s76 WORV_ENVIRONMENT=TestPlane_bigtrimesh_ai414 tools/dev/iter.sh kit`;
    kit stdout is `/tmp/kit.log` INSIDE the `worv-iter` container. Publishers: the sidecar
@@ -149,15 +149,15 @@ Design (decided, do not re-litigate; tracking issue #647 holds the rationale):
 The warm `worv-iter` container, the `worv-ros2cli` sidecar and the GPU are ONE serialized
 resource. Any `iter.sh up/kit/topics`, kit session, or perf measurement requires the lease:
 
-- Acquire under `flock /home/khemoo/tmp_workspace/claude-issue-harness/state/locks/resource.lock`
+- Acquire under `flock $HARNESS_HOME/state/locks/resource.lock`
   AND `flock /tmp/isaac-cppmig-gpu-runtime.lock` (a second system on this host honours that
   path): write `<issue#> <PID> <UTC timestamp>` to
-  `/home/khemoo/tmp_workspace/claude-issue-harness/state/locks/resource.lease`, then
+  `$HARNESS_HOME/state/locks/resource.lease`, then
   release the flocks; the lease file marks ownership for the session. Write the lease ONLY
   inside the flock and ONLY after reading the current file and confirming its PID is dead or
   the file is absent — a bare write outside the flock has already clobbered a live tick's lease
   once. Recipe (single command, run it verbatim with your issue number; the PID is computed inside):
-  `flock /home/khemoo/tmp_workspace/claude-issue-harness/state/locks/resource.lock -c 'L=/home/khemoo/tmp_workspace/claude-issue-harness/state/locks/resource.lease; if [ -s $L ] && kill -0 $(awk "{print \$2}" $L) 2>/dev/null; then echo BUSY: $(cat $L); exit 1; fi; echo "<issue> $(/home/khemoo/tmp_workspace/claude-issue-harness/bin/tick-pid.sh) $(date -u +%FT%TZ)" > $L; echo ACQUIRED'`
+  `flock $HARNESS_HOME/state/locks/resource.lock -c 'L=$HARNESS_HOME/state/locks/resource.lease; if [ -s $L ] && kill -0 $(awk "{print \$2}" $L) 2>/dev/null; then echo BUSY: $(cat $L); exit 1; fi; echo "<issue> $($HARNESS_HOME/bin/tick-pid.sh) $(date -u +%FT%TZ)" > $L; echo ACQUIRED'`
   Sidecar: `tools/dev/iter.sh topics` blocks on `ros2 topic hz`; create the sidecar under
   `timeout 120` and never call `topics` inside a polling loop.
 - Before treating the resource as busy, read the lease and `kill -0` its PID. A dead owner

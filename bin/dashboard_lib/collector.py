@@ -92,7 +92,7 @@ class DashboardConfig:
     claim_file_max_age_s: float = 172800.0
     evidence_root: Path = Path.home() / "tmp_workspace" / "artifacts" / "manure-plan" / "evidence"
     run_queue_window_s: float = 21600.0
-    build_lock_names: tuple[tuple[str, str], ...] = (("worv@10.50.1.6", "5090"), ("worv@worv-worker-03.local", "w03"))
+    build_lock_names: tuple[tuple[str, str], ...] = ()
     build_lock_dir: Path = Path("/tmp")
     done_window_s: float = 21600.0
     flow_animate_s: float = 20.0

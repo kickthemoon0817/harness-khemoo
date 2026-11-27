@@ -27,7 +27,7 @@ class BuildLockReader:
     def __init__(self, lock_names: dict[str, str], lock_dir: Path, timeout_s: float) -> None:
         """
         Args:
-            lock_names: Remote host to its lock name (`worv@10.50.1.6` to `5090`), bin/build_host.sh's
+            lock_names: Remote host to its lock name (`user@host-a` to `a`), bin/build_host.sh's
                 BUILD_LOCK_NAMES.
             lock_dir: Where the locks live.
             timeout_s: lslocks timeout.

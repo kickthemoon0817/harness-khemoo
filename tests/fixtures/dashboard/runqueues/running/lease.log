@@ -1,6 +1,6 @@
 holder 4101 start 2026-11-26T02:54:30Z queue=/e/2026-11-26-2502-courant-split-push/render.queue want=any deadline=1795700000
 2026-11-26T02:54:30Z BUSY no remote card is free, alone and quiet
-2026-11-26T02:54:44Z ACQUIRED slot=6 file=/h/state/locks/resource.lease.6 container=worv-iter-6 domain=82 cache=/tmp/isaac-sim/cache-slot6 remote=worv@10.50.1.6 exclusive=all-remote
-export MANURE_GATE_LEASE_FILE=/h/state/locks/resource.lease.6 WORV_ITER_CONTAINER=worv-iter-6 ROS_DOMAIN_ID=82 DOCKER_HOST=ssh://worv@10.50.1.6
+2026-11-26T02:54:44Z ACQUIRED slot=6 file=/h/state/locks/resource.lease.6 container=worv-iter-6 domain=82 cache=/tmp/isaac-sim/cache-slot6 remote=ci@192.0.2.60 exclusive=all-remote
+export MANURE_GATE_LEASE_FILE=/h/state/locks/resource.lease.6 WORV_ITER_CONTAINER=worv-iter-6 ROS_DOMAIN_ID=82 DOCKER_HOST=ssh://ci@192.0.2.60
 nucleus ok: stable 82 min (host probe)
-2026-11-26T03:03:05Z renew before RS6-on-s1323-render: ACQUIRED slot=6 remote=worv@10.50.1.6 exclusive=all-remote
+2026-11-26T03:03:05Z renew before RS6-on-s1323-render: ACQUIRED slot=6 remote=ci@192.0.2.60 exclusive=all-remote
