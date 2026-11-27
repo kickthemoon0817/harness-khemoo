@@ -202,7 +202,8 @@ exit 0
         for name, interval_s, refresh in periodic_sources:
             if interval_s <= 0:
                 continue
-            thread: threading.Thread = threading.Thread(target=self._run_periodically, args=(interval_s, refresh),
+            thread: threading.Thread = threading.Thread(target=self._run_periodically,
+                                                        args=(name, interval_s, refresh),
                                                         name=f"dashboard-{name}", daemon=True)
             thread.start()
             self._threads.append(thread)
@@ -214,8 +215,8 @@ exit 0
                 while not self._stop_event.wait(max(1.0, publish_interval_s)):
                     try:
                         publish()
-                    except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
-                        logging.error("Dashboard publication failed (%s)", type(error).__name__)
+                    except Exception:  # noqa: BLE001 - one bad publication must not end the publisher
+                        logging.exception("Dashboard publication failed")
 
             publisher = threading.Thread(target=publish_periodically, name="dashboard-publisher", daemon=True)
             publisher.start()
@@ -299,11 +300,14 @@ exit 0
         previous_result: SourceResult | None = self._result("remote")
         previous_probes: dict[str, SourceResult] = previous_result.data if previous_result and previous_result.data \
             else {}
-        probes: dict[str, SourceResult] = {}
-        workers: list[threading.Thread] = []
         latest = {row.host: row for row in self._read_host_health()}
 
-        def probe_host(host: str) -> None:
+        def failed(host: str, error: str, attempted_at: float) -> SourceResult:
+            previous: SourceResult | None = previous_probes.get(host)
+            return SourceResult(previous.data if previous else None, previous.fetched_at if previous else None,
+                                error=error, attempted_at=attempted_at)
+
+        def probe_host(host: str) -> SourceResult:
             host_started: float = self.clock()
             row = latest.get(host)
             script = self.MACHINE_PROBE_SCRIPT
@@ -318,20 +322,26 @@ exit 0
                 )
                 if completed.returncode != 0:
                     raise RuntimeError(f"ssh exit {completed.returncode}: {completed.stderr.strip()[-160:]}")
-                probes[host] = SourceResult(StateParsers.parse_machine_probe(completed.stdout), host_started,
-                                            duration_s=self.clock() - host_started, attempted_at=host_started)
+                return SourceResult(StateParsers.parse_machine_probe(completed.stdout), host_started,
+                                    duration_s=self.clock() - host_started, attempted_at=host_started)
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-                previous: SourceResult | None = previous_probes.get(host)
-                probes[host] = SourceResult(previous.data if previous else None,
-                                            previous.fetched_at if previous else None,
-                                            error=self._describe_error(error), attempted_at=host_started)
+                return failed(host, self._describe_error(error), host_started)
 
+        # Each worker appends to its own list and only finished ones are read, so a worker that outlives the
+        # join never touches what is stored.
+        outcomes: list[tuple[str, threading.Thread, list[SourceResult]]] = []
         for host in hosts:
-            worker: threading.Thread = threading.Thread(target=probe_host, args=(host,), daemon=True)
+            outcome: list[SourceResult] = []
+            worker: threading.Thread = threading.Thread(
+                target=lambda probed=host, into=outcome: into.append(probe_host(probed)), daemon=True)
             worker.start()
-            workers.append(worker)
-        for worker in workers:
+            outcomes.append((host, worker, outcome))
+        for _, worker, _ in outcomes:
             worker.join(timeout=self.config.remote_timeout_s + 5)
+        probes: dict[str, SourceResult] = {
+            host: outcome[0] if outcome else failed(host, "probe gave no result in time", started)
+            for host, _, outcome in outcomes
+        }
         self._store("remote", SourceResult(probes, started, duration_s=self.clock() - started, attempted_at=started))
 
     def refresh_github_in_place(self) -> None:
@@ -1133,16 +1143,23 @@ exit 0
             outages: list[tuple[float, float | None]] = list(self._github_outages)
         return any(start < epoch < (end if end is not None else now + 1) for start, end in outages)
 
-    def _run_periodically(self, interval_s: float, refresh: Callable[[], None]) -> None:
+    def _run_periodically(self, name: str, interval_s: float, refresh: Callable[[], None]) -> None:
         """
-        Calls a refresh at once and then every interval until stopped.
+        Calls a refresh at once and then every interval until stopped; an unexpected error is logged and stored
+        as the source's failure, and the loop goes on.
 
         Args:
+            name: The source the refresh stores.
             interval_s: Seconds between calls.
             refresh: The refresh to run.
         """
         while not self._stop_event.is_set():
-            refresh()
+            started: float = self.clock()
+            try:
+                refresh()
+            except Exception as error:  # noqa: BLE001 - a dead thread would freeze the source without a word
+                logging.exception("Dashboard refresh of %s failed", name)
+                self._store_failure(name, self._describe_error(error), started)
             self._stop_event.wait(interval_s)
 
     def _store(self, name: str, result: SourceResult) -> None:

@@ -795,6 +795,22 @@ class CollectorAndPageTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertGreaterEqual(len(published), 3)
 
+    def test_a_refresh_that_raises_is_stored_as_the_failure_and_the_loop_goes_on(self) -> None:
+        calls: list[int] = []
+
+        def refresh() -> None:
+            calls.append(1)
+            if len(calls) >= 3:
+                self.collector._stop_event.set()
+            raise ZeroDivisionError("boom")
+
+        with self.assertLogs(level="ERROR"):
+            self.collector._run_periodically("github", 0.01, refresh)
+        self.assertEqual(len(calls), 3)
+        github = self.collector.snapshot()["sources"]["github"]
+        self.assertEqual(github["error"], "ZeroDivisionError: boom")
+        self.assertIsNotNone(github["fetched_at"])
+
     def test_every_panel_has_data(self) -> None:
         snapshot = self.snapshot
         self.assertEqual([machine["key"] for machine in snapshot["machines"]],
