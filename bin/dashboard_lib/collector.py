@@ -4,6 +4,7 @@ Gathers the dashboard's data on a cadence per source and assembles one JSON-read
 import json
 import logging
 import os
+import selectors
 import shlex
 import socket
 import subprocess
@@ -74,7 +75,7 @@ class DashboardConfig:
     `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
     names under `build_lock_dir`. `fleet_status_command` is an argv printing `fleet status --json` or
     `fleet sessions --json` (docs/FLEET.md); `fleet_environment` is set for it, as a tick's fleet gets it, so fleet
-    finds the instance's fleet.toml.
+    finds the instance's fleet.toml, and every variable whose name holds TOKEN is left out of its environment.
     """
 
     harness_home: Path
@@ -181,6 +182,10 @@ exit 0
         "gpu_mem_total_mb",
     )
     TAIL_BYTES: ClassVar[int] = 65536
+    # A status document of hundreds of devices is well under a megabyte; the cap keeps a runaway command from
+    # filling the dashboard's memory.
+    FLEET_OUTPUT_MAX_BYTES: ClassVar[int] = 8 * 1024 * 1024
+    STDERR_TAIL_BYTES: ClassVar[int] = 4096
     PID_LOOKUPS_PER_CYCLE: ClassVar[int] = 3
 
     def __init__(
@@ -513,21 +518,74 @@ exit 0
         when any device failed, its document still complete, so the document decides whether the read worked.
         """
         started: float = self.clock()
+        # fleet needs no credential of the dashboard's, and FLEET_STATUS_CMD may be any command the instance names.
+        environment: dict[str, str] = {name: value for name, value in os.environ.items() if "TOKEN" not in name.upper()}
+        environment.update(self.config.fleet_environment)
         try:
-            completed: subprocess.CompletedProcess[str] = subprocess.run(
-                list(self.config.fleet_status_command), capture_output=True, text=True,
-                timeout=self.config.fleet_timeout_s, stdin=subprocess.DEVNULL,
-                env=dict(os.environ, **dict(self.config.fleet_environment)),
-            )
+            returncode, stdout, stderr = self._run_capped(list(self.config.fleet_status_command), environment,
+                                                          self.config.fleet_timeout_s, self.FLEET_OUTPUT_MAX_BYTES)
             try:
-                report: FleetReport = FleetParser.parse(completed.stdout)
-            except ValueError as error:
-                raise RuntimeError(CommandRedactor.redact(f"fleet exit {completed.returncode}: {error}; "
-                                                          f"{completed.stderr.strip()[-200:]}")) from error
+                report: FleetReport = FleetParser.parse(stdout)
+            except (ValueError, OverflowError) as error:
+                raise RuntimeError(CommandRedactor.redact(f"fleet exit {returncode}: {error}; "
+                                                          f"{stderr.strip()[-200:]}")) from error
             self._store("fleet", SourceResult(report, started, duration_s=self.clock() - started,
                                               attempted_at=started))
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             self._store_failure("fleet", self._describe_error(error), started)
+
+    @staticmethod
+    def _run_capped(argv: list[str], environment: dict[str, str], timeout_s: float,
+                    max_bytes: int) -> tuple[int, str, str]:
+        """
+        Runs a command, as an argv with no shell, reading at most `max_bytes` of its stdout.
+
+        Args:
+            argv: The command.
+            environment: Its whole environment.
+            timeout_s: How long it may run.
+            max_bytes: The most stdout kept; more kills it.
+
+        Returns:
+            Its exit status, stdout, and the last STDERR_TAIL_BYTES of its stderr.
+
+        Raises:
+            OSError: It could not start.
+            RuntimeError: Its stdout passed `max_bytes`.
+            subprocess.TimeoutExpired: It ran past `timeout_s`.
+        """
+        deadline: float = time.monotonic() + timeout_s
+        stdout: bytearray = bytearray()
+        stderr: bytearray = bytearray()
+        with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=environment) as process:
+            assert process.stdout is not None and process.stderr is not None
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ, stdout)
+                selector.register(process.stderr, selectors.EVENT_READ, stderr)
+                while selector.get_map():
+                    remaining: float = deadline - time.monotonic()
+                    if remaining <= 0:
+                        process.kill()
+                        raise subprocess.TimeoutExpired(argv, timeout_s)
+                    for key, _ in selector.select(remaining):
+                        chunk: bytes = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        buffer: bytearray = key.data
+                        buffer += chunk
+                        if buffer is stderr:
+                            del buffer[:-Collector.STDERR_TAIL_BYTES]
+                        elif len(buffer) > max_bytes:
+                            process.kill()
+                            raise RuntimeError(f"output passed {max_bytes} bytes")
+            try:
+                returncode: int = process.wait(max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
+        return returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
     def _fleet_view(self, issue_titles: dict[int, tuple[str, str]], now: float) -> JsonDict:
         """

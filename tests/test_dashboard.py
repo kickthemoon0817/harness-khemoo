@@ -1896,6 +1896,16 @@ class FleetPanelTest(unittest.TestCase):
         self.collector.refresh_fleet_in_place()
         return self.collector.snapshot()
 
+    def collector_running(self, script: str, timeout_s: float = 45.0) -> Collector:
+        """
+        A collector whose fleet command is `script`, run by this Python with the fixture document's path as argv[1].
+        """
+        config = DashboardConfig(harness_home=self.home, data_dir=self.home / "data", repo=None, remote_interval_s=0,
+                                 usage_cache=self.home / "usage-cache.json", crontab_command=("true",),
+                                 fleet_status_command=(sys.executable, "-c", script, str(self.document)),
+                                 fleet_timeout_s=timeout_s)
+        return Collector(config, None, clock=lambda: FixtureHarness.PINNED_EPOCH)
+
     def test_parses_the_status_document(self) -> None:
         report = FleetParser.parse((FLEET_FIXTURES / "status.json").read_text())
         self.assertEqual([(device.name, device.transport, device.error) for device in report.devices],
@@ -1960,6 +1970,57 @@ class FleetPanelTest(unittest.TestCase):
         broken["devices"][0]["sessions"][0]["state"] = {"kind": "running"}
         broken["devices"][0]["status"]["metrics"]["cpu_percent"] = float("nan")
         self.assertIn("cpu_percent", self.read(json.dumps(broken))["fleet"]["error"])
+
+    def test_numbers_outside_fleets_range_are_a_source_error(self) -> None:
+        self.read()
+        cases: tuple[tuple[tuple[str, ...], Any, str], ...] = (
+            (("status", "metrics", "load"), [10**400, 0, 0], "load is not three numbers"),
+            (("status", "metrics", "load"), [-1, 0, 0], "load is not three numbers"),
+            (("status", "metrics", "cpu_percent"), 1e301, "cpu_percent"),
+            (("status", "metrics", "cpu_percent"), 2**63, "cpu_percent"),
+            (("status", "device", "cpus"), 10**400, "cpus"),
+        )
+        for keys, value, expected in cases:
+            document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+            target: JsonDict = document["devices"][0]
+            for key in keys[:-1]:
+                target = target[key]
+            target[keys[-1]] = value
+            text: str = json.dumps(document)
+            with self.assertRaises(ValueError, msg=keys):
+                FleetParser.parse(text)
+            snapshot: JsonDict = self.read(text)
+            self.assertIn(expected, snapshot["fleet"]["error"])
+            self.assertEqual(len(snapshot["fleet"]["devices"]), 2, "the last good read stays")
+        fixture: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        self.assertIsNotNone(FleetParser.parse(json.dumps(dict(fixture, generated_at=2**63 - 1))))
+
+    def test_fleet_runs_without_the_dashboards_tokens(self) -> None:
+        seen: Path = self.home / "environment"
+        collector: Collector = self.collector_running(
+            "import os, sys; "
+            f"open({str(seen)!r}, 'w').write(' '.join(sorted(n for n in os.environ if 'TOKEN' in n.upper()))); "
+            "sys.stdout.write(open(sys.argv[1]).read())")
+        with patch.dict(os.environ, {"GH_TOKEN": self.SECRET_TOKEN, "GITHUB_TOKEN": self.SECRET_TOKEN,
+                                     "my_api_token": "x", "HOME_DIR": "kept"}):
+            collector.refresh_fleet_in_place()
+        self.assertIsNone(collector.snapshot()["fleet"]["error"])
+        self.assertEqual(seen.read_text(), "")
+
+    def test_output_past_the_cap_kills_fleet_and_is_a_source_error(self) -> None:
+        collector: Collector = self.collector_running(
+            "import sys\nwhile True: sys.stdout.write('x' * 65536)", timeout_s=30)
+        started: float = time.monotonic()
+        collector.refresh_fleet_in_place()
+        self.assertLess(time.monotonic() - started, 20, "killed at the cap, not at the timeout")
+        self.assertIn(f"output passed {Collector.FLEET_OUTPUT_MAX_BYTES} bytes", collector.snapshot()["fleet"]["error"])
+
+    def test_a_fleet_that_hangs_is_stopped_at_the_timeout(self) -> None:
+        collector: Collector = self.collector_running("import time; time.sleep(30)", timeout_s=0.5)
+        started: float = time.monotonic()
+        collector.refresh_fleet_in_place()
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("TimeoutExpired", collector.snapshot()["fleet"]["error"])
 
     def test_an_issue_label_that_is_not_a_short_ascii_number_is_a_source_error(self) -> None:
         self.read()

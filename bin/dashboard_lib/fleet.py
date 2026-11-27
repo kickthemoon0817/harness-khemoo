@@ -98,6 +98,8 @@ class FleetParser:
     """
 
     OUTPUT_VERSION: ClassVar[int] = 1
+    INT_LIMIT: ClassVar[int] = 2**63
+    FLOAT_LIMIT: ClassVar[float] = 1e300
     TRANSPORTS: ClassVar[frozenset[str]] = frozenset({"local", "ssh", "tls"})
     ORIGINS: ClassVar[frozenset[str]] = frozenset({"dispatched", "discovered"})
     STATE_DETAIL: ClassVar[dict[str, tuple[str, type] | None]] = {
@@ -299,21 +301,28 @@ class FleetParser:
         if kind is float:
             valid: bool = cls._is_number(value)
         elif kind is int:
-            valid = isinstance(value, int) and not isinstance(value, bool)
+            valid = isinstance(value, int) and not isinstance(value, bool) and -cls.INT_LIMIT <= value < cls.INT_LIMIT
         else:
             valid = isinstance(value, kind)
         if not valid:
             raise ValueError(f"fleet output: {where} is not a {kind.__name__}")
         return value
 
-    @staticmethod
-    def _is_number(value: Any) -> bool:
+    @classmethod
+    def _is_number(cls, value: Any) -> bool:
         """
         Args:
             value: A decoded JSON value.
 
         Returns:
-            True for a JSON number.
+            True for a JSON number in the range fleet reports: an int in 0..2**63-1, or a finite float of magnitude
+            at most FLOAT_LIMIT.
         """
-        # JSON has no NaN or Infinity; Python's decoder accepts them, and they would break the page's JSON.
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        # The range is checked before any math: Python's ints are unbounded, and math.isfinite(10**400) raises
+        # OverflowError. JSON has no NaN or Infinity; Python's decoder accepts them, and they would break the
+        # page's JSON.
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return 0 <= value < cls.INT_LIMIT
+        return isinstance(value, float) and math.isfinite(value) and abs(value) <= cls.FLOAT_LIMIT
