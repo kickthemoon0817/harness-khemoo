@@ -1,0 +1,25 @@
+# Not read by the harness: the policy of each device's fleetd, at ~/.config/fleetd/fleetd.toml there.
+# docs/FLEET.md (fleetd.toml) gives every key. What a device that takes harness ticks needs:
+#
+# - an adapter named as TICK_AGENT, whose `models` include every model in TICK_MODELS and LANE_MODEL
+#   (a tick asks for one by name, and one not listed is refused);
+# - `workdir_roots` holding WORKTREE_ROOT, which must exist on the device;
+# - `timeout_s` of at least (LONG_TICK_BUDGET_MIN + 30) * 60, the timeout each tick asks for;
+# - the permission flag CLAUDE_FLAGS gives a local tick, in `args`, since a tick cannot answer prompts;
+# - the harness checkout, instance, state and TARGET_REPO at the same paths, and fleetd started with
+#   the environment tick.sh exports, listed in `env_allow`: fleetd clears a dispatched agent's
+#   environment, and the core prompt and scripts read those names.
+
+device = "dev-a"
+
+[adapters.claude]
+preset = "claude"
+exe = "/usr/local/bin/claude"
+args = ["-p", "--model", "{model}", "--dangerously-skip-permissions"]
+models = ["claude-opus-5-5"]
+workdir_roots = ["/srv/worktrees"]
+env_allow = ["HARNESS_HOME", "HARNESS_INSTANCE_DIR", "HARNESS_STATE", "TARGET_REPO", "WORKTREE_ROOT",
+             "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "READY_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL",
+             "LONG_LABEL", "FIRST_LABEL", "LOW_LABEL", "LANE_LABEL"]
+max_concurrent = 2
+timeout_s = 9000

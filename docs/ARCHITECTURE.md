@@ -40,6 +40,11 @@ invocation with the composed prompt: the lane line, `prompts/tick-core.md`, then
 instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is a
 normal outcome, not an error.
 
+With `FLEET_DISPATCH=1` the runner hands the same prompt to `fleet dispatch --wait` on stdin
+instead ([`docs/FLEET.md`](FLEET.md)). The slot, the model order, the cooldown and chaining stay
+here: fleet only places the agent on a device and returns its output and exit status, so a tick
+reads the same whichever device ran it.
+
 A runner keeps its slot and chains: when a tick ends, it re-reads usage and the queue and starts
 the next tick at once on a fresh context, so work finished early is followed immediately rather
 than at the next cron firing. It stops when the queue is empty, usage no longer allows its slot, a

@@ -76,6 +76,16 @@ the instance's devices, run queues and build locks when `harness.env` configures
 `bin/dashboard.sh status` prints the URL again, `bin/dashboard.sh stop` stops it, and
 `bin/dashboard.py --help` lists the options.
 
+## Fleet
+
+[Fleet](docs/FLEET.md) watches devices and the agent sessions on them, and runs agents there. It is
+optional. With `FLEET_DISPATCH=1` in `harness.env`, each tick runs through `fleet dispatch` on the
+device `FLEET_DEVICE` names (`auto` picks one) and with the agent `TICK_AGENT` (default `claude`),
+instead of a local `claude -p`. With `FLEET_STATUS_CMD="fleet status --json"`, the dashboard shows a
+Devices and an Agent sessions panel. Unset, the harness runs on one host as above.
+`templates/instance/fleet.toml.example` and `fleetd.toml.example` are starting points;
+[`docs/INSTANCE.md`](docs/INSTANCE.md#fleet) gives the keys.
+
 ## Tests
 
 ```bash
