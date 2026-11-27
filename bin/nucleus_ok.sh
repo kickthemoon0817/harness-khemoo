@@ -5,6 +5,9 @@
 # five-minute in-line loop, and exits 1 on the first failed connect.
 set -u
 HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# state/nucleus/host, when present, names the asset server runs load from (the operator's
+# redirect while the primary is down); NUCLEUS_HOST in the environment still wins.
+[ -z "${NUCLEUS_HOST:-}" ] && [ -s "$HARNESS_HOME/state/nucleus/host" ] && NUCLEUS_HOST=$(tr -d '[:space:]' < "$HARNESS_HOME/state/nucleus/host")
 : "${NUCLEUS_HOST:=10.50.2.21}"; : "${NUCLEUS_PORT:=3009}"; : "${NUCLEUS_STABLE_S:=300}"
 status="$HARNESS_HOME/state/nucleus/status"
 now=$(date +%s)
