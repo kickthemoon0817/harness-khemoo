@@ -71,6 +71,13 @@ A count that fails or prints anything but an integer is an error, logged to `all
 one claimable issue, so a GitHub outage does not stop every slot: the tick that starts ends early when
 it finds nothing. A failed lane or landing count starts no lane or landing tick.
 
+## Worktrees
+
+A tick's worktree is the directory `$WORKTREE_ROOT/<name>-<issue>` (a word, a hyphen, the issue
+number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree_gc.sh` reads a
+worktree's issue from its branch, else from its directory name, and never removes one that names no
+issue. The dashboard reads the issue from the directory name.
+
 ## Hooks
 
 `harness_hook <name> [args]` returns 3 when the hook is absent. A hook whose name ends in `.sh` is
@@ -81,7 +88,7 @@ executable. It runs under `timeout HOOK_TIMEOUT_S` when the caller sets that var
 |---|---|---|
 | `hooks/env.sh` | sourced by `tick.sh` after the config, in launcher and runner mode (not in `check`) | what it exports reaches every tick; a non-zero status is logged once as `hooks/env.sh failed (exit N); ticks run without it` |
 | `hooks/hold` | executed with no arguments, under `HOLD_TIMEOUT_S` (default 5 s), when the launcher starts, when a runner starts, and before each chained tick | exit 0 means held: the launcher starts nothing and runners chain nothing. The first line of stdout is the reason, logged as `held: <reason>` once until the state changes. Any other exit, or a timeout, means not held |
-| `hooks/worktree-busy` | executed by `worktree_gc.sh` with no arguments | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept |
+| `hooks/worktree-busy` | executed by `worktree_gc.sh` with no arguments, under `WORKTREE_BUSY_TIMEOUT_S` (default 30 s) | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept. A non-zero exit or a timeout removes nothing |
 | `hooks/worktree-remove` | executed by `worktree_gc.sh --apply` with every removed worktree's path | removes what `git worktree remove --force` could not, such as root-owned files or copies elsewhere; its output and status are ignored |
 
 The templates ship `hooks/env.sh.example` and `hooks/hold.example`. Copy them without the

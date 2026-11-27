@@ -7,9 +7,12 @@
 # for hours after its base moved, and a slot can land several heads in an hour,
 # so a count of heads alone is too short. With WORK_BRANCH unset, no parent- or
 # base-tree is removed. WORKTREE_KEEP names worktrees that are never removed.
+# A worktree's issue is the <n> of its `<BRANCH_PREFIX><n>-<slug>` branch, else of
+# its directory name `<word>-<n>`; a worktree with neither is never removed.
 # In use means a process runs inside it or the instance's hooks/worktree-busy
-# names it (one directory per line, e.g. what containers mount); what git cannot
-# delete goes to hooks/worktree-remove.
+# names it (one directory per line, e.g. what containers mount); a busy hook that
+# fails or outlasts WORKTREE_BUSY_TIMEOUT_S removes nothing, since what it would
+# have named is unknown. What git cannot delete goes to hooks/worktree-remove.
 #   worktree_gc.sh           dry run: prints what it would remove
 #   worktree_gc.sh --apply   removes, and logs to $HARNESS_STATE/logs/worktree_gc.log
 set -u
@@ -21,6 +24,7 @@ export PATH="$HARNESS_INSTANCE_DIR/bin:${HARNESS_PATH:-$HOME/.local/bin:/usr/loc
 WT="${WORKTREE_ROOT:?set WORKTREE_ROOT in the instance harness.env}"
 REPO="${TARGET_REPO:?set TARGET_REPO in the instance harness.env}"
 : "${KEEP_HEADS:=3}"; : "${KEEP_HOURS:=6}"; : "${WORK_BRANCH:=}"; : "${WORKTREE_KEEP:=}"
+: "${BRANCH_PREFIX:=ai/}"; : "${WORKTREE_BUSY_TIMEOUT_S:=30}"
 apply=0; [ "${1:-}" = "--apply" ] && apply=1
 LOG="$HARNESS_STATE/logs/worktree_gc.log"; mkdir -p "$(dirname "$LOG")"
 gh_repo=(); [ -n "${GH_REPO:-}" ] && gh_repo=(-R "$GH_REPO")
@@ -34,8 +38,10 @@ if [ -n "$WORK_BRANCH" ]; then
               git -C "$REPO" rev-list --first-parent -n 1 --until="$KEEP_HOURS hours ago" "origin/$WORK_BRANCH"
               git -C "$REPO" rev-list --first-parent -n "$KEEP_HEADS" "origin/$WORK_BRANCH"; } | cut -c1-8 | sort -u)
 fi
+hook_busy=$(HOOK_TIMEOUT_S="$WORKTREE_BUSY_TIMEOUT_S" harness_hook worktree-busy 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || { echo "hooks/worktree-busy failed (exit $rc); nothing removed" >&2; exit 1; }
 busy=$( { for p in /proc/[0-9]*; do readlink "$p/cwd" 2>/dev/null; done
-          harness_hook worktree-busy 2>/dev/null
+          printf '%s\n' "$hook_busy"
         } | grep "^$WT/" | sed "s|^$WT/||; s|/.*||" | sort -u)
 removed=()
 for path in "$WT"/*; do
@@ -46,7 +52,10 @@ for path in "$WT"/*; do
     sha=${BASH_REMATCH[2]}; echo "$recent" | grep -q "^${sha:0:8}" && continue
     why="old base $sha"
   else
-    n=$(grep -o -E '[0-9]{3,5}' <<<"$d" | head -1); [ -n "$n" ] || continue
+    ref=$(git -C "$path" symbolic-ref -q --short HEAD 2>/dev/null)
+    if [[ "$ref" == "$BRANCH_PREFIX"* ]] && [[ "${ref#"$BRANCH_PREFIX"}" =~ ^([0-9]+)- ]]; then n=${BASH_REMATCH[1]}
+    elif [[ "$d" =~ ^[A-Za-z][A-Za-z0-9]*-([0-9]+)$ ]]; then n=${BASH_REMATCH[1]}
+    else continue; fi
     echo "$open" | grep -qx "$n" && continue
     why="issue #$n closed"
   fi

@@ -38,7 +38,7 @@ Example shape:
 3. **Audit** (only when nothing is claimable) — run the mission measurements, then label or
    file issues for each gap with its evidence. Keep the status checklist on the tracking issue
    current, then end the tick.
-4. **Implement** — create a git worktree under `$WORKTREE_ROOT` on a new branch
+4. **Implement** — create a git worktree `$WORKTREE_ROOT/<name>-<issue#>` on a new branch
    `<BRANCH_PREFIX><issue#>-<slug>`. Never edit the user's checkout. Follow the repo's own
    conventions. Build and run the targeted tests.
 5. **Verify** — re-run the measurement slice the issue affects. Record real evidence in the PR
