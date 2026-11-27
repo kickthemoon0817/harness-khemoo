@@ -57,6 +57,30 @@ fn config_path_precedence() {
 }
 
 #[test]
+fn an_empty_variable_counts_as_unset() {
+    let instance = env(&[
+        ("FLEET_CONFIG", ""),
+        ("HARNESS_INSTANCE_DIR", "/srv/instance"),
+    ]);
+    assert_eq!(
+        config_path(None, &instance).unwrap(),
+        PathBuf::from("/srv/instance/fleet.toml")
+    );
+    // An empty instance dir must not resolve to a relative `fleet.toml` in the cwd.
+    let both_empty = env(&[("FLEET_CONFIG", ""), ("HARNESS_INSTANCE_DIR", "")]);
+    let e = config_path(None, &both_empty).unwrap_err();
+    assert!(e.0.contains("no fleet.toml"), "{}", e.0);
+    let config_only = env(&[
+        ("FLEET_CONFIG", "/etc/fleet.toml"),
+        ("HARNESS_INSTANCE_DIR", ""),
+    ]);
+    assert_eq!(
+        config_path(None, &config_only).unwrap(),
+        PathBuf::from("/etc/fleet.toml")
+    );
+}
+
+#[test]
 fn loads_every_transport_in_file_order_with_defaults() {
     let dir = TempDir::new();
     make_pki(&dir.join("pki"));
