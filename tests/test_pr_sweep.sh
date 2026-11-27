@@ -4,8 +4,8 @@
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/fake" "$T/h/config" "$T/h/state/logs"
-echo "GH_REPO=org/repo" > "$T/h/config/harness.env"
+mkdir -p "$T/fake" "$T/h/instance" "$T/h/state/logs"
+echo "GH_REPO=org/repo" > "$T/h/instance/harness.env"
 export CALLS="$T/calls.log" FX="$T/fx"; mkdir -p "$FX"
 cat > "$T/fake/gh" <<'G'
 #!/usr/bin/env bash
@@ -34,13 +34,18 @@ check "the other one is closed too" 'grep -q "PATCH repos/org/repo/pulls/2030 -f
 check "a pull request whose issue is open is left alone" '! grep -q "2472" "$CALLS"' "$(cat "$CALLS")"
 check "each close is logged with its issue" '[ "$(grep -c "closed PR #" "$T/h/state/logs/pr_sweep.log")" = 2 ] && grep -q "closed PR #2386 (ai/2382-converted-push): #2382 closed" "$T/h/state/logs/pr_sweep.log"' "$(cat "$T/h/state/logs/pr_sweep.log")"
 
-: > "$CALLS"; printf '%s\n' "1 ai/manure" "2 ai/9999-gone" > "$FX/prs"
+: > "$CALLS"; printf '%s\n' "1 ai/docs" "2 ai/9999-gone" > "$FX/prs"
 bash "$here/bin/pr_sweep.sh"
 check "a branch without an issue number, or an issue that cannot be read, is left alone" '[ ! -s "$CALLS" ]' "$(cat "$CALLS")"
 
 : > "$CALLS"; : > "$T/h/state/logs/pr_sweep.log"; touch "$FX/fail_write"; printf '%s\n' "2386 ai/2382-converted-push" > "$FX/prs"
 bash "$here/bin/pr_sweep.sh"
 check "a failed comment leaves the pull request open and says so" '! grep -q PATCH "$CALLS" && grep -q "PR #2386 comment failed" "$T/h/state/logs/pr_sweep.log"' "$(cat "$CALLS") / $(cat "$T/h/state/logs/pr_sweep.log")"
+
+rm -f "$FX/fail_write"; : > "$CALLS"; : > "$T/h/state/logs/pr_sweep.log"
+printf '%s\n' "2386 ai/2382-converted-push" "2030 bot/2026-still-island-sleep" > "$FX/prs"
+BRANCH_PREFIX=bot/ bash "$here/bin/pr_sweep.sh"
+check "BRANCH_PREFIX names the branches swept" 'grep -q "pulls/2030 -f state=closed" "$CALLS" && ! grep -q 2386 "$CALLS"' "$(cat "$CALLS")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

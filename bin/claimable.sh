@@ -4,25 +4,26 @@
 # owner (SIGNOFF_LABEL). Prints one integer.
 # Priority: an issue labelled LOW_LABEL counts only when no other
 # issue of the list is claimable, and none labelled FIRST_LABEL is claimable anywhere; an
-# issue labelled FABLE_LABEL without FIRST_LABEL counts only while no FIRST_LABEL issue is
-# claimable anywhere. So low-priority work and new design rounds wait for the take-first queue.
+# issue labelled LANE_LABEL (the model lane; off when empty) without FIRST_LABEL counts only
+# while no FIRST_LABEL issue is claimable anywhere. So low-priority work and lane work wait for
+# the take-first queue.
 set -u
 : "${GH_REPO:?}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"; : "${SIGNOFF_LABEL:=ai:signoff}"
 : "${OPERATOR_LABEL:=ai:operator}"
-: "${FIRST_LABEL:=ai:first}"; : "${LOW_LABEL:=ai:low}"; : "${FABLE_LABEL:=ai:fable}"
+: "${FIRST_LABEL:=ai:first}"; : "${LOW_LABEL:=ai:low}"; : "${LANE_LABEL:=}"
 # A tick takes a local claim (bin/claim.sh) before its claim comment reaches GitHub.
-CLAIM_LOCKS="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/state/locks"
+CLAIM_LOCKS="${HARNESS_STATE:-${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/state}/locks"
 json=$(gh issue list --repo "$GH_REPO" --label "$ISSUE_LABEL" --state open --limit 100 \
     --json number,body,labels 2>/dev/null) || { echo 1; exit 0; }
 # The issue list goes through a file, never argv: forty issue bodies exceed ARG_MAX,
 # and the heredoc below already owns stdin.
 list_file=$(mktemp); trap 'rm -f "$list_file"' EXIT; printf '%s' "$json" > "$list_file"
 python3 - "$list_file" "$WIP_LABEL" "$GH_REPO" "$SIGNOFF_LABEL" "$OPERATOR_LABEL" "$CLAIM_LOCKS" \
-    "$ISSUE_LABEL" "$FIRST_LABEL" "$LOW_LABEL" "$FABLE_LABEL" <<'PY'
+    "$ISSUE_LABEL" "$FIRST_LABEL" "$LOW_LABEL" "$LANE_LABEL" <<'PY'
 import json, os, re, subprocess, sys
 issues = json.load(open(sys.argv[1])); wip = sys.argv[2]; repo = sys.argv[3]; signoff = sys.argv[4]
 operator = sys.argv[5]; claim_locks = sys.argv[6]
-issue_label, first, low, fable = sys.argv[7], sys.argv[8], sys.argv[9], sys.argv[10]
+issue_label, first, low, lane = sys.argv[7], sys.argv[8], sys.argv[9], sys.argv[10]
 open_nums = {i["number"] for i in issues}
 def closed(n):
     if n in open_nums: return False
@@ -66,9 +67,11 @@ def first_waiting():
     if out.returncode != 0: return False
     others = [i for i in json.loads(out.stdout or "[]") if i["number"] not in open_nums]
     return any(claimable(i) for i in others)
-gated = [i for i in cands if low in names(i) or (fable in names(i) and first not in names(i))]
+# An empty LANE_LABEL names no label, so with the lane off no issue is lane work.
+def lane_work(i): return bool(lane) and lane in names(i) and first not in names(i)
+gated = [i for i in cands if low in names(i) or lane_work(i)]
 fw = first_waiting() if gated else False
-keep = [i for i in cands if low not in names(i) and not (fable in names(i) and first not in names(i) and fw)]
+keep = [i for i in cands if low not in names(i) and not (lane_work(i) and fw)]
 if not keep and not fw:
     keep = [i for i in cands if low in names(i)]
 print(len(keep))

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # One tick per issue: a local claim taken atomically before the claim comment,
 # so two ticks that start seconds apart cannot both claim an issue whose first
-# comment has not reached GitHub yet. It belongs to the tick, found the way
-# lease.sh finds it, and a dead holder frees it.
+# comment has not reached GitHub yet. It belongs to the tick (bin/tick-pid.sh
+# finds it), and a dead holder frees it.
 #   claim.sh acquire <issue>  -> ACQUIRED, or BUSY <issue> <pid> <since> (exit 1)
 #   claim.sh status <issue>   -> free, HELD <issue> <pid> <since> or ORPHAN <...>
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+L="${HARNESS_STATE:-$H/state}/locks"
 cmd="${1:-}"; issue="${2:-}"
 [[ "$issue" =~ ^[0-9]+$ ]] || { echo "usage: claim.sh acquire|status <issue>" >&2; exit 2; }
-F="$H/state/locks/claim.$issue"
+F="$L/claim.$issue"
 if [ "$cmd" = status ]; then
   pid=""
 elif [ -x "$H/bin/tick-pid.sh" ]; then
@@ -20,8 +21,8 @@ elif [ -x "$H/bin/tick-pid.sh" ]; then
 else
   pid=$PPID
 fi
-mkdir -p "$H/state/locks"
-exec 8>"$H/state/locks/claim.guard"; flock 8
+mkdir -p "$L"
+exec 8>"$L/claim.guard"; flock 8
 case "$cmd" in
   acquire)
     if [ -s "$F" ]; then
