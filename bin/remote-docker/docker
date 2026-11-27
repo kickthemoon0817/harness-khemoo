@@ -38,15 +38,20 @@ fi
 # left to their caller. A tick runs as the same user, so this keeps a mistake off the owner's card;
 # it is not a boundary against a process set on crossing it.
 case "${DOCKER_HOST:-}" in ssh://*) ;; *)
+  in_tick=""; listed_lane=""
   if tick_pid=$("$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" 2>/dev/null); then
+    in_tick=1
     # A tick whose issue the owner lists in state/locks/local-card-issues may use this host's card
-    # and daemon as a named holder would.
+    # and daemon as a named holder would. Its card-less runs (a compile, a host test suite) are lane
+    # runs all the same, bounded below as every harness run here is.
     hh="$(cd "$self_dir/../.." && pwd)"
     allowed=$(grep -lE "^[0-9]+ $tick_pid( |$)" "$hh"/state/locks/claim.* 2>/dev/null | head -1)
     allowed=${allowed##*.}
     if [ -n "$allowed" ] && grep -qx "$allowed" "$hh/state/locks/local-card-issues" 2>/dev/null; then
-      exec "$real" "$@"
+      case "${1:-} $*" in "run "*NVIDIA_VISIBLE_DEVICES=void*) listed_lane=1 ;; *) exec "$real" "$@" ;; esac
     fi
+  fi
+  if [ -n "$in_tick" ] && [ -z "$listed_lane" ]; then
     refuse() { echo "remote-docker: on this host a tick runs only card-less build containers ($1); the local card and containers are the owner's" >&2; exit 75; }
     case "${1:-}" in -*) refuse "global option $1" ;; "") exec "$real" ;; esac
     case "$1" in
@@ -95,7 +100,7 @@ case "${DOCKER_HOST:-}" in ssh://*) ;; *)
     cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
     lane=1
   else
-    cmd=("$real" "$@"); opts=(); lane=${WORV_LOCAL_LANE:-}
+    cmd=("$real" "$@"); opts=(); lane=${WORV_LOCAL_LANE:-}; [ -n "$listed_lane" ] && lane=1
     if [ "${1:-}" = run ]; then
       shift
       while [ "$#" -gt 0 ]; do
