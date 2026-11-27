@@ -31,8 +31,13 @@ skipped.
 `TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
 `worktree_gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
-The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines, keeps
-only the keys it uses, and does no `$` expansion.
+The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
+only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
+command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`), split shell-style first,
+`$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
+`WORKTREE_ROOT`), those two and `$HOME`. `HARNESS_STATE` and `USAGE_CACHE` from the environment win
+over the file's. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
+and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
 
@@ -174,8 +179,8 @@ Every source below is optional. While its keys are empty, its panel stays off th
 |---|---|
 | `DASHBOARD_TITLE` | the page title (default `Harness status`) |
 | `RESOURCE_STATUS_CMD` | shared devices: slots, holders, waits. Split shell-style and run without a shell |
-| `DEVICE_PROBE_CMD` | the device row of each machine: run with `sh -c` under a 5 s timeout, locally and over ssh on each remote host |
-| `RUN_QUEUE_GLOB`, `RUN_QUEUE_HOLDER`, `RUN_QUEUE_STOP_WORDS` | run queues on the flow board |
+| `DEVICE_PROBE_CMD` | the device row of each machine, under a 5 s timeout. Split shell-style and run without a shell on this host. On each remote host ssh hands it to the remote user's shell, as one command whose words are each quoted, so that shell runs the same words and expands nothing in them. A probe that needs a shell names one: `sh -c '...'` |
+| `RUN_QUEUE_GLOB`, `RUN_QUEUE_HOLDER`, `RUN_QUEUE_STOP_WORDS`, `RUN_QUEUE_LOG` | run queues on the flow board |
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
@@ -188,18 +193,20 @@ columns. `stalls.log` has `<UTC> STALL <kind> <key> <detail>` lines.
 One fact a line. A line that matches no form below is shown as unparsed.
 
 ```
-remote card: <user@host> (slots <a>-<b>)            slots a..b live on that host ("host" may replace "card")
+remote device: <user@host> (slots <a>-<b>)          slots a..b live on that host
 harness ticks: <host> <host> only, ...              the hosts harness ticks are kept to
-local card: off ...                                 this host's device takes no runs ("local host: off" too)
+local device: off ...                               this host's device takes no runs
 slot <n> free
 slot <n> HELD|ORPHAN <holder> <pid> <since> [tags...] (alive|pid dead)
 device HELD|ORPHAN <holder> <pid> <since> [tags...] (alive|pid dead)
 operator priority: <issue> <issue> ...
-wait whole-card|whole-pool|single-slot issue <n> for <m> min [(<reason>)]
+wait whole-device|whole-pool|single-slot issue <n> for <m> min [(<reason>)]
 ```
 
-`<holder>` is an issue number or a name. A `domain=<n>` tag is shown as the slot's domain. The tags
-`remote-all`, `held-for-all`, `exclusive` and `reserved-for-all` mark a hold on every slot.
+`card` and `host` are accepted for `device` in the `remote` and `local` lines, and `whole-card` for
+`whole-device`. `<holder>` is an issue number or a name. A `domain=<n>` tag is shown as the slot's
+domain. The tags `remote-all`, `held-for-all`, `exclusive` and `reserved-for-all` mark a hold on every
+slot.
 
 ### `DEVICE_PROBE_CMD` output
 
@@ -210,20 +217,30 @@ wait whole-card|whole-pool|single-slot issue <n> for <m> min [(<reason>)]
 ```
 
 The first line describes the device. Each further line is a process using it. Fields are
-comma-separated, and a process name may contain commas. For an NVIDIA card, for example:
-`nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits; nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader,nounits`.
+comma-separated, and a process name may contain commas. For an NVIDIA card, two queries joined by a
+shell the probe names itself:
+
+```
+DEVICE_PROBE_CMD="sh -c 'nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits | head -1; nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader,nounits'"
+```
 
 ### Run queues
 
-`RUN_QUEUE_GLOB` matches run directories (`~` is expanded). Only directories written in the last
-6 hours are read. A directory's parent is its packet, and an issue number in the packet's name
-(`<YYYY-MM-DD>-<issue>-...`) ties it to the issue. Each directory holds:
+A run queue is a process (its holder) that waits for a device and then runs a series of jobs,
+writing what happens to a run directory. `RUN_QUEUE_GLOB` matches run directories (`~` is
+expanded). Only directories written in the last 6 hours are read. A directory's parent is its
+packet, and an issue number in the packet's name (`<YYYY-MM-DD>-<issue>-...`) ties it to the issue.
+Each directory holds:
 
-- `lease.log`: a `holder <pid> start ... want=<w>` line, then `<UTC> <answer>` lines. Trailing
-  `BUSY <reason>` answers make the busy streak, and `remote=<host>` names the host.
-- `status`: `<arm> start <UTC> ... host=<host>` while an arm runs, until `<arm> rc=<n> end`, `void<n>:`,
-  `skipped:`, `up failed`, or a line that starts with one of `RUN_QUEUE_STOP_WORDS`. It also holds
-  `granted: ...` lines, and `RELEASED <queue> <UTC>` as the last line once the queue ends.
+- the queue log, `RUN_QUEUE_LOG` (default `queue.log`): a `holder <pid> start ... want=<w>` line,
+  then `<UTC> <answer>` lines, the device's answers to the holder. Trailing `BUSY <reason>` answers
+  make the busy streak, and an `ACQUIRED` answer's `remote=<host>` names the host it got.
+- `status`: `<job> start <UTC> ... host=<host>` while a job runs, until the job's end line or a line
+  that starts with one of `RUN_QUEUE_STOP_WORDS`. A job ends with `<job> rc=<n> end`,
+  `<job> void<n>: ...` (abandoned, with reason number n), `<job> skipped: ...`, or `<job> up failed`,
+  `<job> sidecar failed` or `<job> no sidecar` (its environment did not come up). It also holds
+  `granted: ...` lines, where `DOCKER_HOST=ssh://<host>` names the granted host (else this one), and
+  `RELEASED <queue> <UTC>` as the last line once the queue ends.
 
 The queue is live while its holder pid lives and, when `RUN_QUEUE_HOLDER` is set, while one of the
 holder's first three arguments contains that word. When the packet name has no issue, an

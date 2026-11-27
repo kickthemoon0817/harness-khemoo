@@ -254,9 +254,9 @@ class RunQueue:
     alive: bool
     state: str
     want: str | None
-    arm: str | None
-    arm_host: str | None
-    arm_started: str | None
+    job: str | None
+    job_host: str | None
+    job_started: str | None
     busy_since: str | None
     busy_reason: str | None
     granted_host: str | None

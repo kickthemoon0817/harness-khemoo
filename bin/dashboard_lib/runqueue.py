@@ -1,5 +1,5 @@
 """
-Reads the instance's run folders: whether a queue is alive, waiting for a device, or running an arm, and where.
+Reads the instance's run folders: whether a queue is alive, waiting for a device, or running a job, and where.
 """
 import glob
 import os
@@ -13,9 +13,9 @@ from dashboard_lib.parsers import StateParsers
 
 
 @dataclass(frozen=True)
-class LeaseLogInfo:
+class QueueLogInfo:
     """
-    What a run folder's `lease.log` says about its holder and its last lease answers.
+    What a run folder's queue log says about its holder and the last answers it got for a device.
     """
 
     holder_pid: int | None
@@ -28,12 +28,12 @@ class LeaseLogInfo:
 @dataclass(frozen=True)
 class StatusInfo:
     """
-    What a run folder's `status` says: the arm running now, the granted host, and whether the queue ended.
+    What a run folder's `status` says: the job running now, the granted host, and whether the queue ended.
     """
 
-    arm: str | None
-    arm_host: str | None
-    arm_started: str | None
+    job: str | None
+    job_host: str | None
+    job_started: str | None
     granted_host: str | None
     finished_at: str | None
 
@@ -43,37 +43,44 @@ class RunQueueReader:
     Finds the run folders RUN_QUEUE_GLOB matches that were written lately and reads their state; a folder's parent
     is its packet.
 
-    `lease.log` gives the holder (its `holder <pid> start` line) and the lease answers, stamped `<UTC> <answer>`;
-    the BUSY streak is the run of stamped BUSY answers at its end. `status` gives the arm lines
-    (`<arm> start <UTC> ... host=<host>` until `<arm> rc=<n> end`, a void, a skip, a failed bring-up, or a line
-    starting with one of the stop words), `granted:` lines, and `RELEASED <queue> <UTC>`, always its last line once
-    the queue ends.
+    The queue log (RUN_QUEUE_LOG) gives the holder (its `holder <pid> start` line) and the device answers, stamped
+    `<UTC> <answer>`; the BUSY streak is the run of stamped BUSY answers at its end, and an ACQUIRED answer names
+    its host with `remote=<host>`. `status` gives the job lines (`<job> start <UTC> ... host=<host>` until the job's
+    end line, or a line starting with one of the stop words), `granted:` lines, and `RELEASED <queue> <UTC>`, always
+    its last line once the queue ends. A job ends with `<job> rc=<n> end`, `<job> void<n>: ...` (abandoned with
+    reason number n), `<job> skipped: ...`, or `<job> up failed`, `<job> sidecar failed`, `<job> no sidecar` (its
+    environment did not come up).
     """
 
     STAMP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) (.*)$")
     HOLDER_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^holder (\d+) start ")
     WANT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bwant=(\S+)")
     REMOTE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bremote=(\S+)")
-    ARM_START_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+    JOB_START_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^(\S+) start (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\b(.*)$")
-    ARM_END_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+    JOB_END_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^(\S+) (?:rc=\d+ end|void\d+:|skipped:|up failed|sidecar failed|no sidecar)")
     RELEASED_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^RELEASED \S+ (\S+)")
     HOST_FIELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bhost=(\S+)")
     DOCKER_HOST_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bDOCKER_HOST=ssh://(\S+)")
     ISSUE_ARGUMENT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|\s)--issue\s+(\d+)\b")
 
-    def __init__(self, folder_glob: str, holder_name: str, stop_words: tuple[str, ...], window_s: float) -> None:
+    def __init__(self, folder_glob: str, holder_name: str, stop_words: tuple[str, ...], window_s: float,
+                 log_name: str = "queue.log", worktree_root: str = "") -> None:
         """
         Args:
             folder_glob: RUN_QUEUE_GLOB, matching the run folders; `~` is expanded.
             holder_name: RUN_QUEUE_HOLDER, a word in a live holder's first three arguments; empty takes any live
                 holder pid.
-            stop_words: RUN_QUEUE_STOP_WORDS, the words that end the running arm when a `status` line starts
+            stop_words: RUN_QUEUE_STOP_WORDS, the words that end the running job when a `status` line starts
                 with one.
             window_s: Only run folders written within this many seconds are read.
+            log_name: RUN_QUEUE_LOG, the queue log's file name in each run folder.
+            worktree_root: WORKTREE_ROOT, so a run folder inside a worktree names its issue.
         """
         self.folder_glob: str = folder_glob
+        self.log_name: str = log_name
+        self.worktree_root: str = worktree_root
         self.holder_name: str = holder_name
         self.window_s: float = window_s
         self.stop_pattern: re.Pattern[str] | None = re.compile(
@@ -113,20 +120,20 @@ class RunQueueReader:
         Returns:
             The queue's state: running, waiting_device, starting, finished or stopped.
         """
-        lease: LeaseLogInfo = self.parse_lease_log(self._read_text(runs_path / "lease.log"))
+        queue_log: QueueLogInfo = self.parse_queue_log(self._read_text(runs_path / self.log_name))
         status: StatusInfo = self.parse_status(self._read_text(runs_path / "status"), self.stop_pattern)
-        holder: ProcessInfo | None = processes.get(lease.holder_pid) if lease.holder_pid is not None else None
+        holder: ProcessInfo | None = processes.get(queue_log.holder_pid) if queue_log.holder_pid is not None else None
         alive: bool = holder is not None and (not self.holder_name
                                               or any(self.holder_name in argument for argument in holder.argv[:3]))
-        issue: int | None = StateParsers.issue_from_path(str(runs_path))
+        issue: int | None = StateParsers.issue_from_path(str(runs_path), self.worktree_root)
         if issue is None and holder is not None:
             issue_match: re.Match[str] | None = self.ISSUE_ARGUMENT_PATTERN.search(" ".join(holder.argv))
             issue = int(issue_match.group(1)) if issue_match else None
         if not alive:
             state: str = "finished" if status.finished_at else "stopped"
-        elif status.arm is not None:
+        elif status.job is not None:
             state = "running"
-        elif lease.busy_since is not None:
+        elif queue_log.busy_since is not None:
             state = "waiting_device"
         else:
             state = "starting"
@@ -134,24 +141,24 @@ class RunQueueReader:
             packet=runs_path.parent.name,
             runs=runs_path.name,
             issue=issue,
-            holder_pid=lease.holder_pid,
+            holder_pid=queue_log.holder_pid,
             alive=alive,
             state=state,
-            want=lease.want,
-            arm=status.arm,
-            arm_host=status.arm_host,
-            arm_started=status.arm_started,
-            busy_since=lease.busy_since,
-            busy_reason=lease.busy_reason,
-            granted_host=status.granted_host or lease.last_host,
+            want=queue_log.want,
+            job=status.job,
+            job_host=status.job_host,
+            job_started=status.job_started,
+            busy_since=queue_log.busy_since,
+            busy_reason=queue_log.busy_reason,
+            granted_host=status.granted_host or queue_log.last_host,
             finished_at=status.finished_at,
             updated_epoch=updated,
         )
 
     @staticmethod
-    def parse_lease_log(text: str) -> LeaseLogInfo:
+    def parse_queue_log(text: str) -> QueueLogInfo:
         """
-        Parses `lease.log`.
+        Parses the queue log.
 
         Args:
             text: The file's text.
@@ -186,7 +193,7 @@ class RunQueueReader:
             if "ACQUIRED" in answer:
                 remote_match: re.Match[str] | None = RunQueueReader.REMOTE_PATTERN.search(answer)
                 last_host = remote_match.group(1) if remote_match else "local"
-        return LeaseLogInfo(holder_pid, want, busy_since, busy_reason, last_host)
+        return QueueLogInfo(holder_pid, want, busy_since, busy_reason, last_host)
 
     @staticmethod
     def parse_status(text: str, stop_pattern: re.Pattern[str] | None = None) -> StatusInfo:
@@ -195,15 +202,15 @@ class RunQueueReader:
 
         Args:
             text: The file's text.
-            stop_pattern: Matches a line that ends the running arm, besides its own end line.
+            stop_pattern: Matches a line that ends the running job, besides its own end line.
 
         Returns:
-            The arm running at its end (with its host and start), the last granted host, and when the queue
+            The job running at its end (with its host and start), the last granted host, and when the queue
             released, if its last word is a release.
         """
-        arm: str | None = None
-        arm_host: str | None = None
-        arm_started: str | None = None
+        job: str | None = None
+        job_host: str | None = None
+        job_started: str | None = None
         granted_host: str | None = None
         finished_at: str | None = None
         for line in text.splitlines():
@@ -215,31 +222,30 @@ class RunQueueReader:
             released_match: re.Match[str] | None = RunQueueReader.RELEASED_PATTERN.match(line)
             if released_match:
                 finished_at = released_match.group(1)
-                arm = arm_host = arm_started = None
+                job = job_host = job_started = None
                 continue
-            start_match: re.Match[str] | None = RunQueueReader.ARM_START_PATTERN.match(line)
+            start_match: re.Match[str] | None = RunQueueReader.JOB_START_PATTERN.match(line)
             if start_match:
-                arm, arm_started = start_match.group(1), start_match.group(2)
+                job, job_started = start_match.group(1), start_match.group(2)
                 host_match: re.Match[str] | None = RunQueueReader.HOST_FIELD_PATTERN.search(start_match.group(3))
-                arm_host = host_match.group(1) if host_match else granted_host
+                job_host = host_match.group(1) if host_match else granted_host
                 finished_at = None
                 continue
-            end_match: re.Match[str] | None = RunQueueReader.ARM_END_PATTERN.match(line)
-            if (end_match and end_match.group(1) == arm) or (stop_pattern and stop_pattern.match(line)):
-                arm = arm_host = arm_started = None
-        return StatusInfo(arm, arm_host, arm_started, granted_host, finished_at)
+            end_match: re.Match[str] | None = RunQueueReader.JOB_END_PATTERN.match(line)
+            if (end_match and end_match.group(1) == job) or (stop_pattern and stop_pattern.match(line)):
+                job = job_host = job_started = None
+        return StatusInfo(job, job_host, job_started, granted_host, finished_at)
 
-    @staticmethod
-    def _newest_mtime(runs_path: Path) -> float:
+    def _newest_mtime(self, runs_path: Path) -> float:
         """
         Args:
             runs_path: A run folder.
 
         Returns:
-            The newest modification time of its `status` and `lease.log`, 0 when neither exists.
+            The newest modification time of its `status` and queue log, 0 when neither exists.
         """
         newest: float = 0.0
-        for name in ("status", "lease.log"):
+        for name in ("status", self.log_name):
             try:
                 newest = max(newest, (runs_path / name).stat().st_mtime)
             except OSError:

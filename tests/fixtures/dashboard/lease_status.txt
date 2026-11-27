@@ -1,7 +1,7 @@
-remote card: ci@worker-a.local (slots 4-5)
+remote device: ci@worker-a.local (slots 4-5)
 remote host: ci@192.0.2.6 (slots 6-7)
 harness ticks: ci@192.0.2.6 ci@worker-a.local only, first preferred (the local card and any other card left to named holders)
-local card: off (every run goes to the remote card)
+local device: off (every run goes to the remote device)
 local host: off (builds and tests go to the remote host)
 slot 1 free
 slot 2 HELD owner 4242 2026-11-26T00:00:00Z domain=78 render (alive)
@@ -12,6 +12,6 @@ slot 6 HELD 2488 3313733 2026-11-26T00:11:34Z domain=82 remote render (alive)
 slot 7 free
 device HELD 2466 555 2026-11-26T01:00:00Z domain=0 device (alive)
 operator priority: 2490 2488
-wait whole-card issue 2467 for 35 min (priority)
+wait whole-device issue 2467 for 35 min (priority)
 wait single-slot issue 2470 for 12 min (first in line)
 something unexpected

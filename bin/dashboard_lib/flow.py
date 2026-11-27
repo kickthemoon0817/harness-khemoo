@@ -59,7 +59,7 @@ class FlowBuilder:
     """
     Places each issue in one state column and draws a line to each device lane it holds or waits for.
 
-    An issue's column is the first that applies: running (a live run queue running or bringing up an arm, or a
+    An issue's column is the first that applies: running (a live run queue running or bringing up a job, or a
     held lease slot), waiting for a device (a live run queue whose lease answers end in BUSY), compiling (holding or
     waiting on a build lock), landing (a landing tick, or a tick on a ready issue), claimed (a live tick or claim),
     waiting (claimable, held back by the first-before-low gate, or waiting on a dependency), held (on the operator,
@@ -236,7 +236,7 @@ class FlowBuilder:
         running: list[RunQueue] = [queue for queue in run_queues if queue.state in ("running", "starting")]
         waiting: list[RunQueue] = [queue for queue in run_queues if queue.state == "waiting_device"]
         for queue in running:
-            host: str = queue.arm_host or queue.granted_host or "local"
+            host: str = queue.job_host or queue.granted_host or "local"
             card.occupancies.append(Occupancy(host, "device", "holds"))
         for slot in slots:
             if not any(occupancy.device == slot.host for occupancy in card.occupancies):
@@ -251,10 +251,10 @@ class FlowBuilder:
 
         if running:
             queue = next((queue for queue in running if queue.state == "running"), running[0])
-            tag: str = self._tag(queue.arm_host or queue.granted_host or "local")
+            tag: str = self._tag(queue.job_host or queue.granted_host or "local")
             card.column = "running"
-            card.label = f"running {queue.arm} on {tag}" if queue.arm else f"bringing up on {tag}"
-            card.detail = card.label + (f" since {self._clock(queue.arm_started)}" if queue.arm_started else "")
+            card.label = f"running {queue.job} on {tag}" if queue.job else f"bringing up on {tag}"
+            card.detail = card.label + (f" since {self._clock(queue.job_started)}" if queue.job_started else "")
         elif slots:
             tags: str = " ".join(dict.fromkeys(tag for slot in slots for tag in slot.tags))
             card.column = "running"

@@ -85,6 +85,7 @@ class FixtureHarness:
         (self.home / "instance" / "harness.env").write_text(textwrap.dedent(f"""\
             # fixture
             TARGET_REPO=/nowhere
+            WORKTREE_ROOT={self.home / 'trees'}
             export GH_TOKEN="{self.FAKE_TOKEN}"
             GH_REPO=example/repo   # the target
             ISSUE_LABEL=ai:plan
@@ -206,7 +207,7 @@ class FixtureHarness:
             issue: The issue its packet is named for.
             runs: The run folder's name.
             status: The `status` text.
-            lease_log: The `lease.log` text; `{pid}` stands for the holder's pid.
+            lease_log: The queue log's text; `{pid}` stands for the holder's pid.
 
         Returns:
             The holder's pid.
@@ -218,7 +219,7 @@ class FixtureHarness:
         folder: Path = self.home / "evidence" / f"2026-11-26-{issue}-fixture" / runs
         folder.mkdir(parents=True)
         (folder / "status").write_text(status)
-        (folder / "lease.log").write_text(lease_log.replace("{pid}", str(holder.pid)))
+        (folder / "queue.log").write_text(lease_log.replace("{pid}", str(holder.pid)))
         return holder.pid
 
     def hold_build_lock(self, name: str, holder_issue: int, waiter_issue: int) -> tuple[int, int]:
@@ -241,8 +242,8 @@ class FixtureHarness:
         while time.time() < deadline and not lock.exists():
             time.sleep(0.05)
         time.sleep(0.2)
-        lock.write_text(f"pid {holder.pid}, {self.home}/ai-worktrees/app-{holder_issue}, app\n")
-        tree: Path = self.home / "ai-worktrees" / f"app-{waiter_issue}"
+        lock.write_text(f"pid {holder.pid}, {self.home}/trees/app-{holder_issue}, app\n")
+        tree: Path = self.home / "trees" / f"app-{waiter_issue}"
         tree.mkdir(parents=True, exist_ok=True)
         waiter = subprocess.Popen(["flock", str(lock), "sleep", "30"], cwd=tree, start_new_session=True)
         self.helper_processes.append(waiter)
@@ -268,7 +269,8 @@ class FixtureHarness:
             gh_binary=str(self.home / "bin" / "gh"), remote_interval_s=0,
             crontab_command=(str(self.home / "bin" / "crontab"),),
             resource_status_command=(str(self.home / "bin" / "resource-status"), "status"),
-            device_probe_command=f"cat '{FIXTURES / 'device_probe.txt'}'",
+            device_probe_command=("cat", str(FIXTURES / "device_probe.txt")),
+            worktree_root=str(self.home / "trees"),
             run_queue_glob=str(self.home / "evidence" / "*" / "runs*"), run_queue_holder="run_queue.sh",
             run_queue_stop_words=("STOP", "YIELD", "NO-LEASE"),
             build_lock_dir=self.home / "buildlocks", build_lock_local="dev-build.lock",
@@ -378,8 +380,17 @@ class ParserTest(unittest.TestCase):
         self.assertEqual((status.device.issue, status.device.tags), (2466, ("device",)))
         self.assertEqual(status.operator_priority, ("2490", "2488"))
         self.assertEqual([(wait.kind, wait.issue, wait.minutes, wait.tag) for wait in status.waits],
-                         [("whole-card", 2467, 35, "priority"), ("single-slot", 2470, 12, "first in line")])
+                         [("whole-device", 2467, 35, "priority"), ("single-slot", 2470, 12, "first in line")])
         self.assertEqual(status.unparsed_lines, ("something unexpected",))
+
+    def test_lease_status_accepts_card_and_host_for_device(self) -> None:
+        status = StateParsers.parse_lease_status(
+            "remote card: ci@a (slots 1-2)\nremote host: ci@b (slots 3-3)\nlocal card: off\n"
+            "wait whole-card issue 5 for 2 min\nwait whole-pool issue 6 for 3 min\n")
+        self.assertEqual([(card.host, card.first_slot) for card in status.remote_cards], [("ci@a", 1), ("ci@b", 3)])
+        self.assertTrue(status.local_card_off)
+        self.assertEqual([(wait.kind, wait.issue) for wait in status.waits], [("whole-device", 5), ("whole-pool", 6)])
+        self.assertEqual(status.unparsed_lines, ())
 
     def test_stalls_keep_the_newest(self) -> None:
         stalls = StateParsers.parse_stalls((FIXTURES / "stalls.log").read_text(), 2)
@@ -1251,7 +1262,8 @@ class HttpServerTest(unittest.TestCase):
         self.assertEqual(dashboard.DashboardApp.ENV_KEYS, frozenset({
             "GH_TOKEN", "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL", "READY_LABEL",
             "LANE_LABEL", "FIRST_LABEL", "LOW_LABEL", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD",
-            "DEVICE_PROBE_CMD", "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "BUILD_LOCK_DIR",
+            "DEVICE_PROBE_CMD", "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
+            "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG", "BUILD_LOCK_DIR",
             "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES"}))
 
     @linux_only
@@ -1322,31 +1334,31 @@ class RunQueueTest(unittest.TestCase):
     def holder(pid: int) -> dict[int, ProcessInfo]:
         return {pid: ProcessInfo(pid, 1, 0.0, ("bash", "/h/bin/run_queue.sh", "--issue", "2502"))}
 
-    def test_a_queue_running_an_arm(self) -> None:
-        lease = RunQueueReader.parse_lease_log((self.QUEUES / "running" / "lease.log").read_text())
+    def test_a_queue_running_a_job(self) -> None:
+        lease = RunQueueReader.parse_queue_log((self.QUEUES / "running" / "queue.log").read_text())
         self.assertEqual((lease.holder_pid, lease.want, lease.busy_since, lease.last_host),
                          (4101, "any", None, "ci@192.0.2.60"))
         status = RunQueueReader.parse_status((self.QUEUES / "running" / "status").read_text())
-        self.assertEqual((status.arm, status.arm_host, status.arm_started, status.finished_at),
+        self.assertEqual((status.job, status.job_host, status.job_started, status.finished_at),
                          ("RS6-on-s1323-render", "ci@192.0.2.60", "2026-11-26T03:03:10Z", None))
 
     def test_a_queue_waiting_for_a_device_keeps_only_the_last_holders_busy_streak(self) -> None:
-        lease = RunQueueReader.parse_lease_log((self.QUEUES / "waiting" / "lease.log").read_text())
+        lease = RunQueueReader.parse_queue_log((self.QUEUES / "waiting" / "queue.log").read_text())
         self.assertEqual((lease.holder_pid, lease.want), (4201, "ci@192.0.2.60"))
         self.assertEqual((lease.busy_since, lease.busy_reason),
                          ("2026-11-26T02:40:00Z", "no remote card is free, alone and quiet"))
-        self.assertIsNone(RunQueueReader.parse_status((self.QUEUES / "waiting" / "status").read_text()).arm)
+        self.assertIsNone(RunQueueReader.parse_status((self.QUEUES / "waiting" / "status").read_text()).job)
 
-    def test_a_stop_word_ends_the_running_arm(self) -> None:
+    def test_a_stop_word_ends_the_running_job(self) -> None:
         text: str = "RS1 start 2026-11-26T02:47:25Z host=h\nNO-LEASE: lost the slot\n"
-        self.assertEqual(RunQueueReader.parse_status(text).arm, "RS1")
+        self.assertEqual(RunQueueReader.parse_status(text).job, "RS1")
         stop = RunQueueReader("", "", ("STOP", "NO-LEASE"), 60).stop_pattern
-        self.assertIsNone(RunQueueReader.parse_status(text, stop).arm)
-        self.assertEqual(RunQueueReader.parse_status("RS1 start 2026-11-26T02:47:25Z\nSTOPPED x\n", stop).arm, "RS1")
+        self.assertIsNone(RunQueueReader.parse_status(text, stop).job)
+        self.assertEqual(RunQueueReader.parse_status("RS1 start 2026-11-26T02:47:25Z\nSTOPPED x\n", stop).job, "RS1")
 
     def test_a_released_queue_is_finished(self) -> None:
         status = RunQueueReader.parse_status((self.QUEUES / "finished" / "status").read_text())
-        self.assertEqual((status.arm, status.finished_at, status.granted_host),
+        self.assertEqual((status.job, status.finished_at, status.granted_host),
                          (None, "2026-11-26T02:51:16Z", "ci@worker-b.local"))
 
     def test_read_queues_names_state_issue_and_liveness(self) -> None:
@@ -1368,7 +1380,7 @@ class RunQueueTest(unittest.TestCase):
                 processes, now)
         by_issue = {queue.issue: queue for queue in queues}
         self.assertEqual(sorted(by_issue), [2464, 2490, 2502])
-        self.assertEqual((by_issue[2502].state, by_issue[2502].arm), ("running", "RS6-on-s1323-render"))
+        self.assertEqual((by_issue[2502].state, by_issue[2502].job), ("running", "RS6-on-s1323-render"))
         self.assertEqual(by_issue[2464].state, "waiting_device")
         self.assertEqual((by_issue[2490].state, by_issue[2490].alive), ("finished", False))
 
@@ -1380,7 +1392,7 @@ class BuildLockTest(unittest.TestCase):
                                    "/tmp/dev-build-remote-dev-a.lock": [99]})
         self.assertEqual(BuildLockReader.parse_lslocks_waiters("not json"), {})
         self.assertEqual(BuildLockReader.parse_lock_file((FIXTURES / "build_lock.txt").read_text()),
-                         (2088784, "/home/x/ai-worktrees/app-2464"))
+                         (2088784, "/home/x/trees/app-2464"))
         self.assertEqual(BuildLockReader.parse_lock_file(""), (None, None))
 
     @linux_only
@@ -1390,7 +1402,7 @@ class BuildLockTest(unittest.TestCase):
         holder_pid, waiter_pid = harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
         scanner: ProcessScanner = ProcessScanner(harness.state)
         lanes = BuildLockReader({"ci@worker-a.local": "wa"}, harness.home / "buildlocks", "dev-build.lock",
-                                "dev-build-remote-{name}.lock", 5).read_lanes(
+                                "dev-build-remote-{name}.lock", 5, str(harness.home / "trees")).read_lanes(
             ["ci@worker-a.local", "ci@192.0.2.6"], scanner.scan_processes(), {})
         by_name = {lane.name: lane for lane in lanes}
         self.assertEqual(sorted(by_name), ["192-0-2-6", "local", "wa"])
@@ -1712,6 +1724,101 @@ class BareInstanceTest(unittest.TestCase):
                 self.assertEqual(dashboard.DashboardApp.env_path(Path(directory)),
                                  Path(directory) / "instance" / "harness.env")
 
+
+
+class InstanceConfigTest(unittest.TestCase):
+    """
+    What the dashboard takes from harness.env: paths, commands and the placeholders they may name.
+    """
+
+    def test_a_worktree_names_its_issue_under_the_configured_root_only(self) -> None:
+        self.assertEqual(StateParsers.issue_from_path("/srv/trees/app-42/src", "/srv/trees/"), 42)
+        self.assertEqual(StateParsers.issue_from_path("/srv/trees/app-7", "/srv/trees"), 7)
+        self.assertIsNone(StateParsers.issue_from_path("/srv/elsewhere/app-42", "/srv/trees"))
+        self.assertIsNone(StateParsers.issue_from_path("/srv/trees/app-42", ""))
+        self.assertEqual(StateParsers.issue_from_path("/srv/runs/2026-11-26-2502-push/runs", ""), 2502)
+
+    def test_the_queue_log_name_is_configurable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runs: Path = Path(directory) / "2026-11-26-2502-push" / "runs"
+            shutil.copytree(FIXTURES / "runqueues" / "running", runs)
+            (runs / "queue.log").rename(runs / "custom.log")
+            processes = {4101: ProcessInfo(4101, 1, 0.0, ("bash", "/h/bin/run_queue.sh"))}
+            default = RunQueueReader(str(Path(directory) / "*" / "runs"), "", (), 6 * 3600).read_queues(
+                processes, time.time())
+            custom = RunQueueReader(str(Path(directory) / "*" / "runs"), "", (), 6 * 3600, "custom.log").read_queues(
+                processes, time.time())
+        self.assertEqual((default[0].holder_pid, default[0].alive), (None, False))
+        self.assertEqual((custom[0].holder_pid, custom[0].state), (4101, "running"))
+
+    def test_commands_expand_only_the_two_harness_placeholders(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        env_file: Path = harness.home / "instance" / "harness.env"
+        env_file.write_text(env_file.read_text() + textwrap.dedent("""\
+            RESOURCE_STATUS_CMD="$HARNESS_HOME/bin/resource-status status '$HOME' \\$PATH"
+            DEVICE_PROBE_CMD="${HARNESS_INSTANCE_DIR}/bin/probe --name=$HARNESS_HOMEX"
+            QUEUE_DEPTH_CMD=$HARNESS_INSTANCE_DIR/bin/count
+        """))
+        with patch.dict(os.environ, {"HARNESS_INSTANCE_DIR": str(harness.home / "instance")}):
+            os.environ.pop("HARNESS_ENV", None)
+            config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                ["--harness-home", str(harness.home)])).config
+        self.assertEqual(config.resource_status_command,
+                         (str(harness.home / "bin" / "resource-status"), "status", "$HOME", "$PATH"))
+        self.assertEqual(config.device_probe_command,
+                         (str(harness.home / "instance" / "bin" / "probe"), "--name=$HARNESS_HOMEX"))
+        self.assertEqual(config.queue_depth_command, (str(harness.home / "instance" / "bin" / "count"),))
+        self.assertEqual(config.worktree_root, str(harness.home / "trees"))
+        self.assertEqual(config.run_queue_log, "queue.log")
+
+    def test_state_and_usage_cache_come_from_the_env_file_and_the_environment_wins(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        env_file: Path = harness.home / "instance" / "harness.env"
+        env_file.write_text(env_file.read_text() + "HARNESS_STATE=$HARNESS_HOME/other-state\n"
+                                                    "USAGE_CACHE=$HOME/usage.json\nRUN_QUEUE_LOG=custom.log\n")
+        base: list[str] = ["--harness-home", str(harness.home)]
+        with patch.dict(os.environ, {"HARNESS_INSTANCE_DIR": str(harness.home / "instance")}):
+            for key in ("HARNESS_ENV", "HARNESS_STATE", "USAGE_CACHE"):
+                os.environ.pop(key, None)
+            config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config
+            self.assertEqual((config.state_dir, config.data_dir, config.usage_cache, config.run_queue_log),
+                             (harness.home / "other-state", harness.home / "other-state" / "dashboard",
+                              Path.home() / "usage.json", "custom.log"))
+            os.environ.update(HARNESS_STATE=str(harness.state), USAGE_CACHE=str(harness.home / "usage-cache.json"))
+            config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config
+            self.assertEqual((config.state_dir, config.usage_cache),
+                             (harness.state, harness.home / "usage-cache.json"))
+            printed = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), *base,
+                                      "--print-data-dir"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(printed.stdout.strip(), str(harness.state / "dashboard"))
+
+    def test_the_device_probe_runs_as_an_argv_here_and_quoted_over_ssh(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home: Path = Path(directory)
+            (home / "state").mkdir()
+            argv: tuple[str, ...] = (sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:]))",
+                                     "GPU X, 5, 10, 20;", "$(id)")
+            config = DashboardConfig(harness_home=home, data_dir=home / "data", repo=None, remote_interval_s=0,
+                                     crontab_command=("true",), device_probe_command=argv)
+            collector: Collector = Collector(config, None, clock=lambda: FixtureHarness.PINNED_EPOCH)
+            self.assertEqual(collector._run_device_probe(), "GPU X, 5, 10, 20; $(id)\n")
+            self.assertIn(shlex.join(argv), collector.remote_probe_script)
+            self.assertNotIn("sh -c", collector.remote_probe_script)
+
+    def test_the_queue_count_runs_queue_depth_cmd_when_set(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        counter: Path = harness.home / "instance" / "count"
+        counter.write_text(f"#!/usr/bin/env bash\necho \"count label=$ISSUE_LABEL\" >> \"{harness.calls_log}\"\n"
+                           "echo 5\n")
+        counter.chmod(0o755)
+        collector: Collector = harness.collector(queue_depth_command=(str(counter),))
+        collector.refresh_claimable_in_place()
+        self.assertEqual(collector._result("claimable_sh").data, 5)
+        self.assertIn("count label=ai:plan", harness.calls())
+        self.assertFalse(any(call.startswith("claimable.sh") for call in harness.calls()))
 
 if __name__ == "__main__":
     unittest.main()

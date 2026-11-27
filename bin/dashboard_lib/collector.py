@@ -63,11 +63,13 @@ class DashboardConfig:
     Where the dashboard reads from and writes to, how often each source refreshes, and the instance's optional
     sources; each optional source left empty keeps its panel off the page.
 
-    `resource_status_command` is an argv printing the resource status format (`remote card|host: <h> (slots a-b)`,
-    `slot N free|HELD|ORPHAN ...`, `device ...`, `operator priority: ...`, `wait ...`). `device_probe_command` is a
-    shell command run on each machine whose first line is `<name>, <util %>, <memory used MiB>, <memory total MiB>`
-    and whose further lines are `<pid>, <memory MiB>, <process name>`. `run_queue_glob` names run folders, each with a
-    `status` and a `lease.log`, live while a process whose first arguments hold `run_queue_holder` holds them.
+    `resource_status_command` is an argv printing the resource status format (`remote device: <h> (slots a-b)`,
+    `slot N free|HELD|ORPHAN ...`, `device ...`, `operator priority: ...`, `wait ...`). `device_probe_command` is an
+    argv run on each machine whose first line is `<name>, <util %>, <memory used MiB>, <memory total MiB>` and whose
+    further lines are `<pid>, <memory MiB>, <process name>`. `queue_depth_command` is the launcher's queue count,
+    an argv printing one integer. `worktree_root` is WORKTREE_ROOT, under which a `<name>-<issue>` directory is that
+    issue's worktree. `run_queue_glob` names run folders, each with a `status` and a `run_queue_log`, live while a
+    process whose first arguments hold `run_queue_holder` holds them.
     `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
     names under `build_lock_dir`.
     """
@@ -104,8 +106,12 @@ class DashboardConfig:
     pid_lookup_retry_s: float = 600.0
     claim_file_max_age_s: float = 172800.0
     resource_status_command: tuple[str, ...] = ()
-    device_probe_command: str = ""
+    device_probe_command: tuple[str, ...] = ()
+    device_probe_timeout_s: float = 5.0
+    queue_depth_command: tuple[str, ...] = ()
+    worktree_root: str = ""
     run_queue_glob: str = ""
+    run_queue_log: str = "queue.log"
     run_queue_holder: str = ""
     run_queue_stop_words: tuple[str, ...] = ()
     run_queue_window_s: float = 21600.0
@@ -148,8 +154,8 @@ class Collector:
     MEMORY_PROBE: ClassVar[str] = r"""
 sed -n '/^MemTotal:/p;/^MemAvailable:/p' /proc/meminfo
 """
-    DEVICE_PROBE: ClassVar[str] = r"""
-device=$(timeout 5 sh -c {command} 2>/dev/null)
+    # The device probe's output is in $device: run as an argv on this host, through the remote shell on another.
+    DEVICE_REPORT: ClassVar[str] = r"""
 echo '--- device'
 printf '%s\n' "$device" | head -1
 echo '--- processes'
@@ -204,17 +210,23 @@ exit 0
         self.local_history_path: Path = config.data_dir / "local_history.tsv"
         self.github_cache_path: Path = config.data_dir / "github_cache.json"
         self.run_queue_reader: RunQueueReader = RunQueueReader(
-            config.run_queue_glob, config.run_queue_holder, config.run_queue_stop_words, config.run_queue_window_s)
+            config.run_queue_glob, config.run_queue_holder, config.run_queue_stop_words, config.run_queue_window_s,
+            config.run_queue_log, config.worktree_root)
         self.build_lock_reader: BuildLockReader = BuildLockReader(
             dict(config.build_lock_names), config.build_lock_dir, config.build_lock_local, config.build_lock_remote,
-            config.command_timeout_s)
+            config.command_timeout_s, config.worktree_root)
         self.flow_builder: FlowBuilder = FlowBuilder(
             config.labels, dict(config.build_lock_names), config.done_window_s,
             device_lanes=bool(config.resource_status_command or config.run_queue_glob),
             build_lanes=config.build_locks_enabled)
-        self.machine_probe_script: str = self.MEMORY_PROBE + (
-            self.DEVICE_PROBE.replace("{command}", shlex.quote(config.device_probe_command))
-            if config.device_probe_command else "") + self.CONTAINER_PROBE
+        device_report: str = 'device=$HARNESS_DEVICE_OUTPUT' + self.DEVICE_REPORT if config.device_probe_command else ""
+        self.local_probe_script: str = self.LOAD_PROBE + self.MEMORY_PROBE + device_report + self.CONTAINER_PROBE
+        # ssh hands its command to the remote user's shell, so a remote probe cannot avoid one. The argv is joined
+        # with each word quoted: that shell runs the same words this host runs, and expands nothing in them.
+        remote_device: str = (f"device=$(timeout {config.device_probe_timeout_s:g} "
+                              f"{shlex.join(config.device_probe_command)} 2>/dev/null)" + self.DEVICE_REPORT
+                              if config.device_probe_command else "")
+        self.remote_probe_script: str = self.MEMORY_PROBE + remote_device + self.CONTAINER_PROBE
         self.flow_tracker: FlowTracker = FlowTracker(config.data_dir / "flow_state.json", config.flow_animate_s)
         self._activity_lock: threading.Lock = threading.Lock()
 
@@ -328,8 +340,9 @@ exit 0
         started: float = self.clock()
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
-                ["bash", "-c", self.LOAD_PROBE + self.machine_probe_script], capture_output=True, text=True,
+                ["bash", "-c", self.local_probe_script], capture_output=True, text=True,
                 timeout=self.config.command_timeout_s * 2, stdin=subprocess.DEVNULL,
+                env=dict(os.environ, HARNESS_DEVICE_OUTPUT=self._run_device_probe()),
             )
             probe: MachineProbe = StateParsers.parse_machine_probe(completed.stdout)
             self._store("local", SourceResult(probe, started, duration_s=self.clock() - started,
@@ -338,6 +351,22 @@ exit 0
         except (OSError, subprocess.TimeoutExpired) as error:
             self._store_failure("local", self._describe_error(error), started)
         self._store("paused", SourceResult(self._read_paused_state(), started, attempted_at=started))
+
+    def _run_device_probe(self) -> str:
+        """
+        Runs the device probe on this host, as an argv with no shell.
+
+        Returns:
+            Its stdout, or an empty string when there is no probe or it fails or times out; the device row then
+            shows no reading.
+        """
+        if not self.config.device_probe_command:
+            return ""
+        try:
+            return subprocess.run(list(self.config.device_probe_command), capture_output=True, text=True,
+                                  timeout=self.config.device_probe_timeout_s, stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
 
     def refresh_remote_probes_in_place(self) -> None:
         """
@@ -358,7 +387,7 @@ exit 0
         def probe_host(host: str) -> SourceResult:
             host_started: float = self.clock()
             row = latest.get(host)
-            script = self.machine_probe_script
+            script = self.remote_probe_script
             if (row is None or row.load1 is None or row.nproc is None
                     or host_started - row.epoch > self.config.host_health_stale_s):
                 script = self.LOAD_PROBE + script
@@ -440,7 +469,8 @@ exit 0
 
     def refresh_claimable_in_place(self) -> None:
         """
-        Runs bin/claimable.sh for the queue label, as the launcher does, and keeps its count.
+        Runs QUEUE_DEPTH_CMD, else bin/claimable.sh, for the queue label with the labels the launcher passes it, and
+        keeps its count.
         """
         started: float = self.clock()
         if self.github is None:
@@ -455,12 +485,13 @@ exit 0
         })
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
-                [str(self.config.harness_home / "bin" / "claimable.sh")], capture_output=True, text=True,
+                list(self.config.queue_depth_command) or [str(self.config.harness_home / "bin" / "claimable.sh")],
+                capture_output=True, text=True,
                 timeout=self.config.claimable_timeout_s, env=environment, stdin=subprocess.DEVNULL,
             )
             output: str = completed.stdout.strip()
             if completed.returncode != 0 or not output.isdigit():
-                raise RuntimeError(self.github.redact(f"claimable.sh exit {completed.returncode}: "
+                raise RuntimeError(self.github.redact(f"queue count exit {completed.returncode}: "
                                                       f"{(completed.stderr or output).strip()[-200:]}"))
             self._store("claimable_sh", SourceResult(int(output), started, duration_s=self.clock() - started,
                                                      attempted_at=started))

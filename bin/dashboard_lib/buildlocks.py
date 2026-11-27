@@ -19,14 +19,14 @@ class BuildLockReader:
 
     The holder is the pid the build writes into the lock file (`pid <n>, <tree>, ...`), while it lives: lslocks
     cannot name a holder whose descriptor a child inherited. The waiters are lslocks' blocked
-    entries on the file. A party's issue comes from its worktree (`ai-worktrees/<prefix>-<issue>`), read from
+    entries on the file. A party's issue comes from its worktree (`<WORKTREE_ROOT>/<name>-<issue>`), read from
     the lock file for the holder and from the working directory for a waiter, else from the tick above it.
     """
 
     LOCK_FILE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^pid (\d+), ([^,]*)")
 
     def __init__(self, lock_names: dict[str, str], lock_dir: Path, local_file: str, remote_file: str,
-                 timeout_s: float) -> None:
+                 timeout_s: float, worktree_root: str = "") -> None:
         """
         Args:
             lock_names: Remote host to its lock name (`user@host-a` to `a`), from BUILD_LOCK_NAMES; a host without
@@ -35,12 +35,14 @@ class BuildLockReader:
             local_file: This host's lock file name.
             remote_file: A remote host's lock file name, with `{name}` for its lock name.
             timeout_s: lslocks timeout.
+            worktree_root: WORKTREE_ROOT, under which a party's worktree names its issue.
         """
         self.lock_names: dict[str, str] = lock_names
         self.lock_dir: Path = lock_dir
         self.local_file: str = local_file
         self.remote_file: str = remote_file
         self.timeout_s: float = timeout_s
+        self.worktree_root: str = worktree_root
 
     def read_lanes(self, hosts: list[str], processes: dict[int, ProcessInfo],
                    issue_by_tick_pid: dict[int, int]) -> tuple[BuildLane, ...]:
@@ -73,13 +75,13 @@ class BuildLockReader:
             holder: LockParty | None = None
             holder_pid, holder_tree = self.parse_lock_file(self._read_text(path))
             if holder_pid is not None and holder_pid in processes:
-                holder = LockParty(holder_pid, StateParsers.issue_from_path(holder_tree or "")
+                holder = LockParty(holder_pid, StateParsers.issue_from_path(holder_tree or "", self.worktree_root)
                                    or self._tick_issue(holder_pid, processes, issue_by_tick_pid),
                                    os.path.basename(holder_tree.rstrip("/")) if holder_tree else None, True)
             waiters: list[LockParty] = []
             for pid in waiting_pids_by_path.get(str(path), []):
                 working_directory: str = self._working_directory(pid)
-                waiters.append(LockParty(pid, StateParsers.issue_from_path(working_directory)
+                waiters.append(LockParty(pid, StateParsers.issue_from_path(working_directory, self.worktree_root)
                                          or self._tick_issue(pid, processes, issue_by_tick_pid),
                                          os.path.basename(working_directory) or None, pid in processes))
             lanes.append(BuildLane(name, host, str(path), holder, tuple(waiters)))

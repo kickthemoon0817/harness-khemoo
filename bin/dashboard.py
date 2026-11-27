@@ -9,7 +9,9 @@ auto-refreshing page (`/`) and as JSON (`/api/state`).
 
 The config file is $HARNESS_ENV, else $HARNESS_INSTANCE_DIR/harness.env (default <harness home>/instance). From it
 the dashboard reads only ENV_KEYS; GH_TOKEN reaches `gh` through its environment and is never shown. A panel whose
-key is unset is left off the page. bin/dashboard.sh starts this detached.
+key is unset is left off the page. HARNESS_STATE and USAGE_CACHE in the environment win over the file's. The file
+is never evaluated: a command key may name `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`, a path key `$HOME` too,
+and no other `$` text is expanded. bin/dashboard.sh starts this detached.
 """
 import argparse
 import gzip
@@ -287,7 +289,8 @@ class DashboardApp:
     }
     ENV_KEYS: ClassVar[frozenset[str]] = frozenset({
         "GH_TOKEN", "GH_REPO", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD", "DEVICE_PROBE_CMD",
-        "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS",
+        "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
+        "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG",
         "BUILD_LOCK_DIR", "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", *LABEL_KEYS,
     })
     URL_FILE_NAME: ClassVar[str] = "dashboard.url"
@@ -299,14 +302,25 @@ class DashboardApp:
         """
         self.options: argparse.Namespace = options
         harness_home: Path = Path(options.harness_home).resolve()
-        harness_state: Path = Path(os.environ.get("HARNESS_STATE") or harness_home / "state").resolve()
         env_values: dict[str, str] = HarnessEnvReader.read_keys(self.env_path(harness_home), self.ENV_KEYS)
+        command_placeholders: dict[str, str] = {"HARNESS_HOME": str(harness_home),
+                                                "HARNESS_INSTANCE_DIR": str(self.instance_dir(harness_home))}
+        path_placeholders: dict[str, str] = dict(command_placeholders, HOME=str(Path.home()))
+
+        def path_setting(key: str) -> str:
+            return os.environ.get(key) or HarnessEnvReader.expand(env_values.get(key, ""), path_placeholders)
+
+        def command_setting(key: str) -> tuple[str, ...]:
+            try:
+                words: list[str] = shlex.split(env_values.get(key, ""))
+            except ValueError as error:
+                sys.exit(f"{key} does not parse: {error}")
+            return tuple(HarnessEnvReader.expand(word, command_placeholders) for word in words)
+
+        harness_state: Path = Path(path_setting("HARNESS_STATE") or harness_home / "state").expanduser().resolve()
         self.github_token: str = env_values.get("GH_TOKEN", "")
         repo: str | None = options.repo or env_values.get("GH_REPO") or os.environ.get("GH_REPO") or None
-        try:
-            resource_status_command: tuple[str, ...] = tuple(shlex.split(env_values.get("RESOURCE_STATUS_CMD", "")))
-        except ValueError as error:
-            sys.exit(f"RESOURCE_STATUS_CMD does not parse: {error}")
+        usage_cache: str = options.usage_cache or path_setting("USAGE_CACHE") or "~/.claude/usage-cache.json"
         self.config: DashboardConfig = DashboardConfig(
             harness_home=harness_home,
             harness_state=harness_state,
@@ -315,16 +329,19 @@ class DashboardApp:
             title=env_values.get("DASHBOARD_TITLE") or "Harness status",
             lane_model=env_values.get("LANE_MODEL", ""),
             labels=self._labels(env_values, options),
-            usage_cache=Path(options.usage_cache).expanduser(),
+            usage_cache=Path(usage_cache).expanduser(),
             gh_binary=options.gh,
             history_hours=options.history_hours,
             github_interval_s=options.github_interval,
             local_interval_s=options.local_interval,
             remote_interval_s=options.remote_interval,
             claimable_interval_s=options.claimable_interval,
-            resource_status_command=resource_status_command,
-            device_probe_command=env_values.get("DEVICE_PROBE_CMD", ""),
+            resource_status_command=command_setting("RESOURCE_STATUS_CMD"),
+            device_probe_command=command_setting("DEVICE_PROBE_CMD"),
+            queue_depth_command=command_setting("QUEUE_DEPTH_CMD"),
+            worktree_root=path_setting("WORKTREE_ROOT"),
             run_queue_glob=env_values.get("RUN_QUEUE_GLOB", ""),
+            run_queue_log=env_values.get("RUN_QUEUE_LOG") or "queue.log",
             run_queue_holder=env_values.get("RUN_QUEUE_HOLDER", ""),
             run_queue_stop_words=tuple(env_values.get("RUN_QUEUE_STOP_WORDS", "").split()),
             build_lock_dir=Path(env_values.get("BUILD_LOCK_DIR") or "/tmp"),
@@ -343,6 +360,9 @@ class DashboardApp:
         Returns:
             The exit status.
         """
+        if self.options.print_data_dir:
+            print(self.config.data_dir)
+            return 0
         if self.options.once:
             self.collector.config.data_dir.mkdir(parents=True, exist_ok=True)
             self.collector.refresh_local_sample_in_place()
@@ -381,17 +401,28 @@ class DashboardApp:
         return 0
 
     @staticmethod
+    def instance_dir(harness_home: Path) -> Path:
+        """
+        Args:
+            harness_home: The harness checkout.
+
+        Returns:
+            $HARNESS_INSTANCE_DIR, else `<harness home>/instance`.
+        """
+        return Path(os.environ.get("HARNESS_INSTANCE_DIR") or harness_home / "instance")
+
+    @staticmethod
     def env_path(harness_home: Path) -> Path:
         """
         Args:
             harness_home: The harness checkout.
 
         Returns:
-            $HARNESS_ENV, else harness.env in $HARNESS_INSTANCE_DIR (default `<harness home>/instance`).
+            $HARNESS_ENV, else harness.env in the instance directory.
         """
         if os.environ.get("HARNESS_ENV"):
             return Path(os.environ["HARNESS_ENV"])
-        return Path(os.environ.get("HARNESS_INSTANCE_DIR") or harness_home / "instance") / "harness.env"
+        return DashboardApp.instance_dir(harness_home) / "harness.env"
 
     @staticmethod
     def write_private_file(path: Path, text: str) -> None:
@@ -458,7 +489,9 @@ class DashboardApp:
         parser.add_argument("--queue-label", default=None,
                             help="the label claimable.sh counts (default: ISSUE_LABEL from harness.env, else ai)")
         parser.add_argument("--all-label", default="ai", help="label of every issue the queue panels list")
-        parser.add_argument("--usage-cache", default=os.environ.get("USAGE_CACHE", "~/.claude/usage-cache.json"))
+        parser.add_argument("--usage-cache", default=None,
+                            help="usage reading (default: $USAGE_CACHE, else USAGE_CACHE from harness.env, "
+                                 "else ~/.claude/usage-cache.json)")
         parser.add_argument("--gh", default="gh", help="gh executable")
         parser.add_argument("--refresh", type=int, default=30, help="snapshot and page refresh interval, seconds")
         parser.add_argument("--history-hours", type=float, default=6.0, help="sparkline window")
@@ -467,9 +500,11 @@ class DashboardApp:
         parser.add_argument("--remote-interval", type=float, default=120.0,
                             help="read-only ssh probe of each remote host; 0 turns it off")
         parser.add_argument("--claimable-interval", type=float, default=300.0,
-                            help="how often to run bin/claimable.sh; 0 turns it off")
+                            help="how often to run QUEUE_DEPTH_CMD, else bin/claimable.sh; 0 turns it off")
         parser.add_argument("--done-hours", type=float, default=6.0, help="how long a closed issue stays as done")
         parser.add_argument("--once", action="store_true", help="print one JSON snapshot and exit")
+        parser.add_argument("--print-data-dir", action="store_true",
+                            help="print the data directory this start would use and exit")
         return parser.parse_args(arguments)
 
     @staticmethod

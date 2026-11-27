@@ -34,14 +34,15 @@ class StateParsers:
 
     HOST_HEALTH_COLUMNS: ClassVar[int] = 9
     REMOTE_CARD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^remote (?:card|host): (\S+) \(slots (\d+)-(\d+)\)$")
+        r"^remote (?:device|card|host): (\S+) \(slots (\d+)-(\d+)\)$")
+    LOCAL_OFF_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^local (?:device|card|host): off\b")
     HARNESS_ONLY_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^harness ticks: (.*?) only\b")
     SLOT_FREE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^slot (\d+) free$")
     SLOT_HELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^(?:slot (\d+)|device) (HELD|ORPHAN) (\S+) (\d+) (\S+)((?: \S+)*?) \((alive|pid dead)\)$"
     )
     WAIT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^wait (whole-card|whole-pool|single-slot) issue (\d+) for (-?\d+) min(?: \((.*)\))?$"
+        r"^wait (whole-device|whole-card|whole-pool|single-slot) issue (\d+) for (-?\d+) min(?: \((.*)\))?$"
     )
     STALL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\S+) STALL (\S+) (\S+) ?(.*)$")
     ALLOCATOR_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{8}T\d{6}Z) (.*)$")
@@ -49,7 +50,6 @@ class StateParsers:
     MODEL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
     TOOL_EVAL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\beval '(.*)' < /dev/null", re.DOTALL)
     DOCKER_CGROUP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"docker[-/]([0-9a-f]{12})")
-    WORKTREE_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"ai-worktrees/[A-Za-z][A-Za-z0-9]*-(\d+)(?:/|$)")
     PACKET_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|/)\d{4}-\d{2}-\d{2}-(\d+)-[^/]*(?:/|$)")
 
     @staticmethod
@@ -131,7 +131,8 @@ class StateParsers:
     @staticmethod
     def parse_lease_status(text: str) -> LeaseStatus:
         """
-        Parses the resource status format; `card` and `host` name the same thing in its `remote` and `local` lines.
+        Parses the resource status format; `device`, `card` and `host` name the same thing in its `remote` and
+        `local` lines, and `whole-device` and `whole-card` the same wait.
 
         Args:
             text: The command's stdout.
@@ -159,15 +160,14 @@ class StateParsers:
                 remote_cards.append(RemoteCard(card_match.group(1), int(card_match.group(2)), int(card_match.group(3))))
             elif only_match:
                 harness_only_hosts = tuple(only_match.group(1).split())
-            elif line.startswith(("local card: off", "local host: off")):
+            elif StateParsers.LOCAL_OFF_PATTERN.match(line):
                 local_card_off = True
             elif line.startswith("operator priority:"):
                 operator_priority = tuple(line.split(":", 1)[1].split())
             elif wait_match:
-                waits.append(
-                    LeaseWait(wait_match.group(1), int(wait_match.group(2)), int(wait_match.group(3)),
-                              wait_match.group(4) or "")
-                )
+                kind: str = "whole-device" if wait_match.group(1) == "whole-card" else wait_match.group(1)
+                waits.append(LeaseWait(kind, int(wait_match.group(2)), int(wait_match.group(3)),
+                                       wait_match.group(4) or ""))
             elif line.startswith("slot ") or line.startswith("device "):
                 pending_slot_lines.append(line)
             else:
@@ -373,19 +373,22 @@ class StateParsers:
         )
 
     @staticmethod
-    def issue_from_path(path: str) -> int | None:
+    def issue_from_path(path: str, worktree_root: str) -> int | None:
         """
-        Reads the issue a worktree or evidence packet belongs to from its path.
+        Reads the issue a worktree or run packet belongs to from its path.
 
         Args:
-            path: A path holding an `ai-worktrees/<prefix>-<issue>` worktree or a
-                `<YYYY-MM-DD>-<issue>-<slug>` packet.
+            path: A path holding a `<worktree root>/<name>-<issue>` worktree or a `<YYYY-MM-DD>-<issue>-<slug>`
+                packet.
+            worktree_root: WORKTREE_ROOT; empty matches no worktree.
 
         Returns:
             The issue number, or None when the path names neither.
         """
-        match: re.Match[str] | None = StateParsers.WORKTREE_ISSUE_PATTERN.search(path) \
-            or StateParsers.PACKET_ISSUE_PATTERN.search(path)
+        root: str = worktree_root.rstrip("/")
+        worktree_match: re.Match[str] | None = re.search(
+            re.escape(root) + r"/[A-Za-z][A-Za-z0-9]*-(\d+)(?:/|$)", path) if root else None
+        match: re.Match[str] | None = worktree_match or StateParsers.PACKET_ISSUE_PATTERN.search(path)
         return int(match.group(1)) if match else None
 
     @staticmethod
