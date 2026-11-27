@@ -30,17 +30,21 @@ harness_load() {
 }
 
 # Prints the [HOST/]OWNER/NAME that gh takes for the origin remote of checkout $1, or nothing
-# when it has no origin or the URL has no owner/name path.
+# when it has no origin, the URL has no owner/name path, or its host is not a real host name.
 harness_repo_from_origin() {
-    local url host path
+    local url host path ssh_url=""
     url=$(git -C "$1" remote get-url origin 2>/dev/null) || return 0
     case "$url" in
+        ssh://*) ssh_url=1; url=${url#ssh://}; url=${url#*@}; host=${url%%/*}; path=${url#*/} ;;
         *://*) url=${url#*://}; url=${url#*@}; host=${url%%/*}; path=${url#*/} ;;
-        *:*) url=${url#*@}; host=${url%%:*}; path=${url#*:} ;;
+        *:*) ssh_url=1; url=${url#*@}; host=${url%%:*}; path=${url#*:} ;;
         *) return 0 ;;
     esac
     host=${host%%:*}; path=${path%/}; path=${path%.git}
-    [[ "$path" =~ ^[^/]+/[^/]+$ ]] || return 0
+    # An ssh remote may name a ~/.ssh/config alias (github-work), which gh would take for an
+    # Enterprise host; ssh resolves it to the host it connects to.
+    [ -n "$ssh_url" ] && [ -n "$host" ] && host=$(ssh -G "$host" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+    [[ "$path" =~ ^[^/]+/[^/]+$ ]] && [[ "$host" == *.* ]] || return 0
     if [ "$host" = github.com ]; then echo "$path"; else echo "$host/$path"; fi
 }
 

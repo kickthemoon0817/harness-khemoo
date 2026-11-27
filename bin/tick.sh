@@ -66,7 +66,7 @@ instance_missing() {
             while [ ! -e "$root" ] && [ "$root" != / ]; do root=$(dirname "$root"); done
             [ -d "$root" ] && [ -w "$root" ] || echo "a WORKTREE_ROOT that exists or can be created ($WORKTREE_ROOT)"
         fi
-        [ -n "${GH_REPO:-}" ] || echo "$HARNESS_ENV_FILE: GH_REPO unset, and TARGET_REPO's origin names no repository"
+        [ -n "${GH_REPO:-}" ] || echo "$HARNESS_ENV_FILE: GH_REPO unset, and TARGET_REPO's origin names no GitHub repository: set GH_REPO in harness.env"
         if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
             read -r -a argv <<<"$QUEUE_DEPTH_CMD"
             type -P -- "${argv[0]}" >/dev/null || echo "an executable QUEUE_DEPTH_CMD (${argv[0]})"

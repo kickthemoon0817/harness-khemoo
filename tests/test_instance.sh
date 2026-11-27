@@ -28,6 +28,12 @@ cat > "$H/fakebin/queue" <<'EOF'
 printf '%s\n' "argv=$(tr '\0' ' ' < /proc/$$/cmdline)" "token=${GH_TOKEN:-unset}" > "$FAKE_QUEUE_SEEN"
 case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) echo 1 ;; esac
 EOF
+# ssh -G prints the host an alias resolves to, and an unknown name as itself.
+cat > "$H/fakebin/ssh" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -G ] || exit 255
+case "$2" in github-work) echo "hostname github.com" ;; *) echo "hostname $2" ;; esac
+EOF
 cat > "$H/fakebin/crontab" <<'EOF'
 #!/usr/bin/env bash
 [ -e "$FAKE_NO_CRON" ] || echo "*/2 * * * * $HARNESS_HOME/bin/tick.sh"
@@ -55,7 +61,7 @@ EOF
 }
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.txt" FAKE_ENV="$H/env.txt" \
     FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" FAKE_LINT_ENV="$H/lint-env.txt" \
-    FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron"
+    PATH="$H/fakebin:$PATH" FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron"
 LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
@@ -111,6 +117,21 @@ check_with "GH_REPO="
 check "an unset GH_REPO is derived from the origin remote" '[ "$rc" -eq 0 ] && grep -q "repository:    derived-org/derived-repo" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 launch
 check "the derived GH_REPO reaches the prompt" 'sed -n 3p "$FAKE_PROMPT" | grep -q "^Core rules for derived-org/derived-repo:"' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
+derive() {  # origin URL, expected repository or "none"
+    want_repo=$2; git -C "$H/target" remote set-url origin "$1"; check_with "GH_REPO="
+    if [ "$2" = none ]; then
+        check "no GH_REPO is derived from $1" '[ "$rc" -eq 1 ] && grep -q "set GH_REPO in harness.env" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+    else
+        check "GH_REPO $2 is derived from $1" '[ "$rc" -eq 0 ] && grep -qx "repository:    $want_repo" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+    fi
+}
+derive git@github-work:alias-org/alias-repo.git alias-org/alias-repo
+derive ssh://git@github-work/alias-org/alias-repo alias-org/alias-repo
+derive git@no-such-alias:o/n.git none
+derive file:///o/n none
+derive https://github.com/https-org/https-repo.git https-org/https-repo
+derive git@github.com:scp-org/scp-repo.git scp-org/scp-repo
+derive https://ghe.example.com/ent-org/ent-repo ghe.example.com/ent-org/ent-repo
 git -C "$H/target" remote remove origin
 printf '#!/usr/bin/env bash\nexit 0\n' > "$I/hooks/worktree-busy"; chmod -x "$I/hooks/worktree-busy"
 check_with

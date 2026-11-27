@@ -20,7 +20,10 @@ come from the environment only. `harness_load` sources the config, puts `$HARNES
 first on PATH, and exports `HARNESS_HOME`, `HARNESS_INSTANCE_DIR`, `HARNESS_STATE`, `GH_REPO` and each
 name in `TICK_EXPORTS`. An empty `GH_REPO` is derived from the `origin` remote of `TARGET_REPO`, as the
 `[HOST/]OWNER/NAME` that `gh --repo` takes, so every `gh` call and queue count names the same
-repository. A name in `TICK_EXPORTS` that is not a valid variable name is reported on stderr and
+repository. An ssh remote's host goes through `ssh -G`, so a `~/.ssh/config` alias resolves to the
+host it names; `github.com` gives `OWNER/NAME`, another host name with a dot gives
+`HOST/OWNER/NAME`, and anything else (an unresolved alias, a `file://` remote) derives nothing, so
+`check` asks for `GH_REPO`. A name in `TICK_EXPORTS` that is not a valid variable name is reported on stderr and
 skipped.
 
 `tick.sh` also exports `TARGET_REPO`, `WORKTREE_ROOT`, the lint's `PUBLIC_RECORD_RULES`,
@@ -35,8 +38,8 @@ The dashboard reads the same file without sourcing it. It matches plain `KEY=val
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`), split shell-style first,
 `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`), those two and `$HOME`. `HARNESS_STATE` and `USAGE_CACHE` from the environment win
-over the file's. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
+`WORKTREE_ROOT`), those two and `$HOME`. A path key from the environment wins over the file's. An
+empty `GH_REPO` is derived through `bin/instance-lib.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
@@ -57,7 +60,8 @@ derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is se
 resolves on the PATH. Until then the launcher starts nothing. It logs
 `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log` at most once an
 hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, `CLAUDE_BIN`, models,
-lane, each hook's state (`present`, `none`, or `present but not executable (ignored)`), the hold state,
+lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
+`present but not readable (ignored)`), the hold state,
 and whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
 `bin/tick.sh`). It prints `missing: <item>` for each gap and exits 1, or prints `instance complete`
 and exits 0.
@@ -78,10 +82,10 @@ it finds nothing. A failed lane or landing count starts no lane or landing tick.
 
 ## Worktrees
 
-A tick's worktree is the directory `$WORKTREE_ROOT/<name>-<issue>` (a word, a hyphen, the issue
+A tick's worktree is the directory `$WORKTREE_ROOT/<name>-<issue>` (a name, a hyphen, the issue
 number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree_gc.sh` reads a
-worktree's issue from its branch, else from its directory name, and never removes one that names no
-issue. The dashboard reads the issue from the directory name.
+worktree's issue from its branch, else from the trailing number of its directory name, and never removes one that names no
+issue. The dashboard reads the issue from the directory name the same way.
 
 ## Hooks
 
