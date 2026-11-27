@@ -290,6 +290,7 @@ dependencies = [
  "clap",
  "fleet-proto",
  "ipnet",
+ "rcgen",
  "rustix",
  "rustls",
  "rustls-pki-types",
