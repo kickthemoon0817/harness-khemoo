@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Exercises bin/dashboard.py: the state-file parsers, the tick-to-issue mapping, the queue grouping, and the
-collector, page and HTTP server against a scratch harness home with a fake lease.sh, claimable.sh and gh.
+collector, page and HTTP server against a scratch harness home with a fake resource status command, claimable.sh
+and gh, and the dashboard with none of the instance's optional sources configured.
 """
 import contextlib
 import gzip
@@ -55,8 +56,8 @@ linux_only = unittest.skipUnless(sys.platform.startswith("linux"), "needs /proc,
 
 class FixtureHarness:
     """
-    A scratch harness home: state files from the fixtures, a fake lease.sh, claimable.sh and gh, a harness.env
-    holding a fake token, and a fake tick process.
+    A scratch harness home: state files from the fixtures, a fake resource status command, claimable.sh and gh,
+    an instance harness.env holding a fake token and every optional source, and a fake tick process.
     """
 
     FAKE_TOKEN: ClassVar[str] = "ghp_FAKEtokenFAKEtokenFAKEtoken0123456789"
@@ -70,7 +71,7 @@ class FixtureHarness:
         self.tick_processes: list[subprocess.Popen[bytes]] = []
         self._slot_lock_files: list[Any] = []
         self.helper_processes: list[subprocess.Popen[bytes]] = []
-        for directory in (self.home / "bin", self.home / "config", self.state / "locks", self.state / "logs",
+        for directory in (self.home / "bin", self.home / "instance", self.state / "locks", self.state / "logs",
                           self.state / "model-cooldown", self.home / "evidence", self.home / "buildlocks"):
             directory.mkdir(parents=True)
         shutil.copy(FIXTURES / "host_health.tsv", self.state / "host_health.tsv")
@@ -78,10 +79,10 @@ class FixtureHarness:
         shutil.copy(FIXTURES / "stalls.log", self.state / "stalls.log")
         shutil.copy(FIXTURES / "allocator.log", self.state / "logs" / "allocator.log")
         shutil.copy(FIXTURES / "usage-cache.json", self.home / "usage-cache.json")
-        (self.state / "tick-model").write_text("claude-opus-5-5 claude-fable-5-2\n")
-        (self.state / "model-cooldown" / "claude-fable-5-2").touch()
+        (self.state / "tick-model").write_text("claude-opus-5-5 claude-sonnet-5-2\n")
+        (self.state / "model-cooldown" / "claude-sonnet-5-2").touch()
         (self.state / "locks" / "claim.2501").write_text(f"2501 {os.getpid()} 2026-11-26T01:10:00Z\n")
-        (self.home / "config" / "harness.env").write_text(textwrap.dedent(f"""\
+        (self.home / "instance" / "harness.env").write_text(textwrap.dedent(f"""\
             # fixture
             TARGET_REPO=/nowhere
             export GH_TOKEN="{self.FAKE_TOKEN}"
@@ -89,11 +90,23 @@ class FixtureHarness:
             ISSUE_LABEL=ai:plan
             FIRST_LABEL=ai:first
             LOW_LABEL="ai:low"
+            LANE_LABEL=ai:lane
+            LANE_MODEL=claude-sonnet-5-2
+            DASHBOARD_TITLE="Fixture <b>harness</b>"
+            RESOURCE_STATUS_CMD="'{self.home / 'bin' / 'resource-status'}' status"
+            DEVICE_PROBE_CMD="cat '{FIXTURES / 'device_probe.txt'}'"
+            RUN_QUEUE_GLOB={self.home / 'evidence'}/*/runs*
+            RUN_QUEUE_HOLDER=run_queue.sh
+            RUN_QUEUE_STOP_WORDS="STOP YIELD NO-LEASE"
+            BUILD_LOCK_DIR={self.home / 'buildlocks'}
+            BUILD_LOCK_LOCAL=dev-build.lock
+            BUILD_LOCK_REMOTE=dev-build-remote-{{name}}.lock
+            BUILD_LOCK_NAMES="ci@worker-a.local=wa ci@192.0.2.6=laptop"
             OTHER_SECRET=do-not-read
         """))
-        self._write_script("lease.sh", f"""\
+        self._write_script("resource-status", f"""\
             #!/usr/bin/env bash
-            echo "lease.sh $*" >> "{self.calls_log}"
+            echo "resource-status $*" >> "{self.calls_log}"
             if [ -s "{self.home / 'lease_override.txt'}" ]; then cat "{self.home / 'lease_override.txt'}"
             else cat "{FIXTURES / 'lease_status.txt'}"; fi
         """)
@@ -187,7 +200,7 @@ class FixtureHarness:
 
     def start_fake_queue(self, issue: int, runs: str, status: str, lease_log: str) -> int:
         """
-        Writes a run folder and starts a process that looks like its bin/arm_queue.sh holder.
+        Writes a run folder and starts a process that looks like its run_queue.sh holder.
 
         Args:
             issue: The issue its packet is named for.
@@ -198,7 +211,7 @@ class FixtureHarness:
         Returns:
             The holder's pid.
         """
-        script: Path = self.home / "bin" / "arm_queue.sh"
+        script: Path = self.home / "bin" / "run_queue.sh"
         script.write_text("sleep 30\n")
         holder = subprocess.Popen(["bash", str(script)], start_new_session=True)
         self.helper_processes.append(holder)
@@ -210,17 +223,17 @@ class FixtureHarness:
 
     def hold_build_lock(self, name: str, holder_issue: int, waiter_issue: int) -> tuple[int, int]:
         """
-        Takes a build lock as iter.sh does (pid and tree written into it) and starts a waiter in another tree.
+        Takes a build lock as a build does (pid and tree written into it) and starts a waiter in another tree.
 
         Args:
-            name: The lock name, `worv-dev-build-remote-<name>.lock`.
+            name: The lock name, `dev-build-remote-<name>.lock`.
             holder_issue: The issue of the holder's worktree.
             waiter_issue: The issue of the waiter's worktree, its working directory.
 
         Returns:
             The holder's and the waiter's pids.
         """
-        lock: Path = self.home / "buildlocks" / f"worv-dev-build-remote-{name}.lock"
+        lock: Path = self.home / "buildlocks" / f"dev-build-remote-{name}.lock"
         holder = subprocess.Popen(["bash", "-c", 'exec 8>"$1"; flock 8; sleep 30', "_", str(lock)],
                                   start_new_session=True)
         self.helper_processes.append(holder)
@@ -228,8 +241,8 @@ class FixtureHarness:
         while time.time() < deadline and not lock.exists():
             time.sleep(0.05)
         time.sleep(0.2)
-        lock.write_text(f"pid {holder.pid}, {self.home}/ai-worktrees/mpm-{holder_issue}, worv.env.manure\n")
-        tree: Path = self.home / "ai-worktrees" / f"mpm-{waiter_issue}"
+        lock.write_text(f"pid {holder.pid}, {self.home}/ai-worktrees/app-{holder_issue}, app\n")
+        tree: Path = self.home / "ai-worktrees" / f"app-{waiter_issue}"
         tree.mkdir(parents=True, exist_ok=True)
         waiter = subprocess.Popen(["flock", str(lock), "sleep", "30"], cwd=tree, start_new_session=True)
         self.helper_processes.append(waiter)
@@ -251,10 +264,15 @@ class FixtureHarness:
         """
         fields: dict[str, Any] = dict(
             harness_home=self.home, data_dir=self.home / "dashboard-data", repo="example/repo",
-            labels=QueueLabels(queue="ai:plan"), usage_cache=self.home / "usage-cache.json",
+            labels=QueueLabels(queue="ai:plan", lane="ai:lane"), usage_cache=self.home / "usage-cache.json",
             gh_binary=str(self.home / "bin" / "gh"), remote_interval_s=0,
             crontab_command=(str(self.home / "bin" / "crontab"),),
-            evidence_root=self.home / "evidence", build_lock_dir=self.home / "buildlocks",
+            resource_status_command=(str(self.home / "bin" / "resource-status"), "status"),
+            device_probe_command=f"cat '{FIXTURES / 'device_probe.txt'}'",
+            run_queue_glob=str(self.home / "evidence" / "*" / "runs*"), run_queue_holder="run_queue.sh",
+            run_queue_stop_words=("STOP", "YIELD", "NO-LEASE"),
+            build_lock_dir=self.home / "buildlocks", build_lock_local="dev-build.lock",
+            build_lock_remote="dev-build-remote-{name}.lock",
             build_lock_names=(("ci@worker-a.local", "wa"), ("ci@192.0.2.6", "laptop")),
         )
         fields.update(overrides)
@@ -365,9 +383,9 @@ class ParserTest(unittest.TestCase):
 
     def test_stalls_keep_the_newest(self) -> None:
         stalls = StateParsers.parse_stalls((FIXTURES / "stalls.log").read_text(), 2)
-        self.assertEqual([stall.kind for stall in stalls], ["lock_wait", "gpu_idle"])
-        self.assertEqual(stalls[0].key, "/tmp/worv-dev-build-remote-w03.lock")
-        self.assertTrue(stalls[1].detail.startswith("card 0 %"))
+        self.assertEqual([stall.kind for stall in stalls], ["lock_wait", "device_idle"])
+        self.assertEqual(stalls[0].key, "/tmp/dev-build-remote-dev-a.lock")
+        self.assertTrue(stalls[1].detail.startswith("device 0 %"))
 
     def test_allocator_lines(self) -> None:
         lines = StateParsers.parse_allocator((FIXTURES / "allocator.log").read_text(), 10)
@@ -400,17 +418,17 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(probe.gpu.name, "NVIDIA GeForce RTX 5080")
         self.assertEqual((probe.gpu.util_pct, probe.gpu.mem_used_mb, probe.gpu.mem_total_mb), (63.0, 5940.0, 16303.0))
         self.assertEqual([(process.pid, process.container) for process in probe.gpu_processes],
-                         [(3557139, "worv-iter-4"), (4100000, None)])
-        self.assertEqual([container.name for container in probe.containers], ["worv-iter-4", "isaac_sim_dev"])
+                         [(3557139, "dev-run-4"), (4100000, None)])
+        self.assertEqual([container.name for container in probe.containers], ["dev-run-4", "sim_dev"])
 
-    def test_machine_probe_without_card(self) -> None:
-        probe = StateParsers.parse_machine_probe("load 0.5 4\n--- gpu\n--- apps\n--- cgroup\n--- docker\n")
+    def test_machine_probe_without_device(self) -> None:
+        probe = StateParsers.parse_machine_probe("load 0.5 4\n--- docker\n")
         self.assertIsNone(probe.gpu)
         self.assertEqual(probe.gpu_processes, ())
 
     def test_model_label(self) -> None:
         self.assertEqual(StateParsers.model_label("claude-opus-5-5"), "Opus 5.5")
-        self.assertEqual(StateParsers.model_label("claude-fable-5-2"), "Fable 5.2")
+        self.assertEqual(StateParsers.model_label("claude-sonnet-5-2"), "Sonnet 5.2")
         self.assertEqual(StateParsers.model_label("claude-sonnet-4-5-20250929"), "Sonnet 4.5")
         self.assertEqual(StateParsers.model_label("custom"), "custom")
 
@@ -487,9 +505,9 @@ class RedactionTest(unittest.TestCase):
 
     def test_summary_names_the_working_command_briefly(self) -> None:
         self.assertEqual(CommandRedactor.summarize(
-            "cd /w/mpm-2494 && ls env/nucleus.env 2>/dev/null; DOCKER_HOST=ssh://ci@h timeout 1500 "
-            "tools/dev/iter.sh build worv.env.manure > /tmp/p/build1.log 2>&1; echo rc=$?"),
-            "timeout 1500 tools/dev/iter.sh build worv.env.manure +1 more")
+            "cd /w/app-2494 && ls env/service.env 2>/dev/null; DOCKER_HOST=ssh://ci@h timeout 1500 "
+            "tools/dev/build.sh app > /tmp/p/build1.log 2>&1; echo rc=$?"),
+            "timeout 1500 tools/dev/build.sh app +1 more")
         self.assertEqual(CommandRedactor.summarize(
             "P=/a/b; for i in $(seq 1 9); do sleep 60; done; grep -E ' rc=' $P/runs/status"), "sleep 60 +1 more")
         self.assertEqual(CommandRedactor.summarize(
@@ -646,7 +664,7 @@ class TickMappingTest(unittest.TestCase):
 class QueueTest(unittest.TestCase):
     def test_groups(self) -> None:
         issues = json.loads((FIXTURES / "issues.json").read_text())
-        groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(
+        groups = IssueQueue(QueueLabels(queue="ai:plan", lane="ai:lane")).classify(
             issues, {2380: "CLOSED", 2499: "MERGED", 1229: "OPEN"}, {2501: 4242}, {2464: 18907})
         numbers = {name: [issue.number for issue in members] for name, members in groups.items()}
         self.assertEqual(numbers["running"], [2464])
@@ -663,7 +681,7 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(reasons[2490], "resumable: no live claimant")
         self.assertEqual(reasons[2464], "tick pid 18907")
         self.assertEqual(reasons[2503], "held: ai:low waits while a ai:first issue is claimable")
-        self.assertEqual(reasons[2504], "held: a new ai:fable round waits while a ai:first issue is claimable")
+        self.assertEqual(reasons[2504], "held: a new ai:lane issue waits while a ai:first issue is claimable")
         last_comment = {issue.number: issue.last_comment_at for members in groups.values() for issue in members}
         self.assertEqual(last_comment[2464], "2026-11-26T01:27:15Z")
         self.assertIsNone(last_comment[2495])
@@ -674,23 +692,23 @@ class QueueTest(unittest.TestCase):
                     "labels": {"nodes": [{"name": name} for name in ("ai", "ai:plan", *labels)]}}
 
         def split(issues: list[JsonDict], first_only: list[JsonDict] | None = None) -> tuple[list[int], list[int]]:
-            groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(issues, {}, {}, {}, first_only)
+            groups = IssueQueue(QueueLabels(queue="ai:plan", lane="ai:lane")).classify(issues, {}, {}, {}, first_only)
             return (sorted(member.number for member in groups["claimable"]),
                     sorted(member.number for member in groups["held"]))
 
         self.assertEqual(split([issue(1), issue(2, "ai:low")]), ([1], [2]))
         self.assertEqual(split([issue(2, "ai:low"), issue(3, "ai:low")]), ([2, 3], []))
-        self.assertEqual(split([issue(4, "ai:fable"), issue(2, "ai:low")]), ([4], [2]))
-        self.assertEqual(split([issue(4, "ai:fable"), issue(5, "ai:fable", "ai:first")]), ([5], [4]))
+        self.assertEqual(split([issue(4, "ai:lane"), issue(2, "ai:low")]), ([4], [2]))
+        self.assertEqual(split([issue(4, "ai:lane"), issue(5, "ai:lane", "ai:first")]), ([5], [4]))
         outside_first = {"number": 9, "title": "t9", "body": "", "labels": {"nodes": [{"name": "ai:first"}]}}
-        self.assertEqual(split([issue(4, "ai:fable"), issue(2, "ai:low")], [outside_first]), ([], [2, 4]))
-        self.assertEqual(split([issue(4, "ai:fable")], [outside_first]), ([], [4]))
+        self.assertEqual(split([issue(4, "ai:lane"), issue(2, "ai:low")], [outside_first]), ([], [2, 4]))
+        self.assertEqual(split([issue(4, "ai:lane")], [outside_first]), ([], [4]))
         parked_first = {"number": 9, "title": "t9", "body": "",
                         "labels": {"nodes": [{"name": "ai:first"}, {"name": "ai:operator"}]}}
-        self.assertEqual(split([issue(4, "ai:fable")], [parked_first]), ([4], []))
+        self.assertEqual(split([issue(4, "ai:lane")], [parked_first]), ([4], []))
         listed_outside_queue = {"number": 8, "title": "t8", "body": "",
                                 "labels": {"nodes": [{"name": "ai"}, {"name": "ai:first"}]}}
-        self.assertEqual(split([issue(4, "ai:fable"), listed_outside_queue]), ([], [4]))
+        self.assertEqual(split([issue(4, "ai:lane"), listed_outside_queue]), ([], [4]))
         self.assertEqual(split([issue(2, "ai:low"), issue(1, body="Depends on: #77")]), ([2], []))
 
     def test_unknown_dependency_counts_as_open(self) -> None:
@@ -724,20 +742,20 @@ class ClaimableParityTest(unittest.TestCase):
     SCENARIOS: ClassVar[list[tuple[str, list[tuple[int, tuple[str, ...], str]], tuple[int, ...]]]] = [
         ("plain then low", [(1, ("ai", "ai:plan"), ""), (2, ("ai", "ai:plan", "ai:low"), "")], ()),
         ("only low", [(2, ("ai", "ai:plan", "ai:low"), ""), (3, ("ai", "ai:plan", "ai:low"), "")], ()),
-        ("new round and low", [(4, ("ai", "ai:plan", "ai:fable"), ""), (2, ("ai", "ai:plan", "ai:low"), "")], ()),
-        ("new round behind first", [(4, ("ai", "ai:plan", "ai:fable"), ""),
-                                    (5, ("ai", "ai:plan", "ai:fable", "ai:first"), "")], ()),
-        ("first outside every ai issue", [(4, ("ai", "ai:plan", "ai:fable"), ""), (2, ("ai", "ai:plan", "ai:low"), ""),
+        ("new round and low", [(4, ("ai", "ai:plan", "ai:lane"), ""), (2, ("ai", "ai:plan", "ai:low"), "")], ()),
+        ("new round behind first", [(4, ("ai", "ai:plan", "ai:lane"), ""),
+                                    (5, ("ai", "ai:plan", "ai:lane", "ai:first"), "")], ()),
+        ("first outside every ai issue", [(4, ("ai", "ai:plan", "ai:lane"), ""), (2, ("ai", "ai:plan", "ai:low"), ""),
                                           (9, ("ai:first",), "")], ()),
-        ("parked first outside", [(4, ("ai", "ai:plan", "ai:fable"), ""), (9, ("ai:first", "ai:operator"), "")], ()),
-        ("listed first outside the queue", [(4, ("ai", "ai:plan", "ai:fable"), ""), (8, ("ai", "ai:first"), "")], ()),
+        ("parked first outside", [(4, ("ai", "ai:plan", "ai:lane"), ""), (9, ("ai:first", "ai:operator"), "")], ()),
+        ("listed first outside the queue", [(4, ("ai", "ai:plan", "ai:lane"), ""), (8, ("ai", "ai:first"), "")], ()),
         ("blocked plain leaves low", [(2, ("ai", "ai:plan", "ai:low"), ""),
                                       (1, ("ai", "ai:plan"), "Depends on: #77")], ()),
         ("met dependency holds low", [(2, ("ai", "ai:plan", "ai:low"), ""),
                                       (1, ("ai", "ai:plan"), "Depends on: #78")], (78,)),
-        ("first round and low", [(5, ("ai", "ai:plan", "ai:fable", "ai:first"), ""),
+        ("first round and low", [(5, ("ai", "ai:plan", "ai:lane", "ai:first"), ""),
                                  (2, ("ai", "ai:plan", "ai:low"), "")], ()),
-        ("blocked first outside", [(4, ("ai", "ai:plan", "ai:fable"), ""),
+        ("blocked first outside", [(4, ("ai", "ai:plan", "ai:lane"), ""),
                                    (9, ("ai:first",), "Depends on: #77")], ()),
     ]
 
@@ -771,10 +789,11 @@ class ClaimableParityTest(unittest.TestCase):
                 completed = subprocess.run(
                     [str(REPO_ROOT / "bin" / "claimable.sh")], capture_output=True, text=True, timeout=60,
                     env=dict(os.environ, PATH=f"{root / 'fake'}:{os.environ['PATH']}", HARNESS_HOME=str(root),
-                             PARITY_FIXTURES=str(root / "fx"), GH_REPO="o/r", ISSUE_LABEL="ai:plan"),
+                             PARITY_FIXTURES=str(root / "fx"), GH_REPO="o/r", ISSUE_LABEL="ai:plan",
+                             LANE_LABEL="ai:lane"),
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(
+                groups = IssueQueue(QueueLabels(queue="ai:plan", lane="ai:lane")).classify(
                     graphql_nodes, {number: "CLOSED" for number in closed}, {}, {}, first_only)
                 self.assertEqual(len(groups["claimable"]), int(completed.stdout.strip()))
 
@@ -832,6 +851,8 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertIn("moved last (3 bad probes)", [signal["text"] for signal in demoted["signals"]])
         self.assertEqual(demoted["history"]["down"], [1795656961.0])
         self.assertEqual(snapshot["machines"][0]["card_note"], "harness off (left to its owner)")
+        self.assertEqual(snapshot["machines"][0]["gpu"]["name"], "Example Device")
+        self.assertEqual([process["pid"] for process in snapshot["machines"][0]["gpu_processes"]], [4242])
 
         leases = snapshot["leases"]
         self.assertTrue(leases["available"])
@@ -868,16 +889,16 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertEqual(usage["age_s"], 120)
         harness = snapshot["harness"]
         self.assertEqual(harness["last_allowed"], 10)
-        self.assertEqual(harness["tick_models"], ["claude-opus-5-5", "claude-fable-5-2"])
-        self.assertEqual([model["model"] for model in harness["cooling_models"]], ["claude-fable-5-2"])
+        self.assertEqual(harness["tick_models"], ["claude-opus-5-5", "claude-sonnet-5-2"])
+        self.assertEqual([model["model"] for model in harness["cooling_models"]], ["claude-sonnet-5-2"])
         self.assertTrue(harness["work_waiting"])
 
     def test_calls_are_read_only(self) -> None:
         calls: list[str] = self.harness.calls()
         self.assertTrue(calls)
         for call in calls:
-            if call.startswith("lease.sh"):
-                self.assertEqual(call, "lease.sh status")
+            if call.startswith("resource-status"):
+                self.assertEqual(call, "resource-status status")
             elif call.startswith("gh "):
                 arguments: list[str] = json.loads(call[3:])
                 self.assertEqual(arguments[0], "api")
@@ -893,7 +914,7 @@ class CollectorAndPageTest(unittest.TestCase):
     def test_page_renders_every_panel_and_escapes(self) -> None:
         page: str = HtmlRenderer().render(self.snapshot, 30)
         for expected in ("Harness status", '<meta http-equiv="refresh" content="30;url=/', "ci@worker-a.local",
-                         "moved last (3 bad probes)", "GPU slots and leases", "whole card", "operator priority",
+                         "moved last (3 bad probes)", "Resource slots and leases", "whole device", "operator priority",
                          "Running ticks", "#2464", "Opus 5.5", "Claimable", "from this read (ai:plan)",
                          "claimable.sh 2", "held back by the first-before-low gate: 2", "#2503",
                          "Waiting on the operator", "Waiting for sign-off", "#2200", "Landings", "#2499",
@@ -1066,9 +1087,11 @@ class HttpServerTest(unittest.TestCase):
         status, _, body = self.request(port, f"/api/state?t={self.ACCESS_TOKEN}", f"localhost:{port}")
         self.assertEqual(status, 200)
         state = json.loads(body)
-        status, _, _ = self.request(port, f"/config/harness.env?t={self.ACCESS_TOKEN}", host)
+        status, _, _ = self.request(port, f"/instance/harness.env?t={self.ACCESS_TOKEN}", host)
         self.assertEqual(status, 404)
-        self.assertIn("Harness status", page)
+        self.assertIn("<title>Fixture &lt;b&gt;harness&lt;/b&gt;</title>", page)
+        self.assertIn("<h1>Fixture &lt;b&gt;harness&lt;/b&gt;</h1>", page)
+        self.assertIn("lane: Sonnet 5.2 for ai:lane", page)
         self.assertIn(f'content="30;url=/?t={self.ACCESS_TOKEN}"', page)
         self.assertIn(f'href="/api/state?t={self.ACCESS_TOKEN}"', page)
         self.assertNotIn(self.ACCESS_TOKEN, body)
@@ -1214,13 +1237,22 @@ class HttpServerTest(unittest.TestCase):
         self.addCleanup(harness.close)
         base: list[str] = ["--harness-home", str(harness.home), "--data-dir", str(harness.home / "data")]
         labels = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config.labels
-        self.assertEqual((labels.queue, labels.first, labels.low, labels.wip, labels.fable),
-                         ("ai:plan", "ai:first", "ai:low", "ai:wip", "ai:fable"))
+        self.assertEqual((labels.queue, labels.first, labels.low, labels.wip, labels.lane),
+                         ("ai:plan", "ai:first", "ai:low", "ai:wip", "ai:lane"))
+        config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config
+        self.assertEqual((config.title, config.lane_model), ("Fixture <b>harness</b>", "claude-sonnet-5-2"))
+        self.assertEqual(config.resource_status_command, (str(harness.home / "bin" / "resource-status"), "status"))
+        self.assertEqual(config.run_queue_stop_words, ("STOP", "YIELD", "NO-LEASE"))
+        self.assertEqual((config.build_lock_dir, config.build_lock_local, config.build_lock_remote),
+                         (harness.home / "buildlocks", "dev-build.lock", "dev-build-remote-{name}.lock"))
+        self.assertEqual(config.build_lock_names, (("ci@worker-a.local", "wa"), ("ci@192.0.2.6", "laptop")))
         overridden = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base + ["--queue-label", "ai"]))
         self.assertEqual(overridden.config.labels.queue, "ai")
         self.assertEqual(dashboard.DashboardApp.ENV_KEYS, frozenset({
-            "GH_TOKEN", "GH_REPO", "BUILD_LOCK_NAMES", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL",
-            "READY_LABEL", "FABLE_LABEL", "FIRST_LABEL", "LOW_LABEL"}))
+            "GH_TOKEN", "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL", "READY_LABEL",
+            "LANE_LABEL", "FIRST_LABEL", "LOW_LABEL", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD",
+            "DEVICE_PROBE_CMD", "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "BUILD_LOCK_DIR",
+            "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES"}))
 
     @linux_only
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
@@ -1288,7 +1320,7 @@ class RunQueueTest(unittest.TestCase):
 
     @staticmethod
     def holder(pid: int) -> dict[int, ProcessInfo]:
-        return {pid: ProcessInfo(pid, 1, 0.0, ("bash", "/h/bin/arm_queue.sh", "--issue", "2502"))}
+        return {pid: ProcessInfo(pid, 1, 0.0, ("bash", "/h/bin/run_queue.sh", "--issue", "2502"))}
 
     def test_a_queue_running_an_arm(self) -> None:
         lease = RunQueueReader.parse_lease_log((self.QUEUES / "running" / "lease.log").read_text())
@@ -1298,12 +1330,19 @@ class RunQueueTest(unittest.TestCase):
         self.assertEqual((status.arm, status.arm_host, status.arm_started, status.finished_at),
                          ("RS6-on-s1323-render", "ci@192.0.2.60", "2026-11-26T03:03:10Z", None))
 
-    def test_a_queue_waiting_for_a_card_keeps_only_the_last_holders_busy_streak(self) -> None:
+    def test_a_queue_waiting_for_a_device_keeps_only_the_last_holders_busy_streak(self) -> None:
         lease = RunQueueReader.parse_lease_log((self.QUEUES / "waiting" / "lease.log").read_text())
         self.assertEqual((lease.holder_pid, lease.want), (4201, "ci@192.0.2.60"))
         self.assertEqual((lease.busy_since, lease.busy_reason),
                          ("2026-11-26T02:40:00Z", "no remote card is free, alone and quiet"))
         self.assertIsNone(RunQueueReader.parse_status((self.QUEUES / "waiting" / "status").read_text()).arm)
+
+    def test_a_stop_word_ends_the_running_arm(self) -> None:
+        text: str = "RS1 start 2026-11-26T02:47:25Z host=h\nNO-LEASE: lost the slot\n"
+        self.assertEqual(RunQueueReader.parse_status(text).arm, "RS1")
+        stop = RunQueueReader("", "", ("STOP", "NO-LEASE"), 60).stop_pattern
+        self.assertIsNone(RunQueueReader.parse_status(text, stop).arm)
+        self.assertEqual(RunQueueReader.parse_status("RS1 start 2026-11-26T02:47:25Z\nSTOPPED x\n", stop).arm, "RS1")
 
     def test_a_released_queue_is_finished(self) -> None:
         status = RunQueueReader.parse_status((self.QUEUES / "finished" / "status").read_text())
@@ -1325,22 +1364,23 @@ class RunQueueTest(unittest.TestCase):
             for path in old.iterdir():
                 os.utime(path, (now - 86400, now - 86400))
             processes = {**self.holder(4101), **self.holder(4201)}
-            queues = RunQueueReader(root, 6 * 3600).read_queues(processes, now)
+            queues = RunQueueReader(str(root / "*" / "runs*"), "run_queue.sh", (), 6 * 3600).read_queues(
+                processes, now)
         by_issue = {queue.issue: queue for queue in queues}
         self.assertEqual(sorted(by_issue), [2464, 2490, 2502])
         self.assertEqual((by_issue[2502].state, by_issue[2502].arm), ("running", "RS6-on-s1323-render"))
-        self.assertEqual(by_issue[2464].state, "waiting_card")
+        self.assertEqual(by_issue[2464].state, "waiting_device")
         self.assertEqual((by_issue[2490].state, by_issue[2490].alive), ("finished", False))
 
 
 class BuildLockTest(unittest.TestCase):
     def test_parses_lslocks_waiters_and_the_lock_file(self) -> None:
         waiters = BuildLockReader.parse_lslocks_waiters((FIXTURES / "lslocks.json").read_text())
-        self.assertEqual(waiters, {"/tmp/worv-dev-build-remote-5090.lock": [2131760, 2387677],
-                                   "/tmp/worv-dev-build-remote-w03.lock": [99]})
+        self.assertEqual(waiters, {"/tmp/dev-build-remote-gpu-a.lock": [2131760, 2387677],
+                                   "/tmp/dev-build-remote-dev-a.lock": [99]})
         self.assertEqual(BuildLockReader.parse_lslocks_waiters("not json"), {})
         self.assertEqual(BuildLockReader.parse_lock_file((FIXTURES / "build_lock.txt").read_text()),
-                         (2088784, "/home/x/tmp_workspace/ai-worktrees/mpm-2464"))
+                         (2088784, "/home/x/ai-worktrees/app-2464"))
         self.assertEqual(BuildLockReader.parse_lock_file(""), (None, None))
 
     @linux_only
@@ -1349,10 +1389,11 @@ class BuildLockTest(unittest.TestCase):
         self.addCleanup(harness.close)
         holder_pid, waiter_pid = harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
         scanner: ProcessScanner = ProcessScanner(harness.state)
-        lanes = BuildLockReader({"ci@worker-a.local": "wa"}, harness.home / "buildlocks", 5).read_lanes(
+        lanes = BuildLockReader({"ci@worker-a.local": "wa"}, harness.home / "buildlocks", "dev-build.lock",
+                                "dev-build-remote-{name}.lock", 5).read_lanes(
             ["ci@worker-a.local", "ci@192.0.2.6"], scanner.scan_processes(), {})
         by_name = {lane.name: lane for lane in lanes}
-        self.assertEqual(sorted(by_name), ["10-0-0-6", "local", "wa"])
+        self.assertEqual(sorted(by_name), ["192-0-2-6", "local", "wa"])
         self.assertEqual((by_name["wa"].holder.pid, by_name["wa"].holder.issue), (holder_pid, 2495))
         self.assertEqual([(waiter.pid, waiter.issue) for waiter in by_name["wa"].waiters], [(waiter_pid, 2388)])
         self.assertIsNone(by_name["local"].holder)
@@ -1363,18 +1404,19 @@ class FlowBuilderTest(unittest.TestCase):
 
     def inputs(self, **overrides: Any) -> FlowInputs:
         issues = json.loads((FIXTURES / "issues.json").read_text())
-        groups = IssueQueue(QueueLabels(queue="ai:plan")).classify(issues, {2380: "CLOSED", 2499: "MERGED"}, {}, {})
+        groups = IssueQueue(QueueLabels(queue="ai:plan", lane="ai:lane")).classify(
+            issues, {2380: "CLOSED", 2499: "MERGED"}, {}, {})
         tick = TickProcess(11, "claude-opus-5-5", "Opus 5.5", "standard", 600, 1, None, 2464, "claim", "sleep 30",
                            5, 1)
         landing = TickProcess(12, "claude-opus-5-5", "Opus 5.5", "landing", 120, 2, None, 2201, "claim", None,
                               None, 0)
         running = RunQueue("2026-11-26-2502-x", "runs", 2502, 41, True, "running", "any", "RS6-p1",
                            "ci@192.0.2.6", "2026-11-26T01:30:00Z", None, None, "ci@192.0.2.6", None, self.NOW)
-        waiting = RunQueue("2026-11-26-2490-x", "runs", 2490, 42, True, "waiting_card", "ci@192.0.2.6", None, None,
-                           None, "2026-11-26T01:28:00Z", "kit limit GH_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        waiting = RunQueue("2026-11-26-2490-x", "runs", 2490, 42, True, "waiting_device", "ci@192.0.2.6", None, None,
+                           None, "2026-11-26T01:28:00Z", "slot limit GH_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
                            None, None, self.NOW)
-        lanes = (BuildLane("wa", "ci@worker-a.local", "/l/wa", LockParty(51, 2495, "mpm-2495", True),
-                           (LockParty(52, 2388, "mpm-2388", True),)),)
+        lanes = (BuildLane("wa", "ci@worker-a.local", "/l/wa", LockParty(51, 2495, "app-2495", True),
+                           (LockParty(52, 2388, "app-2388", True),)),)
         slots = (LeaseSlot(4, "held", "2488", 2488, 61, "2026-11-26T01:00:00Z", 80, ("remote-all", "no-cost"),
                            "ci@worker-a.local"),)
         machines = [
@@ -1393,8 +1435,9 @@ class FlowBuilderTest(unittest.TestCase):
         return FlowInputs(**fields)
 
     def builder(self) -> FlowBuilder:
-        return FlowBuilder(QueueLabels(queue="ai:plan"), {"ci@worker-a.local": "wa", "ci@192.0.2.6": "laptop"},
-                           6 * 3600)
+        return FlowBuilder(QueueLabels(queue="ai:plan", lane="ai:lane"),
+                           {"ci@worker-a.local": "wa", "ci@192.0.2.6": "laptop"}, 6 * 3600, device_lanes=True,
+                           build_lanes=True)
 
     def test_each_issue_lands_in_its_column(self) -> None:
         flow = self.builder().build(self.inputs())
@@ -1402,7 +1445,7 @@ class FlowBuilderTest(unittest.TestCase):
         expected: dict[int, tuple[str, str]] = {
             2502: ("running", "running RS6-p1 on laptop"),
             2488: ("running", "holding wa"),
-            2490: ("waiting_card", "waiting for a card"),
+            2490: ("waiting_device", "waiting for a device"),
             2495: ("compiling", "compiling on wa"),
             2388: ("compiling", "waiting for the wa compile lane"),
             2201: ("landing", "landing"),
@@ -1421,21 +1464,21 @@ class FlowBuilderTest(unittest.TestCase):
         self.assertEqual(cards[2388]["detail"], "1 in line for wa")
         self.assertIn("[redacted]", cards[2490]["detail"])
         self.assertNotIn("ghp_", json.dumps(flow))
-        self.assertTrue(cards[2490]["detail"].startswith("BUSY 12 min: kit limit"))
+        self.assertTrue(cards[2490]["detail"].startswith("BUSY 12 min: slot limit"))
 
     def test_edges_run_to_the_lanes_held_and_waited_for(self) -> None:
         flow = self.builder().build(self.inputs())
         edges = sorted((edge["issue"], edge["device"], edge["lane"], edge["kind"]) for edge in flow["edges"])
         self.assertEqual(edges, [
             (2388, "ci@worker-a.local", "compile", "waits"),
-            (2488, "ci@worker-a.local", "card", "holds"),
-            (2490, "ci@192.0.2.6", "card", "waits"),
+            (2488, "ci@worker-a.local", "device", "holds"),
+            (2490, "ci@192.0.2.6", "device", "waits"),
             (2495, "ci@worker-a.local", "compile", "holds"),
-            (2502, "ci@192.0.2.6", "card", "holds"),
+            (2502, "ci@192.0.2.6", "device", "holds"),
         ])
         device = {item["key"]: item for item in flow["devices"]}
         self.assertTrue(device["ci@192.0.2.6"]["idle_with_queue"])
-        self.assertEqual(device["ci@192.0.2.6"]["idle_flag"], "card idle, queue waiting")
+        self.assertEqual(device["ci@192.0.2.6"]["idle_flag"], "device idle, queue waiting")
         held = self.builder().build(self.inputs(lease_slots=(LeaseSlot(
             6, "held", "2502", 2502, 62, "2026-11-26T01:00:00Z", 82, ("remote-all",), "ci@192.0.2.6"),)))
         self.assertEqual({item["key"]: item for item in held["devices"]}["ci@192.0.2.6"]["idle_flag"],
@@ -1458,7 +1501,7 @@ class FlowTrackerTest(unittest.TestCase):
     @staticmethod
     def flow(cards: list[tuple[int, int, int, str]]) -> JsonDict:
         return {"cards": [{"issue": issue, "x": x, "y": y, "label": label} for issue, x, y, label in cards],
-                "edges": [{"issue": issue, "device": "d", "lane": "card", "kind": "holds"}
+                "edges": [{"issue": issue, "device": "d", "lane": "device", "kind": "holds"}
                           for issue, _, _, label in cards if label.startswith("running")]}
 
     def test_moves_fresh_cards_transitions_and_restart(self) -> None:
@@ -1512,13 +1555,13 @@ class MachineCardTest(unittest.TestCase):
     def test_containers_fold_into_a_details_list(self) -> None:
         snapshot: JsonDict = {"generated_epoch": 0, "machines": [{
             "key": "local", "name": "box", "kind": "local", "status": "ok", "history": {}, "slots": [],
-            "containers": [{"name": "worv-iter-4", "status": "Up 8 minutes", "image": "isaac:1"},
-                           {"name": "isaac_sim_dev", "status": "Up 3 weeks", "image": "isaac:2"}],
+            "containers": [{"name": "dev-run-4", "status": "Up 8 minutes", "image": "sim:1"},
+                           {"name": "sim_dev", "status": "Up 3 weeks", "image": "sim:2"}],
         }]}
         page: str = HtmlRenderer().render(snapshot, 30)
         self.assertIn("<details><summary>containers <span class=\"sub\">2</span></summary>", page)
-        self.assertIn("<li><span class=\"line\" title=\"isaac:1\">worv-iter-4</span>", page)
-        self.assertNotIn("worv-iter-4 <span class=\"sub\">Up 8 minutes</span>; ", page)
+        self.assertIn("<li><span class=\"line\" title=\"sim:1\">dev-run-4</span>", page)
+        self.assertNotIn("dev-run-4 <span class=\"sub\">Up 8 minutes</span>; ", page)
 
 
 class FlowPageTest(unittest.TestCase):
@@ -1531,7 +1574,7 @@ class FlowPageTest(unittest.TestCase):
                                  .replace("ci@192.0.2.60", "ci@192.0.2.6"),
                                  "holder {pid} start 2026-11-26T01:20:00Z queue=/q want=any deadline=1\n")
         harness.start_fake_queue(2504, "runs", "", "holder {pid} start 2026-11-26T01:20:00Z queue=/q "
-                                 "want=ci@192.0.2.6 deadline=1\n2026-11-26T01:30:00Z BUSY kit limit 2/2\n")
+                                 "want=ci@192.0.2.6 deadline=1\n2026-11-26T01:30:00Z BUSY slot limit 2/2\n")
         harness.hold_build_lock("wa", holder_issue=2495, waiter_issue=2388)
         clock_epoch: list[float] = [FixtureHarness.PINNED_EPOCH]
         collector: Collector = harness.collector(clock=lambda: clock_epoch[0])
@@ -1541,7 +1584,7 @@ class FlowPageTest(unittest.TestCase):
         self.assertEqual(cards[2464]["column"], "claimed")
         self.assertEqual((cards[2502]["column"], cards[2502]["label"]),
                          ("running", "running RS6-on-s1323-render on laptop"))
-        self.assertEqual(cards[2504]["column"], "waiting_card")
+        self.assertEqual(cards[2504]["column"], "waiting_device")
         self.assertEqual(cards[2490]["label"], "holding wa")
         self.assertEqual(cards[2495]["column"], "compiling")
         self.assertEqual(cards[2388]["label"], "waiting for the wa compile lane")
@@ -1561,13 +1604,113 @@ class FlowPageTest(unittest.TestCase):
 
         page: str = HtmlRenderer().render(second, 30, "access")
         for expected in ('class="flow-canvas"', 'class="fdev', "laptop", "compile: #2495, 1 waiting",
-                         'class="fcard waiting moved"', "--dx:", '<path class="fedge card holds',
-                         'class="fedge compile waits', "Waiting for a card", "#2464</b> claimed →",
+                         'class="fcard waiting moved"', "--dx:", '<path class="fedge device holds',
+                         'class="fedge compile waits', "Waiting for a device", "#2464</b> claimed →",
                          "&lt;script&gt;alert(1)&lt;/script&gt;"):
             self.assertIn(expected, page)
         self.assertEqual(page.count("<script"), 1)
         self.assertIn('<script defer src="/dashboard.js', page)
         self.assertNotIn(FixtureHarness.FAKE_TOKEN, page + json.dumps(second, default=str))
+
+
+class BareInstanceTest(unittest.TestCase):
+    """
+    An instance with no resource, device, run-queue or build-lock key: those panels and their sources stay off.
+    """
+
+    FAKE_GH: ClassVar[str] = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json
+        print(json.dumps({"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": []}},
+                                   "search": {"nodes": []}}}))
+    """)
+
+    def test_the_collector_reads_no_optional_source_and_the_page_leaves_their_panels_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home: Path = Path(directory)
+            (home / "state" / "logs").mkdir(parents=True)
+            config = DashboardConfig(harness_home=home, data_dir=home / "data", repo=None, remote_interval_s=0,
+                                     usage_cache=home / "usage-cache.json", crontab_command=("true",))
+            collector: Collector = Collector(config, None, clock=lambda: FixtureHarness.PINNED_EPOCH)
+            commands: list[list[str]] = []
+            real_run: Callable[..., Any] = subprocess.run
+
+            def recording_run(arguments: list[str], *args: Any, **kwargs: Any) -> Any:
+                commands.append(list(arguments))
+                return real_run(arguments, *args, **kwargs)
+
+            with patch("dashboard_lib.collector.subprocess.run", recording_run), \
+                    patch("dashboard_lib.buildlocks.subprocess.run", recording_run):
+                collector.refresh_local_sample_in_place()
+                collector.refresh_remote_probes_in_place()
+                snapshot: JsonDict = collector.snapshot()
+        self.assertIsNone(snapshot["leases"])
+        self.assertIsNone(snapshot["health"]["stalls"])
+        self.assertEqual(sorted(snapshot["sources"]),
+                         ["claimable_sh", "github", "local", "paused", "procs", "remote"])
+        self.assertEqual(snapshot["flow"]["lanes"], [])
+        self.assertEqual([column["key"] for column in snapshot["flow"]["columns"]],
+                         ["waiting", "claimed", "landing", "held", "done"])
+        self.assertEqual([machine["key"] for machine in snapshot["machines"]], ["local"])
+        self.assertIsNone(snapshot["machines"][0]["gpu"])
+        self.assertIsNone(snapshot["flow"]["devices"][0]["holders"])
+        self.assertIsNone(snapshot["flow"]["devices"][0]["compile"])
+        self.assertEqual([command[0] for command in commands], ["bash", "true"])
+        self.assertNotIn("--- device", commands[0][2])
+        for name in ("local", "paused", "remote"):
+            self.assertIsNone(snapshot["sources"][name]["error"], name)
+        page: str = HtmlRenderer().render(snapshot, 30)
+        for absent in ("Resource slots", "Stalls", "Device", "lease:", "<th>Leases", "compile lane", "▾",
+                       "no slot held", '"grid split"'):
+            self.assertNotIn(absent, page)
+        self.assertIn("<title>Harness status</title>", page)
+
+    def test_once_against_a_bare_instance_prints_a_snapshot_without_those_panels_or_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root: Path = Path(directory)
+            (root / "state").mkdir()
+            fake_gh: Path = root / "gh"
+            fake_gh.write_text(self.FAKE_GH)
+            fake_gh.chmod(0o755)
+            completed = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), "--harness-home", str(root),
+                 "--gh", str(fake_gh), "--usage-cache", str(root / "usage-cache.json"), "--remote-interval", "0",
+                 "--claimable-interval", "0", "--once"],
+                capture_output=True, text=True, timeout=60,
+                env={key: value for key, value in dict(
+                    os.environ, HARNESS_INSTANCE_DIR=str(FIXTURES / "instance"),
+                    HARNESS_STATE=str(root / "state")).items() if key != "HARNESS_ENV"},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            state: JsonDict = json.loads(completed.stdout)
+            self.assertTrue((root / "state" / "dashboard" / "local_history.tsv").exists())
+        self.assertEqual((state["repo"], state["title"]), ("example/app", "Harness status"))
+        self.assertIsNone(state["leases"])
+        self.assertIsNone(state["health"]["stalls"])
+        self.assertEqual(state["flow"]["lanes"], [])
+        self.assertNotIn("lease", state["sources"])
+        self.assertNotIn("activity", state["sources"])
+        self.assertNotIn("host_health_tsv", state["sources"])
+        failing = {name: source["error"] for name, source in state["sources"].items() if source["error"]}
+        if not sys.platform.startswith("linux"):
+            failing.pop("procs", None)
+        self.assertEqual(failing, {})
+
+    def test_harness_env_wins_over_the_instance_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            other: Path = Path(directory) / "other.env"
+            other.write_text("GH_REPO=example/other\n")
+            with patch.dict(os.environ, {"HARNESS_INSTANCE_DIR": str(FIXTURES / "instance")}):
+                os.environ.pop("HARNESS_ENV", None)
+                self.assertEqual(dashboard.DashboardApp.env_path(Path(directory)),
+                                 FIXTURES / "instance" / "harness.env")
+                os.environ["HARNESS_ENV"] = str(other)
+                self.assertEqual(dashboard.DashboardApp.env_path(Path(directory)), other)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("HARNESS_ENV", None)
+                os.environ.pop("HARNESS_INSTANCE_DIR", None)
+                self.assertEqual(dashboard.DashboardApp.env_path(Path(directory)),
+                                 Path(directory) / "instance" / "harness.env")
 
 
 if __name__ == "__main__":

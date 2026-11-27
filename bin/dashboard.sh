@@ -5,12 +5,13 @@
 #   dashboard.sh stop                     stop it
 # HARNESS_HOME names the harness it reads (default: this script's repo), DASHBOARD_PORT its port (8787,
 # or --port), DASHBOARD_DATA_DIR where its own history, cache, pid file, URL and log go (default:
-# <home>/state/dashboard). It writes nothing else, and nothing there is readable by other users.
+# ${HARNESS_STATE:-<home>/state}/dashboard). It writes nothing else, and nothing there is readable by
+# other users. HARNESS_ENV and HARNESS_INSTANCE_DIR reach dashboard.py, which finds the config with them.
 set -u
 umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 H="${HARNESS_HOME:-$(cd "$here/.." && pwd)}"
-DATA="${DASHBOARD_DATA_DIR:-$H/state/dashboard}"
+DATA="${DASHBOARD_DATA_DIR:-${HARNESS_STATE:-$H/state}/dashboard}"
 PORT="${DASHBOARD_PORT:-8787}"
 PIDFILE="$DATA/dashboard.pid"
 URLFILE="$DATA/dashboard.url"

@@ -1,1 +1,1 @@
-pid 2088784, /home/x/tmp_workspace/ai-worktrees/mpm-2464, worv.env.manure
+pid 2088784, /home/x/ai-worktrees/app-2464, app

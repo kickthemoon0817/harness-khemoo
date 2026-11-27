@@ -11,7 +11,8 @@ from dashboard_lib.models import JsonDict
 @dataclass(frozen=True)
 class QueueLabels:
     """
-    The label names the harness uses; the defaults are tick.sh's and claimable.sh's.
+    The label names the harness uses; the defaults are tick.sh's and claimable.sh's. An empty lane label turns
+    the model lane off.
     """
 
     all_issues: str = "ai"
@@ -20,7 +21,7 @@ class QueueLabels:
     signoff: str = "ai:signoff"
     operator: str = "ai:operator"
     ready: str = "ai:ready"
-    fable: str = "ai:fable"
+    lane: str = ""
     first: str = "ai:first"
     low: str = "ai:low"
 
@@ -56,7 +57,7 @@ class IssueQueue:
     claim file, which the tick takes before it comments.
 
     The first-before-low gate then holds candidates back. A low issue counts only when no other candidate counts
-    and no first issue is claimable anywhere; a fable issue without the first label counts only while no first
+    and no first issue is claimable anywhere; a lane issue without the first label counts only while no first
     issue is claimable anywhere. "Anywhere" includes first issues outside the queue label, judged by the same
     candidate rule without it. A held-back candidate is listed in `held` with the reason.
     """
@@ -146,17 +147,17 @@ class IssueQueue:
         """
         labels: QueueLabels = self.labels
 
-        def is_new_design_round(issue: QueueIssue) -> bool:
-            return labels.fable in issue.labels and labels.first not in issue.labels
+        def is_new_lane_issue(issue: QueueIssue) -> bool:
+            return bool(labels.lane) and labels.lane in issue.labels and labels.first not in issue.labels
 
         gated: list[QueueIssue] = [issue for issue in candidates
-                                   if labels.low in issue.labels or is_new_design_round(issue)]
+                                   if labels.low in issue.labels or is_new_lane_issue(issue)]
         first_waiting: bool = bool(gated) and (
             any(labels.first in issue.labels for issue in candidates)
             or (labels.queue != labels.first and first_claimable_outside_queue)
         )
         kept: list[QueueIssue] = [issue for issue in candidates if labels.low not in issue.labels
-                                  and not (is_new_design_round(issue) and first_waiting)]
+                                  and not (is_new_lane_issue(issue) and first_waiting)]
         if not kept and not first_waiting:
             kept = [issue for issue in candidates if labels.low in issue.labels]
         kept_numbers: frozenset[int] = frozenset(issue.number for issue in kept)
@@ -168,7 +169,7 @@ class IssueQueue:
                 reason: str = (f"held: {labels.low} waits while a {labels.first} issue is claimable" if first_waiting
                                else f"held: {labels.low} waits while other work is claimable")
             else:
-                reason = f"held: a new {labels.fable} round waits while a {labels.first} issue is claimable"
+                reason = f"held: a new {labels.lane} issue waits while a {labels.first} issue is claimable"
             held.append(replace(issue, group="held", reason=reason))
         return kept, held
 

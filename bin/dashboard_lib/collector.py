@@ -4,6 +4,7 @@ Gathers the dashboard's data on a cadence per source and assembles one JSON-read
 import json
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import threading
@@ -59,12 +60,24 @@ class UsageThresholds:
 @dataclass(frozen=True)
 class DashboardConfig:
     """
-    Where the dashboard reads from and writes to, and how often each source refreshes.
+    Where the dashboard reads from and writes to, how often each source refreshes, and the instance's optional
+    sources; each optional source left empty keeps its panel off the page.
+
+    `resource_status_command` is an argv printing the resource status format (`remote card|host: <h> (slots a-b)`,
+    `slot N free|HELD|ORPHAN ...`, `device ...`, `operator priority: ...`, `wait ...`). `device_probe_command` is a
+    shell command run on each machine whose first line is `<name>, <util %>, <memory used MiB>, <memory total MiB>`
+    and whose further lines are `<pid>, <memory MiB>, <process name>`. `run_queue_glob` names run folders, each with a
+    `status` and a `lease.log`, live while a process whose first arguments hold `run_queue_holder` holds them.
+    `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
+    names under `build_lock_dir`.
     """
 
     harness_home: Path
     data_dir: Path
     repo: str | None
+    harness_state: Path | None = None
+    title: str = "Harness status"
+    lane_model: str = ""
     labels: QueueLabels = field(default_factory=QueueLabels)
     usage_cache: Path = Path.home() / ".claude" / "usage-cache.json"
     usage_thresholds: UsageThresholds = field(default_factory=UsageThresholds)
@@ -90,10 +103,16 @@ class DashboardConfig:
     dependency_ttl_s: float = 600.0
     pid_lookup_retry_s: float = 600.0
     claim_file_max_age_s: float = 172800.0
-    evidence_root: Path = Path.home() / "tmp_workspace" / "artifacts" / "manure-plan" / "evidence"
+    resource_status_command: tuple[str, ...] = ()
+    device_probe_command: str = ""
+    run_queue_glob: str = ""
+    run_queue_holder: str = ""
+    run_queue_stop_words: tuple[str, ...] = ()
     run_queue_window_s: float = 21600.0
     build_lock_names: tuple[tuple[str, str], ...] = ()
     build_lock_dir: Path = Path("/tmp")
+    build_lock_local: str = ""
+    build_lock_remote: str = ""
     done_window_s: float = 21600.0
     flow_animate_s: float = 20.0
     activity_ttl_s: float = 10.0
@@ -102,31 +121,44 @@ class DashboardConfig:
     def state_dir(self) -> Path:
         """
         Returns:
-            The harness's `state/` directory.
+            The harness's state directory: HARNESS_STATE, else `<harness home>/state`.
         """
-        return self.harness_home / "state"
+        return self.harness_state or self.harness_home / "state"
+
+    @property
+    def build_locks_enabled(self) -> bool:
+        """
+        Returns:
+            True when the instance names a local or a remote build lock.
+        """
+        return bool(self.build_lock_local or self.build_lock_remote)
 
 
 class Collector:
     """
     Keeps the last result of every source and builds snapshots from them.
 
-    The publisher collects leases, the process table and local state files at the page refresh cadence.
+    The publisher collects the resource status, the process table and local state files at the page refresh cadence.
     Local samples, SSH, GitHub and claimable.sh have independent refresh threads. Each snapshot carries
     their last results and ages. The only files written are the dashboard's own, under `data_dir`.
     """
 
     LOAD_PROBE: ClassVar[str] = r"""printf 'load %s %s\n' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)"
 """
-    MACHINE_PROBE_SCRIPT: ClassVar[str] = r"""
+    MEMORY_PROBE: ClassVar[str] = r"""
 sed -n '/^MemTotal:/p;/^MemAvailable:/p' /proc/meminfo
-echo '--- gpu'
-timeout 5 nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1
-echo '--- apps'
-apps=$(timeout 5 nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null)
+"""
+    DEVICE_PROBE: ClassVar[str] = r"""
+device=$(timeout 5 sh -c {command} 2>/dev/null)
+echo '--- device'
+printf '%s\n' "$device" | head -1
+echo '--- processes'
+apps=$(printf '%s\n' "$device" | tail -n +2)
 [ -n "$apps" ] && printf '%s\n' "$apps"
 echo '--- cgroup'
 for p in $(printf '%s\n' "$apps" | cut -d, -f1); do printf '%s %s\n' "$p" "$(tr '\n' ' ' < /proc/$p/cgroup 2>/dev/null)"; done
+"""
+    CONTAINER_PROBE: ClassVar[str] = r"""
 echo '--- docker'
 timeout 5 docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null
 exit 0
@@ -171,11 +203,18 @@ exit 0
         self._processes: dict[int, ProcessInfo] = {}
         self.local_history_path: Path = config.data_dir / "local_history.tsv"
         self.github_cache_path: Path = config.data_dir / "github_cache.json"
-        self.run_queue_reader: RunQueueReader = RunQueueReader(config.evidence_root, config.run_queue_window_s)
-        self.build_lock_reader: BuildLockReader = BuildLockReader(dict(config.build_lock_names), config.build_lock_dir,
-                                                                  config.command_timeout_s)
-        self.flow_builder: FlowBuilder = FlowBuilder(config.labels, dict(config.build_lock_names),
-                                                     config.done_window_s)
+        self.run_queue_reader: RunQueueReader = RunQueueReader(
+            config.run_queue_glob, config.run_queue_holder, config.run_queue_stop_words, config.run_queue_window_s)
+        self.build_lock_reader: BuildLockReader = BuildLockReader(
+            dict(config.build_lock_names), config.build_lock_dir, config.build_lock_local, config.build_lock_remote,
+            config.command_timeout_s)
+        self.flow_builder: FlowBuilder = FlowBuilder(
+            config.labels, dict(config.build_lock_names), config.done_window_s,
+            device_lanes=bool(config.resource_status_command or config.run_queue_glob),
+            build_lanes=config.build_locks_enabled)
+        self.machine_probe_script: str = self.MEMORY_PROBE + (
+            self.DEVICE_PROBE.replace("{command}", shlex.quote(config.device_probe_command))
+            if config.device_probe_command else "") + self.CONTAINER_PROBE
         self.flow_tracker: FlowTracker = FlowTracker(config.data_dir / "flow_state.json", config.flow_animate_s)
         self._activity_lock: threading.Lock = threading.Lock()
 
@@ -238,31 +277,19 @@ exit 0
             The JSON-ready state every panel renders from.
         """
         with self._fast_lock:
-            lease_result: SourceResult | None = self._result("lease")
-            if lease_result is None or lease_result.attempted_at is None \
-                    or self.clock() - lease_result.attempted_at >= self.config.fast_ttl_s:
+            procs_result: SourceResult | None = self._result("procs")
+            if procs_result is None or procs_result.attempted_at is None \
+                    or self.clock() - procs_result.attempted_at >= self.config.fast_ttl_s:
                 self.refresh_fast_sources_in_place()
         return self._assemble_snapshot(self.clock())
 
     def refresh_fast_sources_in_place(self) -> None:
         """
-        Re-reads `lease.sh status` and the process table, keeping the last good lease read on failure.
+        Re-reads the resource status, when the instance has a command for it, and the process table, keeping the
+        last good resource read on failure.
         """
-        started: float = self.clock()
-        lease_script: Path = self.config.harness_home / "bin" / "lease.sh"
-        try:
-            completed: subprocess.CompletedProcess[str] = subprocess.run(
-                [str(lease_script), "status"], capture_output=True, text=True, timeout=self.config.command_timeout_s,
-                env=dict(os.environ, HARNESS_HOME=str(self.config.harness_home)), stdin=subprocess.DEVNULL,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(f"lease.sh status exit {completed.returncode}: "
-                                   f"{completed.stderr.strip()[-200:]}")
-            self._store("lease", SourceResult(StateParsers.parse_lease_status(completed.stdout), started,
-                                              duration_s=self.clock() - started, attempted_at=started,
-                                              extra={"raw": completed.stdout.splitlines()}))
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            self._store_failure("lease", self._describe_error(error), started)
+        if self.config.resource_status_command:
+            self._refresh_resource_status_in_place()
         processes_started: float = self.clock()
         try:
             self._processes = self.scanner.scan_processes()
@@ -272,15 +299,36 @@ exit 0
         except OSError as error:
             self._store_failure("procs", self._describe_error(error), processes_started)
 
-    def refresh_local_sample_in_place(self) -> None:
+    def _refresh_resource_status_in_place(self) -> None:
         """
-        Samples this host (load, memory, card, card processes, containers), appends it to the history file, and
-        re-reads whether the harness is paused.
+        Runs the instance's resource status command, as an argv with no shell.
         """
         started: float = self.clock()
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
-                ["bash", "-c", self.LOAD_PROBE + self.MACHINE_PROBE_SCRIPT], capture_output=True, text=True,
+                list(self.config.resource_status_command), capture_output=True, text=True,
+                timeout=self.config.command_timeout_s, stdin=subprocess.DEVNULL,
+                env=dict(os.environ, HARNESS_HOME=str(self.config.harness_home),
+                         HARNESS_STATE=str(self.config.state_dir)),
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(f"resource status exit {completed.returncode}: "
+                                   f"{completed.stderr.strip()[-200:]}")
+            self._store("lease", SourceResult(StateParsers.parse_lease_status(completed.stdout), started,
+                                              duration_s=self.clock() - started, attempted_at=started,
+                                              extra={"raw": completed.stdout.splitlines()}))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            self._store_failure("lease", self._describe_error(error), started)
+
+    def refresh_local_sample_in_place(self) -> None:
+        """
+        Samples this host (load, memory, device and its processes when probed, containers), appends it to the
+        history file, and re-reads whether the harness is paused.
+        """
+        started: float = self.clock()
+        try:
+            completed: subprocess.CompletedProcess[str] = subprocess.run(
+                ["bash", "-c", self.LOAD_PROBE + self.machine_probe_script], capture_output=True, text=True,
                 timeout=self.config.command_timeout_s * 2, stdin=subprocess.DEVNULL,
             )
             probe: MachineProbe = StateParsers.parse_machine_probe(completed.stdout)
@@ -310,7 +358,7 @@ exit 0
         def probe_host(host: str) -> SourceResult:
             host_started: float = self.clock()
             row = latest.get(host)
-            script = self.MACHINE_PROBE_SCRIPT
+            script = self.machine_probe_script
             if (row is None or row.load1 is None or row.nproc is None
                     or host_started - row.epoch > self.config.host_health_stale_s):
                 script = self.LOAD_PROBE + script
@@ -403,7 +451,7 @@ exit 0
             "GH_REPO": self.github.repo, "HARNESS_HOME": str(self.config.harness_home),
             "ISSUE_LABEL": labels.queue, "WIP_LABEL": labels.wip, "SIGNOFF_LABEL": labels.signoff,
             "OPERATOR_LABEL": labels.operator, "READY_LABEL": labels.ready, "FIRST_LABEL": labels.first,
-            "LOW_LABEL": labels.low, "FABLE_LABEL": labels.fable,
+            "LOW_LABEL": labels.low, "LANE_LABEL": labels.lane,
         })
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
@@ -448,7 +496,7 @@ exit 0
             if claim.pid in self._processes and claim.issue not in tick_pid_by_issue
         }
 
-        stalls_text: str = self._read_tail(state_dir / "stalls.log")
+        stalls_path: Path = state_dir / "stalls.log"
         allocator_text: str = self._read_tail(state_dir / "logs" / "allocator.log")
         allocator_lines: tuple[AllocatorLine, ...] = StateParsers.parse_allocator(allocator_text, 400)
         usage: JsonDict = self._usage_view(now)
@@ -501,6 +549,7 @@ exit 0
         return {
             "generated_at": self._iso(now),
             "generated_epoch": now,
+            "title": self.config.title,
             "harness_home": str(self.config.harness_home),
             "repo": self.config.repo,
             "history_hours": self.config.history_hours,
@@ -516,11 +565,12 @@ exit 0
                 "waiting_count": waiting_count,
                 "waiting_count_from_failing_read": github_failing,
                 "queue_label": self.config.labels.queue,
+                "lane_model": self.config.lane_model,
                 "labels": asdict(self.config.labels),
             },
             "usage": usage,
             "machines": machines,
-            "leases": lease_view,
+            "leases": lease_view if self.config.resource_status_command else None,
             "ticks": [
                 dict(asdict(tick), title=issue_titles.get(tick.issue, ("", ""))[0] if tick.issue else "",
                      url=issue_titles.get(tick.issue, ("", ""))[1] if tick.issue else "",
@@ -551,7 +601,9 @@ exit 0
             "health": {
                 "stalls": [dict(asdict(stall), key=CommandRedactor.redact(stall.key),
                                 detail=CommandRedactor.redact(stall.detail))
-                           for stall in StateParsers.parse_stalls(stalls_text, self.config.stall_lines)],
+                           for stall in StateParsers.parse_stalls(self._read_tail(stalls_path),
+                                                                  self.config.stall_lines)]
+                if stalls_path.exists() else None,
                 "allocator": allocator_views,
             },
             "flow": flow,
@@ -561,7 +613,8 @@ exit 0
     def _activity(self, ticks: tuple[TickProcess, ...], now: float) -> tuple[tuple[RunQueue, ...],
                                                                                tuple[BuildLane, ...]]:
         """
-        Reads the run queues and compile lanes, at most every `activity_ttl_s`, keeping the last good read.
+        Reads the run queues and compile lanes the instance configures, at most every `activity_ttl_s`, keeping the
+        last good read.
 
         Args:
             ticks: The live ticks, to name the issue of a lock party with no worktree in its path.
@@ -570,17 +623,21 @@ exit 0
         Returns:
             The run queues and the compile lanes.
         """
+        if not self.config.run_queue_glob and not self.config.build_locks_enabled:
+            return (), ()
         with self._activity_lock:
             previous: SourceResult | None = self._result("activity")
             if previous is not None and previous.attempted_at is not None \
                     and now - previous.attempted_at < self.config.activity_ttl_s and previous.data is not None:
                 return previous.data
             started: float = self.clock()
-            run_queues: tuple[RunQueue, ...] = self.run_queue_reader.read_queues(self._processes, now)
+            run_queues: tuple[RunQueue, ...] = self.run_queue_reader.read_queues(self._processes, now) \
+                if self.config.run_queue_glob else ()
             try:
                 build_lanes: tuple[BuildLane, ...] = self.build_lock_reader.read_lanes(
                     self._remote_hosts(), self._processes,
-                    {tick.pid: tick.issue for tick in ticks if tick.issue is not None})
+                    {tick.pid: tick.issue for tick in ticks if tick.issue is not None}) \
+                    if self.config.build_locks_enabled else ()
             except (OSError, subprocess.TimeoutExpired) as error:
                 self._store_failure("activity", self._describe_error(error), started)
                 kept: SourceResult | None = self._result("activity")
@@ -591,7 +648,7 @@ exit 0
 
     def _machine_views(self, lease_status: LeaseStatus | None, waiting_count: int, now: float) -> list[JsonDict]:
         """
-        Builds one view a machine: this host first, then each remote card.
+        Builds one view a machine: this host first, then each remote host.
 
         Args:
             lease_status: The last lease read.
@@ -701,8 +758,8 @@ exit 0
         Args:
             view: The machine view so far.
             waiting_count: Claimable issues.
-            lease_waits: Recorded slot or card waits.
-            harness_uses_card: False when the card is left to its owner.
+            lease_waits: Recorded slot or device waits.
+            harness_uses_card: False when the device is left to its owner.
 
         Returns:
             Signals, each a level (critical, serious, warning, info) and text.
@@ -724,7 +781,7 @@ exit 0
         if harness_uses_card and card_idle and not view["slots"] and (waiting_count > 0 or lease_waits > 0):
             signals.append({"level": "warning", "text": "idle, work waiting"})
         elif harness_uses_card and card_idle and cpu_idle and view["slots"] and len(recent_util) >= 3:
-            signals.append({"level": "warning", "text": "held, card and CPU idle"})
+            signals.append({"level": "warning", "text": "held, device and CPU idle"})
         return signals
 
     def _lease_view(self, lease_status: LeaseStatus | None, lease_result: SourceResult | None,
@@ -739,7 +796,7 @@ exit 0
             now: The current epoch.
 
         Returns:
-            Cards, slots with holder kinds and ages, whole-card holds, device, priority and waits.
+            Remote hosts, slots with holder kinds and ages, whole-device holds, device lease, priority and waits.
         """
         if lease_status is None:
             return {"available": False, "error": lease_result.error if lease_result else "not read yet",
@@ -830,11 +887,14 @@ exit 0
             Source name to its status.
         """
         intervals: dict[str, float] = {
-            "lease": self.config.fast_ttl_s, "procs": self.config.fast_ttl_s, "local": self.config.local_interval_s,
+            "procs": self.config.fast_ttl_s, "local": self.config.local_interval_s,
             "paused": self.config.local_interval_s, "remote": self.config.remote_interval_s,
             "github": self.config.github_interval_s, "claimable_sh": self.config.claimable_interval_s,
-            "activity": self.config.activity_ttl_s,
         }
+        if self.config.resource_status_command:
+            intervals["lease"] = self.config.fast_ttl_s
+        if self.config.run_queue_glob or self.config.build_locks_enabled:
+            intervals["activity"] = self.config.activity_ttl_s
         view: JsonDict = {}
         for name, interval_s in intervals.items():
             result: SourceResult | None = self._result(name)
@@ -847,12 +907,11 @@ exit 0
             }
         host_health_path: Path = self.config.state_dir / "host_health.tsv"
         try:
-            host_health_mtime: float | None = host_health_path.stat().st_mtime
+            host_health_mtime: float = host_health_path.stat().st_mtime
         except OSError:
-            host_health_mtime = None
-        view["host_health_tsv"] = {"interval_s": 180, "fetched_at": self._iso(host_health_mtime)
-                                   if host_health_mtime else None, "age_s": self._age(host_health_mtime, now),
-                                   "error": None if host_health_mtime else "missing", "duration_s": None}
+            return view
+        view["host_health_tsv"] = {"interval_s": 180, "fetched_at": self._iso(host_health_mtime),
+                                   "age_s": self._age(host_health_mtime, now), "error": None, "duration_s": None}
         return view
 
     def _source_value_view(self, result: SourceResult | None, now: float) -> JsonDict:
@@ -914,7 +973,7 @@ exit 0
 
     def _remote_hosts(self) -> list[str]:
         """
-        Lists the remote hosts: the lease read's cards, else the hosts host_health.tsv names.
+        Lists the remote hosts: the resource status's remote hosts, else the hosts host_health.tsv names.
 
         Returns:
             Hosts in the harness's order.
@@ -1242,7 +1301,7 @@ exit 0
             probe: The probe, or None.
 
         Returns:
-            Load, cores, memory, card, card processes and containers (empty when no probe).
+            Load, cores, memory, device, device processes and containers (empty when no probe).
         """
         if probe is None:
             return {"load1": None, "nproc": None, "mem_used_mb": None, "mem_total_mb": None, "gpu": None,

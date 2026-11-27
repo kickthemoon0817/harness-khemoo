@@ -1,5 +1,5 @@
 """
-Reads named keys from config/harness.env without sourcing it.
+Reads named keys from the instance's harness.env without sourcing it.
 """
 import re
 from pathlib import Path
