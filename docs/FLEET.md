@@ -641,7 +641,8 @@ own keys.
 ### `[devices.<name>]`
 
 `<name>` is a `DeviceName` (1 to 63 of `[a-z0-9.-]` starting with a letter or digit), and not `auto`. Devices keep
-their file order, which is the registry order everywhere.
+their file order, which is the registry order everywhere. A key that applies to another transport
+is an error.
 
 | Key | Type | Default | Applies to | Meaning |
 |---|---|---|---|---|
@@ -714,14 +715,16 @@ fleet pki issue-client <name> --role monitor|dispatch [--dir DIR] [--days N]
 fleet --version | --help
 ```
 
-- `status` asks every device (or each `--device`) concurrently. It prints a table, or with
-  `--json` the [status document](#fleet-status---json). It exits 0 when every device answered and
-  1 when any failed; the output is complete either way.
+- `status` asks every device (or each `--device`) concurrently, at most 16 at a time. It prints
+  a table, or with `--json` the [status document](#fleet-status---json). It exits 0 when every
+  device answered and 1 when any failed; the output is complete either way.
 - `sessions` is the same for sessions. `--running` keeps only sessions in state `running`.
 - `dispatch` reads the prompt from stdin, up to the prompt cap; an empty or oversize prompt is an
-  error before any connection. Without `--wait` it prints the device and session id
-  (`{"device": "dev-a", "session": "d-…"}` with `--json`) and exits 0. With `--wait` it then sends
-  `wait`, writes the session's output to stdout as it arrives, and exits with the agent's status:
+  error before any connection; like any usage or config error it exits 2, even with `--wait`.
+  Without `--wait` it prints the device and session id (`{"device": "dev-a", "session": "d-…"}`
+  with `--json`) and exits 0. With `--wait` it writes `fleet: <device>: session <id>` to stderr,
+  then sends `wait`, writes the session's output to stdout as it arrives, and exits with the
+  agent's status:
 
   | Session end | Exit code |
   |---|---|
@@ -743,14 +746,16 @@ fleet --version | --help
   session ends.
 - With `--json`, `logs` and `dispatch --wait` print one JSON object per line instead of raw
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
-- `cancel` prints the cancelled session and exits 0. Cancelling an ended session succeeds.
+- `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits
+  0. Cancelling an ended session succeeds.
 - `pki` writes into `--dir`, by default `pki/` beside the resolved fleet.toml. The directory is
   created 0700, key files are written 0600, and no file is overwritten: an existing file is an
   error. Keys are ECDSA P-256 and serials random. `init` makes `ca.pem` and `ca.key` (default
   3650 days). `issue-server` makes `<device>.pem` and `<device>.key` with DNS SAN `<device>`,
   each `--dns` and each `--ip`, and serverAuth usage. `issue-client` makes `<name>.pem` and
-  `<name>.key` with the SAN URI `fleet:role:<role>` and clientAuth usage. Leaves default to 397
-  days. Each prints the files it wrote and the serial in hex.
+  `<name>.key`, `<name>` following the device-name rule, with the SAN URI `fleet:role:<role>`
+  and clientAuth usage. Leaves default to 397 days. Each prints the files it wrote and the
+  serial in hex.
 
 Exit codes, except `dispatch --wait`: 0 success, 1 a device or operation failed, 2 a usage or
 config error. Errors go to stderr as `fleet: <device>: <code>: <message>`. Human tables are not
