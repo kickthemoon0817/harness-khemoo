@@ -1,7 +1,7 @@
 //! Human-readable tables. They are not a stable interface; scripts use `--json`.
 //!
 //! Every string a device reported is untrusted: [`clean`] replaces its control characters,
-//! bidi controls and zero-width characters before it reaches a terminal, so a device cannot
+//! bidi controls and invisible characters before it reaches a terminal, so a device cannot
 //! move the cursor, retitle the window, or make text read differently from what it is.
 
 use std::fmt::Write as _;
@@ -9,24 +9,40 @@ use std::fmt::Write as _;
 use fleet_proto::SessionState;
 use fleet_proto::output::{SessionsOutput, StatusOutput, TransportKind};
 
-/// Bidi controls and zero-width characters: invisible, they can make text read in another
-/// order than it is (a "Trojan Source" spoof) or hide a difference between two names.
-fn is_invisible(c: char) -> bool {
+/// Bidi controls and invisible characters: they can make text read in another order than it
+/// is (a "Trojan Source" spoof) or hide a difference between two names. Tag characters can
+/// also carry hidden text.
+fn hides_text(c: char) -> bool {
     matches!(
         c,
-        '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'
-            | '\u{2066}'..='\u{2069}'
+        '\u{00AD}'
             | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{3164}'
             | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
+/// The zero-width joiner and the variation selectors: invisible, but emoji need them, and they
+/// cannot reorder or hide text on their own.
+fn joins_emoji(c: char) -> bool {
+    matches!(c, '\u{200D}' | '\u{FE00}'..='\u{FE0F}')
+}
+
+/// A device's name, label, workdir or error for a terminal: every control character and
+/// invisible character becomes U+FFFD, since such a string has no reason to hold one.
 pub fn clean(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() || is_invisible(c) {
+            if c.is_control() || hides_text(c) || joins_emoji(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -36,11 +52,11 @@ pub fn clean(s: &str) -> String {
 }
 
 /// An agent's output for a terminal: [`clean`], but keeping tab, LF and CR so the text
-/// keeps its layout.
+/// keeps its layout, and the joiner and variation selectors so emoji survive.
 pub fn clean_output(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || is_invisible(c) {
+            if (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || hides_text(c) {
                 '\u{FFFD}'
             } else {
                 c
@@ -232,19 +248,56 @@ mod tests {
     }
 
     #[test]
-    fn bidi_and_zero_width_characters_are_replaced() {
-        let invisible = [
-            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
-            '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{200B}', '\u{200C}',
-            '\u{200D}', '\u{2060}', '\u{FEFF}',
+    fn bidi_and_invisible_characters_are_replaced() {
+        let hidden = [
+            '\u{202A}',
+            '\u{202B}',
+            '\u{202C}',
+            '\u{202D}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{061C}',
+            '\u{200B}',
+            '\u{200C}',
+            '\u{2060}',
+            '\u{2061}',
+            '\u{2064}',
+            '\u{FEFF}',
+            '\u{00AD}',
+            '\u{180E}',
+            '\u{3164}',
+            '\u{E0000}',
+            '\u{E0041}',
+            '\u{E007F}',
         ];
-        for c in invisible {
+        for c in hidden {
             let s = format!("a{c}b");
             assert_eq!(clean(&s), "a\u{FFFD}b", "{:04X}", u32::from(c));
             assert_eq!(clean_output(&s), "a\u{FFFD}b", "{:04X}", u32::from(c));
         }
+        for c in ['\u{200D}', '\u{FE00}', '\u{FE0F}'] {
+            assert_eq!(
+                clean(&format!("a{c}b")),
+                "a\u{FFFD}b",
+                "{:04X}",
+                u32::from(c)
+            );
+        }
         assert_eq!(clean("é\u{2010}"), "é\u{2010}");
         assert_eq!(clean_output("x\ty\n"), "x\ty\n");
+    }
+
+    #[test]
+    fn agent_output_keeps_emoji_sequences() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let heart = "\u{2764}\u{FE0F}";
+        let text = format!("{family} {heart}");
+        assert_eq!(clean_output(&text), text);
     }
 
     #[test]

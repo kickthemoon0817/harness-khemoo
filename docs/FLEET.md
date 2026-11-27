@@ -259,21 +259,35 @@ The hub runs, as an argv with no shell:
 
 ```text
 ssh -T -a -x -o BatchMode=yes -o ClearAllForwardings=yes -o ForwardAgent=no \
-    -o PermitLocalCommand=no [-o OPTION]... -- TARGET fleetd --stdio
+    -o PermitLocalCommand=no -o ControlPath=none -o ControlMaster=no \
+    [-o OPTION]... -- TARGET fleetd --stdio
 ```
 
 and speaks the protocol over the child's stdin and stdout. ssh does the authentication.
 
 A device is less trusted than the hub, and a compromised one must not be able to use the hub's
 ssh agent, X display or local ports to reach other machines. The fixed options therefore turn off
-agent and X11 forwarding, every port forward, and `LocalCommand`. ssh keeps the first value it
-obtains for an option, and command-line options come before `~/.ssh/config`, so neither the
+agent and X11 forwarding, every port forward, `LocalCommand`, and connection sharing, so a control
+master another session opened with its own forwards is never reused. ssh keeps the first value
+it obtains for an option, and command-line options come before `~/.ssh/config`, so neither the
 user's ssh config nor a device's `ssh_options` can turn them back on. On top of that, fleet.toml
-refuses `ssh_options` whose key, in any case, is `ForwardAgent`, `ForwardX11`,
-`ForwardX11Trusted`, `ProxyCommand`, `LocalCommand`, `PermitLocalCommand`, `RemoteCommand`,
-`LocalForward`, `RemoteForward`, `DynamicForward`, `Tunnel`, `KnownHostsCommand`, `Include` or
-`Match`: each forwards to the device, runs a command on the hub, or reads further config that
-could. Those belong in the user's own `~/.ssh/config` if they are wanted at all.
+refuses `ssh_options` whose key, in any case, is one of:
+
+- `ForwardAgent`, `ForwardX11`, `ForwardX11Trusted`, `LocalForward`, `RemoteForward`,
+  `DynamicForward`, `Tunnel`: they forward the hub's agent, display or ports to the device;
+- `ProxyCommand`, `ProxyJump`, `LocalCommand`, `PermitLocalCommand`, `RemoteCommand`,
+  `KnownHostsCommand`, `PKCS11Provider`, `SecurityKeyProvider`: they run a command or load a
+  library on the hub, route the connection elsewhere, or replace the pinned remote command;
+- `Include`, `Match`: they read further config that could do any of this;
+- `ControlPath`, `ControlMaster`, `ControlPersist`: they share or keep a connection;
+- `SendEnv`, `SetEnv`: they send the hub's environment, or set one, on the device;
+- `StrictHostKeyChecking`, `UserKnownHostsFile`, `GlobalKnownHostsFile`, `HostKeyAlias`,
+  `VerifyHostKeyDNS`, `CheckHostIP`: they weaken or redirect host key checking.
+
+An option must be one `Key=value` string with an ASCII alphanumeric key, so ssh's other
+spellings (`Key value`, `Key = value`, `-oKey=value`) are refused rather than parsed around the
+list. Those settings belong in the user's own `~/.ssh/config` if they are wanted at all.
+
 `fleetd --stdio` is a relay: it reads the client's `Hello`, connects to the running daemon's unix
 socket, completes the handshake there asking for the lesser of the client's role, `--role` and
 `[stdio] max_role`, returns the granted `Hello` to the client, and then copies bytes both ways
@@ -825,11 +839,14 @@ fleet --version | --help
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
 - Without `--json`, when stdout is a terminal, `logs` and `dispatch --wait` replace every control
   character in the output other than tab, LF and CR (ESC and the rest of C0, DEL, and C1
-  U+0080–U+009F), every bidi control (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C) and
-  every zero-width character (U+200B–U+200D, U+2060, U+FEFF) with U+FFFD, so a remote agent
-  cannot drive the terminal with escape sequences or make text read differently from what it
-  is. Strings a device reports in tables and error messages get the same treatment, without the
-  tab, LF and CR exception.
+  U+0080–U+009F), every bidi control (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C),
+  every invisible character (U+00AD, U+180E, U+200B, U+200C, U+2060–U+2064, U+3164, U+FEFF) and
+  every tag character (U+E0000–U+E007F) with U+FFFD, so a remote agent cannot drive the terminal
+  with escape sequences or make text read differently from what it is. The zero-width joiner
+  U+200D and the variation selectors U+FE00–U+FE0F are kept, so emoji survive; on their own they
+  cannot reorder or hide text. Strings a device reports, such as names, labels, workdirs and
+  error messages, get the same treatment without those exceptions: tab, LF, CR, U+200D and
+  U+FE00–U+FE0F are replaced too.
   `--raw` writes the output unchanged. When stdout is not a terminal (a pipe or a file), the
   output is always written unchanged, so logs keep the agent's exact bytes.
 - `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits

@@ -329,7 +329,8 @@ fn has_control(s: &str) -> bool {
 }
 
 /// ssh options a device may not set: each would forward the hub's agent, display or ports to
-/// the device, run a local command, or pull in config that could do either.
+/// the device, run a local command or load a provider library, pull in config that could, reuse
+/// or open a control socket, send the hub's environment, or weaken host key checking.
 const SSH_DENIED_OPTIONS: &[&str] = &[
     "ForwardAgent",
     "ForwardX11",
@@ -345,6 +346,20 @@ const SSH_DENIED_OPTIONS: &[&str] = &[
     "KnownHostsCommand",
     "Include",
     "Match",
+    "PKCS11Provider",
+    "SecurityKeyProvider",
+    "ProxyJump",
+    "ControlPath",
+    "ControlMaster",
+    "ControlPersist",
+    "SendEnv",
+    "SetEnv",
+    "StrictHostKeyChecking",
+    "UserKnownHostsFile",
+    "GlobalKnownHostsFile",
+    "HostKeyAlias",
+    "VerifyHostKeyDNS",
+    "CheckHostIP",
 ];
 
 fn ssh_transport(key: &str, dev: &RawDevice, program: &Path) -> Result<Transport, ConfigError> {

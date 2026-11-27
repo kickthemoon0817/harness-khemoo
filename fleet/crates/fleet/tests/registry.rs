@@ -274,12 +274,50 @@ fn ssh_options_that_forward_or_run_commands_are_refused() {
         "KnownHostsCommand=id",
         "Include=/tmp/x",
         "match=all",
+        "PKCS11Provider=/tmp/x.so",
+        "SecurityKeyProvider=/tmp/x.so",
+        "ProxyJump=evil",
+        "ControlPath=/tmp/mux",
+        "ControlMaster=auto",
+        "ControlPersist=yes",
+        "SendEnv=*",
+        "SetEnv=A=b",
+        "StrictHostKeyChecking=no",
+        "UserKnownHostsFile=/dev/null",
+        "GlobalKnownHostsFile=/dev/null",
+        "HostKeyAlias=other",
+        "VerifyHostKeyDNS=yes",
+        "checkhostip=no",
     ] {
         let text =
             format!("[devices.a]\ntransport = \"ssh\"\ntarget = \"a\"\nssh_options = [{option:?}]");
         let message = load_err(&text);
         assert!(
             message.contains("devices.a.ssh_options") && message.contains("not allowed"),
+            "{option}: {message}"
+        );
+    }
+}
+
+/// ssh also reads `Key value`, `Key = value` and, as an argument, `-oKey=value`; none of them
+/// gets past the `Key=value` rule to smuggle in a refused key.
+#[test]
+fn other_spellings_of_an_ssh_option_are_refused() {
+    for option in [
+        "ProxyCommand nc %h %p",
+        "ProxyCommand nc=x",
+        "ProxyCommand = nc",
+        "ProxyCommand\tnc",
+        "-oProxyCommand=nc",
+        "-o ProxyCommand=nc",
+        "\"ProxyCommand\"=nc",
+        "=nc",
+    ] {
+        let text =
+            format!("[devices.a]\ntransport = \"ssh\"\ntarget = \"a\"\nssh_options = [{option:?}]");
+        let message = load_err(&text);
+        assert!(
+            message.contains("devices.a.ssh_options: each must be Key=value"),
             "{option}: {message}"
         );
     }
