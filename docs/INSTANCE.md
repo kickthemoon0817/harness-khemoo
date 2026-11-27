@@ -29,7 +29,7 @@ skipped.
 `tick.sh` also exports `TARGET_REPO`, `WORKTREE_ROOT`, the lint's `PUBLIC_RECORD_RULES`,
 `PUBLIC_RECORD_PR_SECTIONS` and `PUBLIC_RECORD_ISSUE_SECTIONS`, and the label keys (`ISSUE_LABEL`,
 `WIP_LABEL`, `READY_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`, `LONG_LABEL`, `FIRST_LABEL`, `LOW_LABEL`,
-`LANE_LABEL`), and the fleet keys (`TICK_AGENT`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
+`LANE_LABEL`), and the fleet keys (`TICK_AGENT`, `TICK_AGENT_EXES`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
 `FLEET_CONFIG`). None of them is secret. No other config key reaches a tick's environment unless
 `TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
 `TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
@@ -76,7 +76,7 @@ reachable device that can take a tick (`FLEET_DEVICE`, when it names one), and e
 [`docs/FLEET.md`](FLEET.md) describes fleet. With `FLEET_DISPATCH=1` the runner runs each tick as
 
 ```
-$FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto} --adapter $TICK_AGENT --workdir $WORKTREE_ROOT \
+$FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto} --adapter $TICK_AGENT --workdir $TARGET_REPO \
     --model <model> --wait --timeout <(LONG_TICK_BUDGET_MIN + 30) * 60> [--label tick=landing]
 ```
 
@@ -84,7 +84,11 @@ as an argv, with the composed prompt on stdin, instead of `$CLAUDE_BIN -p <promp
 fleet writes the agent's output to the tick log and exits with its status, so the model order, the
 usage-limit cooldown, the exit trailer and chaining work as they do locally. The device's
 `fleetd.toml` fixes the agent's command line, so `CLAUDE_BIN` and `CLAUDE_FLAGS` do not apply;
-`templates/instance/fleetd.toml.example` lists what a device needs to take ticks. The launcher counts
+`templates/instance/fleetd.toml.example` lists what a device needs to take ticks: a harness checkout
+and its own instance, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and `TARGET_REPO` set in the
+adapter's `env` table, since fleetd gives a dispatched agent no environment of the hub's (see
+[`docs/FLEET.md`](FLEET.md)). The adapter's `timeout_s` caps the tick: a device whose `timeout_s` is
+under the `--timeout` above ends a tick before its budget does. The launcher counts
 a live tick by its `fleet dispatch` process, and a landing tick by its label, since its prompt is not
 in its argv.
 
@@ -92,6 +96,7 @@ in its argv.
 |---|---|---|
 | `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
 | `TICK_AGENT` | `claude` | the adapter a tick runs; another value needs `FLEET_DISPATCH=1`, or `check` fails and the launcher logs the instance as incomplete |
+| `TICK_AGENT_EXES` | `claude` | the executable names a tick runs as; `bin/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has one of these base names |
 | `FLEET_DEVICE` | `auto` | a device name from `fleet.toml`, or `auto` |
 | `FLEET_BIN` | `fleet` | the fleet CLI |
 | `FLEET_CONFIG` | `$HARNESS_INSTANCE_DIR/fleet.toml` | the device registry (`templates/instance/fleet.toml.example`) |
