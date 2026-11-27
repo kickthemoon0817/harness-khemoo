@@ -22,10 +22,15 @@ need_vram=$REMOTE_MIN_VRAM_MIB
 # --alone-card: the card runs no compute process; the load is not read, since the run times nothing.
 if [ "${1:-}" = --alone ] || [ "${1:-}" = --alone-card ]; then
   need_vram=$REMOTE_MIN_VRAM_RENDER_MIB
-  read -r apps load cores < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-    'printf "%s " "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"; printf "%s " "$(cut -d" " -f1 /proc/loadavg)"; nproc' 2>/dev/null)
+  read -r apps load cores builders < <(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    'printf "%s " "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)"; printf "%s " "$(cut -d" " -f1 /proc/loadavg)"; printf "%s " "$(nproc)"; docker ps --format "{{.Image}}" 2>/dev/null | grep -c "^worv-builder"' 2>/dev/null)
   [[ "$apps" =~ ^[0-9]+$ ]] || { echo "busy $host does not answer"; exit 1; }
   if [ "$apps" -gt 0 ]; then echo "busy $apps compute process(es) on the card"; exit 1; fi
+  # A compile or test container (the builder image) takes the host's cores whatever load1 says when it
+  # starts, so a cost read waits for none to run there.
+  if [ "${1:-}" = --alone ] && [[ "${builders:-0}" =~ ^[0-9]+$ ]] && [ "${builders:-0}" -gt 0 ]; then
+    echo "busy $builders build or test container(s) on the host"; exit 1
+  fi
   # Quiet means load1 under half the host's cores, and never under REMOTE_ALONE_MAX_LOAD (6): the kit's
   # main thread is what a cost read times, and a build on the other half of a wide host leaves it a core.
   max_load=$(awk -v c="${cores:-0}" -v m="${REMOTE_ALONE_MAX_LOAD:-6}" 'BEGIN { h = c / 2; print (h > m ? h : m) }')
