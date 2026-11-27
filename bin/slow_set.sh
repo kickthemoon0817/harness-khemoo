@@ -186,7 +186,11 @@ if [ -n "$open" ]; then
 else
     # gh prints the new issue's URL; its last path element is the number.
     open=$(gh issue create --repo "$GH_REPO" --label ai --label ai:plan --title "test: the $set_name is red on $WORK_BRANCH" --body "$body" 2>>"$log" | tail -1 | sed 's|.*/||')
-    echo "filed #$open" >>"$log"
+    if [[ "$open" =~ ^[0-9]+$ ]]; then
+        echo "filed #$open" >>"$log"
+    else
+        echo "gh issue create failed; nothing filed" >>"$log"; open=""
+    fi
 fi
 [ -n "$open" ] && gh issue comment "$open" --repo "$GH_REPO" --body "$trace" >>"$log" 2>&1
 echo "RED $sha" >>"$log"
