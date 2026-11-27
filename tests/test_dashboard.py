@@ -1999,13 +1999,19 @@ class FleetPanelTest(unittest.TestCase):
         seen: Path = self.home / "environment"
         collector: Collector = self.collector_running(
             "import os, sys; "
-            f"open({str(seen)!r}, 'w').write(' '.join(sorted(n for n in os.environ if 'TOKEN' in n.upper()))); "
+            f"open({str(seen)!r}, 'w').write(' '.join(sorted(os.environ))); "
             "sys.stdout.write(open(sys.argv[1]).read())")
-        with patch.dict(os.environ, {"GH_TOKEN": self.SECRET_TOKEN, "GITHUB_TOKEN": self.SECRET_TOKEN,
-                                     "my_api_token": "x", "HOME_DIR": "kept"}):
+        secrets: dict[str, str] = {name: "x" for name in (
+            "GH_TOKEN", "GITHUB_TOKEN", "my_api_token", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD", "MYSQL_PASSWD",
+            "OPENAI_API_KEY", "Deploy_Private_Key", "GOOGLE_APPLICATION_CREDENTIALS")}
+        kept: dict[str, str] = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "HOME": "/home/x", "PATH": os.environ["PATH"],
+                                "KEYBOARD": "kept"}
+        with patch.dict(os.environ, dict(secrets, **kept)):
             collector.refresh_fleet_in_place()
         self.assertIsNone(collector.snapshot()["fleet"]["error"])
-        self.assertEqual(seen.read_text(), "")
+        names: set[str] = set(seen.read_text().split())
+        self.assertEqual(names & set(secrets), set())
+        self.assertLessEqual(set(kept), names)
 
     def test_output_past_the_cap_kills_fleet_and_is_a_source_error(self) -> None:
         collector: Collector = self.collector_running(

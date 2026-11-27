@@ -4,6 +4,7 @@ Gathers the dashboard's data on a cadence per source and assembles one JSON-read
 import json
 import logging
 import os
+import re
 import selectors
 import shlex
 import socket
@@ -75,7 +76,7 @@ class DashboardConfig:
     `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
     names under `build_lock_dir`. `fleet_status_command` is an argv printing `fleet status --json` or
     `fleet sessions --json` (docs/FLEET.md); `fleet_environment` is set for it, as a tick's fleet gets it, so fleet
-    finds the instance's fleet.toml, and every variable whose name holds TOKEN is left out of its environment.
+    finds the instance's fleet.toml; a variable whose name looks secret (SECRET_NAME_PATTERN) is left out.
     """
 
     harness_home: Path
@@ -186,6 +187,8 @@ exit 0
     # filling the dashboard's memory.
     FLEET_OUTPUT_MAX_BYTES: ClassVar[int] = 8 * 1024 * 1024
     STDERR_TAIL_BYTES: ClassVar[int] = 4096
+    SECRET_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL", re.IGNORECASE)
     PID_LOOKUPS_PER_CYCLE: ClassVar[int] = 3
 
     def __init__(
@@ -519,7 +522,9 @@ exit 0
         """
         started: float = self.clock()
         # fleet needs no credential of the dashboard's, and FLEET_STATUS_CMD may be any command the instance names.
-        environment: dict[str, str] = {name: value for name, value in os.environ.items() if "TOKEN" not in name.upper()}
+        # SSH_AUTH_SOCK stays: an ssh transport may authenticate through the agent.
+        environment: dict[str, str] = {name: value for name, value in os.environ.items()
+                                       if not self.SECRET_NAME_PATTERN.search(name)}
         environment.update(self.config.fleet_environment)
         try:
             returncode, stdout, stderr = self._run_capped(list(self.config.fleet_status_command), environment,

@@ -92,6 +92,12 @@ under the `--timeout` above ends a tick before its budget does. The launcher cou
 a live tick by its `fleet dispatch` process, and a landing tick by its label, since its prompt is not
 in its argv.
 
+An adapter's `exe` may be a wrapper script, but it must stay inside the adapter's `workdir_roots`:
+on Linux, fleetd checks the child's working directory right after the spawn and kills its process
+group when it is outside the roots, so a wrapper that changes directory elsewhere before it execs
+the agent (to the harness checkout, say) has its tick killed. Pass such paths to the agent as
+environment or arguments instead of `cd`-ing to them.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
@@ -236,7 +242,10 @@ device failed, with the document complete, so the document decides. The Devices 
 device's transport, reachability or error, CPU, load, memory, GPUs and each adapter's running and
 maximum dispatched sessions. The Agent sessions panel shows each session's device, adapter and
 model, pid (else id), state, age, workdir, and its issue: the `issue` label, else the worktree its
-workdir lies in. Every string from fleet goes through the dashboard's redaction.
+workdir lies in. Every string from fleet goes through the dashboard's redaction. The command runs
+without any variable whose name holds `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`,
+`PRIVATE_KEY` or `CREDENTIAL`, in any case, and its stdout is capped at 8 MiB: past that it is
+killed and the read fails.
 
 ### `RESOURCE_STATUS_CMD` output
 
