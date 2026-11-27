@@ -44,10 +44,13 @@ pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 pub const MAX_EVENT_DATA: usize = 64 * 1024;
 
 /// The most sessions one [`ResponseBody::Sessions`] carries. fleetd lists running sessions
-/// first, then ended ones newest first, and sets `truncated` when it left any out.
+/// first, then ended ones newest first, and sets `truncated` when it left any out, by this
+/// count or because the next session would take the reply past [`MAX_FRAME_LEN`]
+/// ([`ResponseBody::sessions`]).
 pub const MAX_SESSIONS: usize = 256;
 
 /// The longest a reported path (`Session::cwd`, `Session::exe`, `Disk::mount`) or other
 /// free-text string in a report may be, in bytes; fleetd cuts longer ones at a character
-/// boundary. With [`MAX_SESSIONS`], this keeps every reply under [`MAX_FRAME_LEN`].
+/// boundary, so one session stays far below [`MAX_FRAME_LEN`]. A `sessions` reply is bounded
+/// by its serialized size, not by these limits.
 pub const MAX_REPORTED_STR: usize = 1024;

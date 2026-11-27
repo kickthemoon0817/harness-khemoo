@@ -129,7 +129,7 @@ The server also treats a frame that arrives while a stream is in progress as suc
 | `kind` | Fields |
 |---|---|
 | `status` | `device` (`DeviceInfo`), `metrics` (`Metrics`), `adapters` (`AdapterInfo` list) |
-| `sessions` | `sessions` (`Session` list): running sessions, then dispatched sessions that ended within `session_retention_s`, newest first, at most 256 (`MAX_SESSIONS`); `truncated` (boolean): whether any were left out |
+| `sessions` | `sessions` (`Session` list): running sessions, then dispatched sessions that ended within `session_retention_s`, newest first, at most 256 (`MAX_SESSIONS`) and as many as fit in one frame; `truncated` (boolean): whether any were left out |
 | `dispatched` | `session`: the new session id |
 | `cancelled` | `session` |
 | `event` | `data`: a chunk of the session's combined stdout and stderr |
@@ -203,9 +203,10 @@ Unix seconds.
 
 Every string in a report other than `event` data comes from the device. fleetd replaces control
 characters in them with U+FFFD and cuts each at 1024 bytes (`MAX_REPORTED_STR`) on a character
-boundary, which with `MAX_SESSIONS` keeps every reply within one frame. The hub still treats
-them as untrusted: its human tables replace control characters again, and the dashboard passes
-them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw,
+boundary. Labels and JSON escaping can still make 256 sessions larger than a frame, so fleetd
+also stops adding sessions to a `sessions` reply when the next would take it past 1 MiB
+(`MAX_FRAME_LEN`), and sets `truncated`. The hub still treats them as untrusted: its human
+tables replace control characters again, and the dashboard passes them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw,
 since it is the agent's own output.
 
 - An `AdapterInfo` with `max_concurrent` 0 is discovery-only: it cannot be dispatched to.
@@ -341,9 +342,10 @@ These apply to the tls transport:
   socket's (top-level `max_connections`, which ssh relays also count against). A tls connection
   holds a place from `accept` to close, so peers that have not authenticated, or never will, can
   fill only the tls budget and never lock out local or ssh clients. Within it, at most
-  `[tls] max_connections_per_ip` come from one address, and at most `[tls] max_handshakes` are
+  `[tls] max_connections_per_ip` come from one peer, and at most `[tls] max_handshakes` are
   still in their TLS handshake or `Hello`, so slow handshakes cannot fill it either; a finished
-  handshake gives its slot back.
+  handshake gives its slot back. A peer is one IPv4 address, IPv4-mapped IPv6 included, or one
+  IPv6 /64, since a single host commonly holds a whole /64.
 - A tls connection over any of these limits is closed right after `accept`, before the handshake;
   a unix one over `max_connections` gets a `Hello` granting `monitor`, then a `busy` error with
   id 0.
@@ -362,7 +364,12 @@ A dispatch only selects among what the operator configured. For an adapter:
   not store it.
 - The workdir is canonicalized (symlinks resolved) and must be one of the adapter's
   `workdir_roots` or below one, compared by path components. The child runs there, and
-  `{workdir}` is the canonical path.
+  `{workdir}` is the canonical path. This stops a request from naming a path outside the roots;
+  it does not stop a process that can write inside the roots from swapping a directory on that
+  path for a symlink between the check and the spawn. On Linux, fleetd reads the child's
+  `/proc/<pid>/cwd` right after the spawn and kills the process group when it is outside the
+  roots, but the child has already started by then. A working directory is not a sandbox: the
+  agent can read and write anything fleetd's user can.
 - The environment is cleared. The child gets `HOME` and `PATH` from fleetd's environment, plus
   each name in `env_allow` that fleetd's environment sets, then the adapter's static `env` table.
   Secrets therefore come from the device, never from the request.
@@ -373,7 +380,9 @@ A dispatch only selects among what the operator configured. For an adapter:
   fleetd appends one line `[fleetd: log truncated]` and discards the rest while still draining, so
   the agent never blocks on output.
 - On Linux, fleetd sets `RLIMIT_CORE` to 0 and `RLIMIT_NOFILE` to `rlimit_nofile` on the child
-  with `prlimit` right after spawning it. Other systems get no rlimits.
+  with `prlimit` right after spawning it. They are best-effort: the child runs without them until
+  then, so anything it forks in that moment keeps fleetd's limits, and a failed `prlimit` is
+  logged, not fatal. Other systems get no rlimits.
 - Cancel and timeout send SIGTERM to the process group, then SIGKILL after `kill_grace_s`, through
   rustix's safe wrappers. When the agent exits on its own, anything left in its group gets the
   same SIGTERM then SIGKILL, so no helper outlives its session.
@@ -381,7 +390,9 @@ A dispatch only selects among what the operator configured. For an adapter:
   subject and serial, or `unix uid N`. A `--stdio` relay reaches the daemon over the socket, so
   ssh peers log as `unix uid N`; the relay logs its own connection and granted role.
 
-Discovery is read-only. It reports only processes of fleetd's own uid unless
+Discovery is read-only, and one scan of the process table answers every `sessions` request and
+session lookup for 2 seconds, so a discovered session can appear or vanish up to that late. It
+reports only processes of fleetd's own uid unless
 `[discovery] all_users` is true. A process in the process group of a session fleetd dispatched is
 reported once, as that dispatched session. A session's `summary`, dispatched or discovered, is the
 executable's base name followed by the flag names in its argv (elements that start with `-`, cut
@@ -393,19 +404,23 @@ prompts or secrets, are never included. A discovered session's `model` is the va
 
 | Path | Mode | Owner |
 |---|---|---|
-| `state_dir` | 0700 | fleetd's user; fleetd creates it and refuses to start if it exists with another owner or group/other permission bits |
-| the unix socket | 0600 | fleetd's user, inside a 0700 directory |
+| `state_dir` | 0700 | fleetd's user; fleetd creates it and refuses to start if it exists with another owner or group/other permission bits. Only the directory itself is checked: its parents must be owned by the operator and not writable by others |
+| the unix socket | 0600 | fleetd's user, inside a 0700 directory, checked like `state_dir` |
 | `<state_dir>/sessions/<id>/session.json`, `output.log` | 0600 | fleetd's user |
 | a TLS private key (`[tls] key`, the hub's `key`, `ca.key`) | 0600 or 0400 | its reader; fleetd and fleet refuse a key file with group or other permission bits |
 
 ### What fleet does not protect against
 
-- A compromised account of fleetd's user, or of the hub operator.
+- A compromised account of fleetd's user, or of the hub operator, and any other process running
+  as fleetd's user, agents included: it can, for one, swap a workdir for a symlink as a dispatch
+  starts. Run fleetd as a dedicated user that runs nothing else, with `workdir_roots` only that
+  user and trusted users can write.
 - A dispatcher doing harm through an allowed agent in an allowed workdir. A `dispatch` role is
   the power to run that agent; grant it as such, keep certificates short-lived, and keep
   `workdir_roots` to directories only trusted users can write.
 - A device that lies in its reports.
-- Certificate revocation beyond `revoked_serials`; to revoke at scale, reissue the CA.
+- Certificate revocation beyond `revoked_serials`, which fleetd checks against the client's leaf
+  certificate only; to revoke an intermediate or at scale, reissue the CA.
 
 ## Recipes
 
@@ -562,7 +577,7 @@ Absent means fleetd listens on no TCP port.
 | `cert` | path | required | PEM chain, leaf first; the leaf must have a DNS SAN equal to `device`, checked at startup |
 | `key` | path | required | PEM private key (PKCS#8, SEC1 or PKCS#1), mode 0600 or 0400, owned by fleetd's user |
 | `max_connections` | integer 1 to 4096 | 64 | open tls connections, from `accept` to close |
-| `max_connections_per_ip` | integer 1 to `max_connections` | 8, or `max_connections` if lower | open tls connections from one address |
+| `max_connections_per_ip` | integer 1 to `max_connections` | 8, or `max_connections` if lower | open tls connections from one peer: an IPv4 address or an IPv6 /64 |
 | `max_handshakes` | integer 1 to `max_connections` | 32, or `max_connections` if lower | tls connections still in the TLS handshake or `Hello` |
 | `revoked_serials` | array of strings | `[]` | client certificate serials to refuse, as hex (case, `:` separators and leading zeros ignored) |
 

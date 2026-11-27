@@ -2,7 +2,7 @@
 //! certificate, and the per-address connection limit.
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -109,7 +109,8 @@ pub(crate) struct Identity {
 }
 
 /// The identity in a client certificate rustls has already verified, or why it grants
-/// nothing: no role, more than one, or a revoked serial.
+/// nothing: no role, more than one, or a revoked serial. Only the leaf's serial is checked
+/// against `revoked`; an intermediate CA is revoked by reissuing the CA.
 pub(crate) fn identify(
     leaf: &CertificateDer<'_>,
     revoked: &HashSet<String>,
@@ -148,7 +149,8 @@ pub(crate) fn identify(
     })
 }
 
-/// Open tls connections per peer address.
+/// Open tls connections per peer: per address for IPv4, per /64 for IPv6, since one host
+/// commonly holds a whole /64 and could otherwise take a fresh address per connection.
 #[derive(Clone)]
 pub(crate) struct PerIp {
     counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
@@ -170,6 +172,7 @@ impl PerIp {
     }
 
     pub fn acquire(&self, ip: IpAddr) -> Option<IpSlot> {
+        let ip = peer_key(ip);
         let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
         let n = counts.entry(ip).or_insert(0);
         if *n >= self.max {
@@ -180,6 +183,15 @@ impl PerIp {
             counts: Arc::clone(&self.counts),
             ip,
         })
+    }
+}
+
+/// The address a peer is counted under: an IPv4 address (IPv4-mapped IPv6 included) as
+/// itself, an IPv6 address as its /64.
+fn peer_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & !u128::from(u64::MAX))),
+        v4 @ IpAddr::V4(_) => v4,
     }
 }
 
@@ -209,5 +221,21 @@ mod tests {
         assert!(limit.acquire("192.0.2.2".parse().unwrap()).is_some());
         drop(a);
         assert!(limit.acquire(ip).is_some());
+    }
+
+    #[test]
+    fn ipv6_peers_count_per_64_and_mapped_ipv4_as_ipv4() {
+        let limit = PerIp::new(1);
+        let _a = limit.acquire("2001:db8:1:2::1".parse().unwrap()).unwrap();
+        assert!(
+            limit
+                .acquire("2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap())
+                .is_none()
+        );
+        assert!(limit.acquire("2001:db8:1:3::1".parse().unwrap()).is_some());
+
+        let _b = limit.acquire("192.0.2.1".parse().unwrap()).unwrap();
+        assert!(limit.acquire("::ffff:192.0.2.1".parse().unwrap()).is_none());
+        assert!(limit.acquire("::ffff:192.0.2.2".parse().unwrap()).is_some());
     }
 }

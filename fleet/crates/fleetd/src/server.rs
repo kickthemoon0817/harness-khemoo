@@ -7,13 +7,12 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use fleet_proto::{
-    Connection, DispatchSpec, ErrorCode, Hello, MAX_SESSIONS, ModelName, PROTOCOL_VERSION,
-    ProtoError, Request, RequestBody, Response, ResponseBody, Role, Session, SessionId,
-    StatusReport, WireError,
+    Connection, DispatchSpec, ErrorCode, Hello, ModelName, PROTOCOL_VERSION, ProtoError, Request,
+    RequestBody, Response, ResponseBody, Role, Session, SessionId, StatusReport, WireError,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -30,6 +29,9 @@ use crate::tls::{self, PerIp};
 use crate::{ensure_private_dir, own_uid, stopped, unix_now};
 
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
+/// How long a discovery scan answers for, so a stream of `sessions` requests or lookups of
+/// made-up `p-` ids costs at most one process-table scan per interval.
+const DISCOVERY_FRESH: Duration = Duration::from_secs(2);
 /// A pause after a failed `accept` (such as running out of descriptors), so the loop does
 /// not spin while the cause persists.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -67,6 +69,7 @@ pub async fn start(cfg: Config, tls: Option<Arc<rustls::ServerConfig>>) -> anyho
     let inventory = Arc::new(Inventory::new(cfg.device.clone(), cfg.metrics.clone()));
     let daemon = Arc::new(Daemon {
         discovery: Arc::new(Discovery::new(&cfg)),
+        discovered: tokio::sync::Mutex::new(None),
         conns: Arc::new(Semaphore::new(cfg.max_connections)),
         cfg: Arc::clone(&cfg),
         sessions,
@@ -185,6 +188,9 @@ struct Daemon {
     sessions: Arc<Sessions>,
     inventory: Arc<Inventory>,
     discovery: Arc<Discovery>,
+    /// The latest scan and when it began. Held across a scan, so concurrent callers wait
+    /// for it rather than start their own.
+    discovered: tokio::sync::Mutex<Option<(Instant, Arc<Vec<Session>>)>>,
     /// One permit per unix connection, the ssh relay's included.
     conns: Arc<Semaphore>,
 }
@@ -375,11 +381,7 @@ impl Daemon {
                     send(&mut conn, &Response { id, body }, idle).await
                 }
                 RequestBody::Sessions {} => {
-                    let (sessions, truncated) = self.session_list().await;
-                    let body = ResponseBody::Sessions {
-                        sessions,
-                        truncated,
-                    };
+                    let body = ResponseBody::sessions(self.session_list().await);
                     send(&mut conn, &Response { id, body }, idle).await
                 }
                 RequestBody::Dispatch(spec) => {
@@ -423,30 +425,40 @@ impl Daemon {
         }
     }
 
-    /// Running sessions, then ended ones, each newest first, at most [`MAX_SESSIONS`].
-    async fn session_list(&self) -> (Vec<Session>, bool) {
+    /// Running sessions, then ended ones, each newest first.
+    async fn session_list(&self) -> Vec<Session> {
         let mut all = self.sessions.list();
-        all.extend(self.discover().await);
+        all.extend(self.discover().await.iter().cloned());
         all.sort_by(|a, b| {
             b.state
                 .is_running()
                 .cmp(&a.state.is_running())
                 .then(b.started_at.cmp(&a.started_at))
         });
-        let truncated = all.len() > MAX_SESSIONS;
-        all.truncate(MAX_SESSIONS);
-        (all, truncated)
+        all
     }
 
-    async fn discover(&self) -> Vec<Session> {
+    /// The discovered sessions, from a scan at most [`DISCOVERY_FRESH`] old.
+    async fn discover(&self) -> Arc<Vec<Session>> {
+        let mut latest = self.discovered.lock().await;
+        if let Some((at, found)) = latest.as_ref()
+            && at.elapsed() < DISCOVERY_FRESH
+        {
+            return Arc::clone(found);
+        }
+        let at = Instant::now();
         let skip = self.sessions.running_groups();
         let discovery = Arc::clone(&self.discovery);
-        tokio::task::spawn_blocking(move || discovery.scan(&skip))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "discovery failed");
-                Vec::new()
-            })
+        let found = Arc::new(
+            tokio::task::spawn_blocking(move || discovery.scan(&skip))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "discovery failed");
+                    Vec::new()
+                }),
+        );
+        *latest = Some((at, Arc::clone(&found)));
+        found
     }
 
     /// Why a session fleetd did not dispatch cannot be streamed or cancelled.
