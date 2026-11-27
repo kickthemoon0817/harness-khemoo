@@ -9,8 +9,9 @@ auto-refreshing page (`/`) and as JSON (`/api/state`).
 
 The config file is $HARNESS_ENV, else $HARNESS_INSTANCE_DIR/harness.env (default <harness home>/instance). From it
 the dashboard reads only ENV_KEYS; GH_TOKEN reaches `gh` through its environment and is never shown. A panel whose
-key is unset is left off the page. HARNESS_STATE and USAGE_CACHE in the environment win over the file's. The file
-is never evaluated: a command key may name `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`, a path key `$HOME` too,
+key is unset is left off the page. HARNESS_STATE, USAGE_CACHE and WORKTREE_ROOT in the environment win over the
+file's. An empty GH_REPO is derived from TARGET_REPO's origin by bin/instance-lib.sh, as the scripts derive it.
+Otherwise the file is never evaluated: a command key may name `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`, a path key `$HOME` too,
 and no other `$` text is expanded. bin/dashboard.sh starts this detached.
 """
 import argparse
@@ -22,6 +23,7 @@ import os
 import secrets
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -308,6 +310,14 @@ class DashboardApp:
         path_placeholders: dict[str, str] = dict(command_placeholders, HOME=str(Path.home()))
 
         def path_setting(key: str) -> str:
+            """
+            Args:
+                key: A path key: HARNESS_STATE, USAGE_CACHE or WORKTREE_ROOT.
+
+            Returns:
+                The environment's value, else the file's with `$HOME`, `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`
+                expanded, else an empty string.
+            """
             return os.environ.get(key) or HarnessEnvReader.expand(env_values.get(key, ""), path_placeholders)
 
         def command_setting(key: str) -> tuple[str, ...]:
@@ -319,7 +329,8 @@ class DashboardApp:
 
         harness_state: Path = Path(path_setting("HARNESS_STATE") or harness_home / "state").expanduser().resolve()
         self.github_token: str = env_values.get("GH_TOKEN", "")
-        repo: str | None = options.repo or env_values.get("GH_REPO") or os.environ.get("GH_REPO") or None
+        repo: str | None = options.repo or env_values.get("GH_REPO") or os.environ.get("GH_REPO") \
+            or self.derived_repo(harness_home) or None
         usage_cache: str = options.usage_cache or path_setting("USAGE_CACHE") or "~/.claude/usage-cache.json"
         self.config: DashboardConfig = DashboardConfig(
             harness_home=harness_home,
@@ -399,6 +410,28 @@ class DashboardApp:
             server.server_close()
             url_path.unlink(missing_ok=True)
         return 0
+
+    @staticmethod
+    def derived_repo(harness_home: Path) -> str:
+        """
+        Asks bin/instance-lib.sh for GH_REPO, so the dashboard derives an empty one from TARGET_REPO's origin exactly
+        as the launcher does. It loads the config the way the launcher does.
+
+        Args:
+            harness_home: The harness checkout.
+
+        Returns:
+            The repository, or an empty string when none is derived or the loader fails.
+        """
+        library: Path = Path(__file__).resolve().parent / "instance-lib.sh"
+        try:
+            completed: subprocess.CompletedProcess[str] = subprocess.run(
+                ["bash", "-c", '. "$1"; harness_load >/dev/null 2>&1; printf %s "${GH_REPO:-}"', "_", str(library)],
+                capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+                env=dict(os.environ, HARNESS_HOME=str(harness_home)))
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return completed.stdout.strip() if completed.returncode == 0 else ""
 
     @staticmethod
     def instance_dir(harness_home: Path) -> Path:

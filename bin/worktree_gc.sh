@@ -7,8 +7,8 @@
 # for hours after its base moved, and a slot can land several heads in an hour,
 # so a count of heads alone is too short. With WORK_BRANCH unset, no parent- or
 # base-tree is removed. WORKTREE_KEEP names worktrees that are never removed.
-# A worktree's issue is the <n> of its `<BRANCH_PREFIX><n>-<slug>` branch, else of
-# its directory name `<word>-<n>`; a worktree with neither is never removed.
+# A worktree's issue is the <n> of its `<BRANCH_PREFIX><n>-<slug>` branch, else the
+# trailing <n> of its directory name `<name>-<n>`; a worktree with neither is never removed.
 # In use means a process runs inside it or the instance's hooks/worktree-busy
 # names it (one directory per line, e.g. what containers mount); a busy hook that
 # fails or outlasts WORKTREE_BUSY_TIMEOUT_S removes nothing, since what it would
@@ -54,7 +54,7 @@ for path in "$WT"/*; do
   else
     ref=$(git -C "$path" symbolic-ref -q --short HEAD 2>/dev/null)
     if [[ "$ref" == "$BRANCH_PREFIX"* ]] && [[ "${ref#"$BRANCH_PREFIX"}" =~ ^([0-9]+)- ]]; then n=${BASH_REMATCH[1]}
-    elif [[ "$d" =~ ^[A-Za-z][A-Za-z0-9]*-([0-9]+)$ ]]; then n=${BASH_REMATCH[1]}
+    elif [[ "$d" =~ ^[A-Za-z][A-Za-z0-9-]*-([0-9]+)$ ]]; then n=${BASH_REMATCH[1]}
     else continue; fi
     echo "$open" | grep -qx "$n" && continue
     why="issue #$n closed"

@@ -21,7 +21,7 @@ tree() {  # directory, branch
     g -C "$H/trees/$1" commit -q --allow-empty -m "$2"
     g -C "$H/trees/$1" push -q origin "$2"
 }
-tree app-42 topic-short
+tree my-app-42 topic-short
 tree scratch ai/7-named-by-branch
 tree app-99 ai/99-still-open
 tree notes other-branch
@@ -36,7 +36,7 @@ pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 
 out=$(bash "$here/bin/worktree_gc.sh" 2>&1)
-check "an issue below 100 is read from the directory name" 'echo "$out" | grep -qx "remove app-42 (issue #42 closed)"' "$out"
+check "an issue below 100 is read from the trailing number of a hyphenated directory name" 'echo "$out" | grep -qx "remove my-app-42 (issue #42 closed)"' "$out"
 check "the branch names the issue of a worktree whose directory does not" 'echo "$out" | grep -qx "remove scratch (issue #7 closed)"' "$out"
 check "an open issue's worktree and one with no issue are kept" '! echo "$out" | grep -q "app-99\|notes"' "$out"
 

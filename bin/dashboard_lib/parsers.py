@@ -387,7 +387,7 @@ class StateParsers:
         """
         root: str = worktree_root.rstrip("/")
         worktree_match: re.Match[str] | None = re.search(
-            re.escape(root) + r"/[A-Za-z][A-Za-z0-9]*-(\d+)(?:/|$)", path) if root else None
+            re.escape(root) + r"/[A-Za-z][A-Za-z0-9-]*-(\d+)(?:/|$)", path) if root else None
         match: re.Match[str] | None = worktree_match or StateParsers.PACKET_ISSUE_PATTERN.search(path)
         return int(match.group(1)) if match else None
 

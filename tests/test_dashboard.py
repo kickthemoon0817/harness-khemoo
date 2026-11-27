@@ -1734,9 +1734,26 @@ class InstanceConfigTest(unittest.TestCase):
     def test_a_worktree_names_its_issue_under_the_configured_root_only(self) -> None:
         self.assertEqual(StateParsers.issue_from_path("/srv/trees/app-42/src", "/srv/trees/"), 42)
         self.assertEqual(StateParsers.issue_from_path("/srv/trees/app-7", "/srv/trees"), 7)
+        self.assertEqual(StateParsers.issue_from_path("/srv/trees/my-app-12", "/srv/trees"), 12)
         self.assertIsNone(StateParsers.issue_from_path("/srv/elsewhere/app-42", "/srv/trees"))
         self.assertIsNone(StateParsers.issue_from_path("/srv/trees/app-42", ""))
         self.assertEqual(StateParsers.issue_from_path("/srv/runs/2026-11-26-2502-push/runs", ""), 2502)
+
+    def test_an_empty_gh_repo_is_derived_through_instance_lib(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root: Path = Path(directory)
+            target: Path = root / "target"
+            subprocess.run(["git", "init", "-q", str(target)], check=True)
+            subprocess.run(["git", "-C", str(target), "remote", "add", "origin",
+                            "https://github.com/derived-org/derived-repo.git"], check=True)
+            (root / "instance").mkdir()
+            (root / "instance" / "harness.env").write_text(f"TARGET_REPO={target}\nWORKTREE_ROOT={root}/trees\n")
+            with patch.dict(os.environ, {}):
+                for key in ("HARNESS_ENV", "HARNESS_INSTANCE_DIR", "GH_REPO"):
+                    os.environ.pop(key, None)
+                config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                    ["--harness-home", str(root)])).config
+        self.assertEqual(config.repo, "derived-org/derived-repo")
 
     def test_the_queue_log_name_is_configurable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
