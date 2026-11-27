@@ -22,7 +22,7 @@ real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -
 # container a run or create starts here gets it as its client's config, read-only, so its kit
 # resolves the aliased omniverse:// URLs. Removing the file ends the redirect for new containers.
 ov_aliases="$(cd "$self_dir/../.." && pwd)/state/ov-aliases.toml"
-if [ -s "$ov_aliases" ]; then
+if [ -f "$ov_aliases" ] && [ -s "$ov_aliases" ]; then
   ov_args=("$@"); ov_si=-1
   for ((ov_i = 0; ov_i < ${#ov_args[@]}; ov_i++)); do case "${ov_args[$ov_i]}" in -*) ;; *) ov_si=$ov_i; break ;; esac; done
   if [ "$ov_si" -ge 0 ] && { [ "${ov_args[$ov_si]}" = run ] || [ "${ov_args[$ov_si]}" = create ]; }; then
