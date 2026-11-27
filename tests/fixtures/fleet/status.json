@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "generated_at": 1795657200,
+  "devices": [
+    {
+      "name": "dev-a",
+      "transport": "tls",
+      "ok": true,
+      "error": null,
+      "status": {
+        "device": {"name": "dev-a", "hostname": "dev-a.example.com", "os": "Ubuntu 24.04",
+                   "kernel": "6.8.0", "arch": "x86_64", "cpus": 16, "fleetd_version": "0.1.0"},
+        "metrics": {"sampled_at": 1795657195, "uptime_s": 86400, "load": [4.0, 3.5, 3.0],
+                    "cpu_percent": 25.5,
+                    "memory": {"total_bytes": 68719476736, "used_bytes": 17179869184},
+                    "swap": {"total_bytes": 0, "used_bytes": 0},
+                    "disks": [{"mount": "/", "total_bytes": 1099511627776, "available_bytes": 549755813888}],
+                    "gpus": [{"index": 0, "name": "Example GPU", "util_percent": 50.0,
+                              "memory_total_bytes": 25769803776, "memory_used_bytes": 12884901888,
+                              "temperature_c": 61.0}]},
+        "adapters": [{"name": "claude", "models": ["claude-opus-5-5", "sonnet"], "max_concurrent": 2, "running": 1},
+                     {"name": "aider", "models": [], "max_concurrent": 0, "running": 0}]
+      },
+      "sessions": [
+        {"id": "d-1795656000-1a2b3c4d", "adapter": "claude", "origin": "dispatched",
+         "state": {"kind": "running"}, "pid": 4242, "started_at": 1795656000, "ended_at": null,
+         "cwd": "/srv/work", "exe": "/usr/local/bin/claude", "model": "claude-opus-5-5",
+         "summary": "claude -p --model", "labels": {"issue": "42"}},
+        {"id": "p-5151-1795650000", "adapter": "aider", "origin": "discovered",
+         "state": {"kind": "running"}, "pid": 5151, "started_at": 1795650000, "ended_at": null,
+         "cwd": "/srv/work/app-77/sub", "exe": "/usr/local/bin/aider", "model": null,
+         "summary": "aider --yes", "labels": {}},
+        {"id": "d-1795640000-9f8e7d6c", "adapter": "claude", "origin": "dispatched",
+         "state": {"kind": "exited", "code": 3}, "pid": null, "started_at": 1795640000, "ended_at": 1795643600,
+         "cwd": "/srv/other", "exe": "/usr/local/bin/claude", "model": "sonnet",
+         "summary": "claude -p --model", "labels": {}}
+      ],
+      "sessions_truncated": false
+    },
+    {
+      "name": "dev-b",
+      "transport": "ssh",
+      "ok": false,
+      "error": {"code": "unreachable", "message": "ssh exited 255"},
+      "status": null,
+      "sessions": [],
+      "sessions_truncated": false
+    }
+  ]
+}
