@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -81,6 +81,9 @@ enum Command {
         follow: bool,
         #[arg(long)]
         json: bool,
+        /// Write the agent's output byte for byte even to a terminal, escape sequences included.
+        #[arg(long, conflicts_with = "json")]
+        raw: bool,
     },
     /// Cancel a dispatched session.
     Cancel {
@@ -119,6 +122,9 @@ struct DispatchArgs {
     wait: bool,
     #[arg(long)]
     json: bool,
+    /// With `--wait`, write the agent's output byte for byte even to a terminal.
+    #[arg(long, conflicts_with = "json")]
+    raw: bool,
 }
 
 #[derive(Subcommand)]
@@ -222,7 +228,11 @@ async fn run(cli: Cli) -> u8 {
             lines,
             follow,
             json,
-        } => logs(config, &env, &device, session, lines, follow, json).await,
+            raw,
+        } => {
+            let output = Output::choose(json, raw);
+            logs(config, &env, &device, session, lines, follow, output).await
+        }
         Command::Cancel {
             device,
             session,
@@ -429,12 +439,12 @@ async fn dispatch(config: Option<&Path>, env: Env<'_>, args: DispatchArgs) -> u8
         return EXIT_OK;
     }
     eprintln!("fleet: {device}: session {}", dispatched.session);
-    wait(dispatched, timeouts, args.json).await
+    wait(dispatched, timeouts, Output::choose(args.json, args.raw)).await
 }
 
 /// Streams a dispatched session's output and returns the agent's exit status. SIGINT or
 /// SIGTERM cancels the session, best effort, and exits 128 plus the signal.
-async fn wait(dispatched: Dispatched<'_>, timeouts: Timeouts, json: bool) -> u8 {
+async fn wait(dispatched: Dispatched<'_>, timeouts: Timeouts, output: Output) -> u8 {
     let Dispatched {
         device,
         session,
@@ -463,7 +473,7 @@ async fn wait(dispatched: Dispatched<'_>, timeouts: Timeouts, json: bool) -> u8 
         return fail(e);
     }
     let signo = tokio::select! {
-        ended = pump(&mut client, &device.name, json) => {
+        ended = pump(&mut client, &device.name, output) => {
             return match ended {
                 Ok(state) => wait_exit_code(&device.name, &state),
                 Err(f) => {
@@ -520,12 +530,35 @@ pub fn wait_exit_code(device: &DeviceName, state: &SessionState) -> u8 {
     }
 }
 
-/// Copies a stream to stdout until its `end`: raw output, or with `json` one object per
-/// line, `{"data": …}` for each chunk and `{"state": …}` last.
+/// How `logs` and `dispatch --wait` write a session's output.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// One object per line: `{"data": …}` for each chunk and `{"state": …}` last.
+    Json,
+    /// The agent's output with control characters other than tab, LF and CR replaced, so a
+    /// remote agent cannot drive the terminal with escape sequences.
+    Terminal,
+    /// The agent's output unchanged: for pipes and logs, which scripts grep.
+    Raw,
+}
+
+impl Output {
+    fn choose(json: bool, raw: bool) -> Self {
+        if json {
+            Self::Json
+        } else if raw || !std::io::stdout().is_terminal() {
+            Self::Raw
+        } else {
+            Self::Terminal
+        }
+    }
+}
+
+/// Copies a stream to stdout until its `end`, as `output` says.
 async fn pump(
     client: &mut Client,
     device: &DeviceName,
-    json: bool,
+    output: Output,
 ) -> Result<SessionState, Failure> {
     let mut out = tokio::io::stdout();
     loop {
@@ -535,17 +568,17 @@ async fn pump(
             .map_err(|e| Failure::Op(Some(device.clone()), e))?;
         match chunk {
             Chunk::Data(data) => {
-                let line;
-                let bytes = if json {
-                    line = format!("{}\n", json!({ "data": data }));
-                    line.as_bytes()
-                } else {
-                    data.as_bytes()
+                // Event data is a JSON string, so every chunk holds whole characters and an
+                // escape sequence split across chunks still has each control replaced.
+                let text = match output {
+                    Output::Json => format!("{}\n", json!({ "data": data })),
+                    Output::Terminal => render::clean_output(&data),
+                    Output::Raw => data,
                 };
-                write_out(&mut out, bytes).await?;
+                write_out(&mut out, text.as_bytes()).await?;
             }
             Chunk::End(state) => {
-                if json {
+                if output == Output::Json {
                     write_out(
                         &mut out,
                         format!("{}\n", json!({ "state": state })).as_bytes(),
@@ -575,7 +608,7 @@ async fn logs(
     session: SessionId,
     lines: LogLines,
     follow: bool,
-    json: bool,
+    output: Output,
 ) -> Result<u8, Failure> {
     let registry = load(config, env)?;
     let d = device(&registry, name.as_str())?;
@@ -591,7 +624,7 @@ async fn logs(
         })
         .await
         .map_err(op)?;
-    pump(&mut client, name, json).await?;
+    pump(&mut client, name, output).await?;
     Ok(EXIT_OK)
 }
 

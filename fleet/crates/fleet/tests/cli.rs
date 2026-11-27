@@ -552,3 +552,85 @@ async fn auto_does_not_retry_a_dispatch_that_may_have_started() {
             .any(|r| matches!(r, RequestBody::Dispatch(_)))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_to_a_pipe_passes_through_unchanged() {
+    let dir = TempDir::new();
+    let mut mock = MockDevice::new("dev-a");
+    mock.output = vec!["\x1b[31mred\x1b".into(), "[0m é\r\n".into()];
+    let (config, _) = registry(&dir, vec![("dev-a", mock)]);
+    let run = run_fleet(&config, &dispatch_args("dev-a", &["--wait"]), b"go", &[]).await;
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.stdout, "\x1b[31mred\x1b[0m é\r\n");
+    let run = run_fleet(&config, &["logs", "dev-a", SESSION, "--raw"], b"", &[]).await;
+    assert_eq!(run.stdout, "\x1b[31mred\x1b[0m é\r\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_and_json_conflict() {
+    let dir = TempDir::new();
+    let (config, _) = registry(&dir, vec![("dev-a", MockDevice::new("dev-a"))]);
+    let run = run_fleet(
+        &config,
+        &["logs", "dev-a", SESSION, "--raw", "--json"],
+        b"",
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, 2);
+    let run = run_fleet(
+        &config,
+        &dispatch_args("dev-a", &["--wait", "--raw", "--json"]),
+        b"go",
+        &[],
+    )
+    .await;
+    assert_eq!(run.code, 2);
+}
+
+/// Runs `fleet --config <config> <args>` with stdout on a pseudo-terminal, through script(1).
+async fn run_on_terminal(config: &Path, args: &[&str]) -> String {
+    let fleet = env!("CARGO_BIN_EXE_fleet");
+    let mut cmd = tokio::process::Command::new("script");
+    if cfg!(target_os = "macos") {
+        cmd.args(["-q", "/dev/null", fleet, "--config"])
+            .arg(config)
+            .args(args);
+    } else {
+        let line = format!(
+            "'{fleet}' --config '{}' {}",
+            config.display(),
+            args.join(" ")
+        );
+        cmd.args(["-qec", &line, "/dev/null"]);
+    }
+    let out = cmd
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_to_a_terminal_has_escapes_replaced() {
+    let dir = TempDir::new();
+    let mut mock = MockDevice::new("dev-a");
+    mock.output = vec![
+        "\x1b]0;owned\x07red\x1b".into(),
+        "[0m\u{9b}2J é\tend\n".into(),
+    ];
+    let (config, _) = registry(&dir, vec![("dev-a", mock)]);
+    let shown = run_on_terminal(&config, &["logs", "dev-a", SESSION]).await;
+    assert!(
+        shown.contains("\u{FFFD}]0;owned\u{FFFD}red\u{FFFD}[0m\u{FFFD}2J é\tend"),
+        "{shown:?}"
+    );
+    assert!(
+        !shown.contains('\x1b') && !shown.contains('\u{9b}'),
+        "{shown:?}"
+    );
+
+    let shown = run_on_terminal(&config, &["logs", "dev-a", SESSION, "--raw"]).await;
+    assert!(shown.contains("\x1b]0;owned\x07red\x1b[0m"), "{shown:?}");
+}

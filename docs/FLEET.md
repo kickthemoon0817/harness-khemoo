@@ -203,8 +203,9 @@ Every string in a report other than `event` data comes from the device. fleetd r
 characters in them with U+FFFD and cuts each at 1024 bytes (`MAX_REPORTED_STR`) on a character
 boundary, which with `MAX_SESSIONS` keeps every reply within one frame. The hub still treats
 them as untrusted: its human tables replace control characters again, and the dashboard passes
-them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw,
-since it is the agent's own output.
+them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw to
+a pipe, since it is the agent's own output, and with its control characters replaced to a
+terminal (see [fleet](#fleet)).
 
 - An `AdapterInfo` with `max_concurrent` 0 is discovery-only: it cannot be dispatched to.
   `models[0]` is the model a dispatch without `model` gets.
@@ -707,8 +708,8 @@ fleet [--config PATH] <command>
 fleet status   [--json] [--device NAME]...
 fleet sessions [--json] [--device NAME]... [--running]
 fleet dispatch --device NAME|auto --adapter NAME --workdir PATH [--model M] [--timeout S]
-               [--label KEY=VALUE]... [--wait] [--json]          (prompt on stdin)
-fleet logs     <device> <session> [--lines N] [--follow] [--json]
+               [--label KEY=VALUE]... [--wait] [--json | --raw]  (prompt on stdin)
+fleet logs     <device> <session> [--lines N] [--follow] [--json | --raw]
 fleet cancel   <device> <session> [--json]
 fleet pki init         [--dir DIR] [--days N]
 fleet pki issue-server <device> [--dir DIR] [--ip IP]... [--dns NAME]... [--days N]
@@ -747,6 +748,11 @@ fleet --version | --help
   session ends.
 - With `--json`, `logs` and `dispatch --wait` print one JSON object per line instead of raw
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
+- Without `--json`, when stdout is a terminal, `logs` and `dispatch --wait` replace every control
+  character in the output other than tab, LF and CR (ESC and the rest of C0, DEL, and C1
+  U+0080–U+009F) with U+FFFD, so a remote agent cannot drive the terminal with escape sequences.
+  `--raw` writes the output unchanged. When stdout is not a terminal (a pipe or a file), the
+  output is always written unchanged, so logs keep the agent's exact bytes.
 - `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits
   0. Cancelling an ended session succeeds.
 - `pki` writes into `--dir`, by default `pki/` beside the resolved fleet.toml. The directory is

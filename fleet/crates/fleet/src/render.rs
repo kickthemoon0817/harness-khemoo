@@ -14,6 +14,20 @@ pub fn clean(s: &str) -> String {
         .collect()
 }
 
+/// An agent's output for a terminal: [`clean`], but keeping tab, LF and CR so the text
+/// keeps its layout.
+pub fn clean_output(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 pub fn transport(t: TransportKind) -> &'static str {
     match t {
         TransportKind::Local => "local",
@@ -185,6 +199,14 @@ mod tests {
         assert_eq!(
             clean("a\x1b]0;x\x07b\u{9b}c"),
             "a\u{FFFD}]0;x\u{FFFD}b\u{FFFD}c"
+        );
+    }
+
+    #[test]
+    fn clean_output_keeps_layout_and_drops_escapes() {
+        assert_eq!(
+            clean_output("ok\tdone\r\n\x1b[2J\x7f\u{85}\u{9b}31m\x00é"),
+            "ok\tdone\r\n\u{FFFD}[2J\u{FFFD}\u{FFFD}\u{FFFD}31m\u{FFFD}é"
         );
     }
 
