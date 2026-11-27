@@ -44,6 +44,14 @@ cache 10 88; out=$("$H/bin/usage_ok.sh"); rc=$?
 check "usage_ok two under the weekly ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
 cache 10 95; out=$("$H/bin/usage_ok.sh"); rc=$?
 check "usage_ok past the ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+# A weekly stand-down point of its own, above a 5-hour point set well under the ceiling.
+own() { USAGE_CEILING_PCT=95 USAGE_TICK_STOP_PCT=90 USAGE_TICK_STOP_WEEK_PCT=93 "$H/bin/usage_ok.sh"; }
+cache 89 92; out=$(own); rc=$?
+check "usage_ok lets the weekly window pass the 5-hour point up to its own" '[ "$rc" -eq 0 ]' "rc=$rc $out"
+cache 90 10; out=$(own); rc=$?
+check "usage_ok stops at the 5-hour point when the weekly one is higher" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+cache 10 93; out=$(own); rc=$?
+check "usage_ok stops at the weekly point" '[ "$rc" -eq 1 ] && [[ "$out" == *"week_stop=93%"* ]]' "rc=$rc $out"
 cache 10 10 4000; out=$("$H/bin/usage_ok.sh"); rc=$?
 check "usage_ok with a stale reading exits 2" '[ "$rc" -eq 2 ] && [[ "$out" == "usage unknown"* ]]' "rc=$rc $out"
 

@@ -65,6 +65,39 @@ model priority. Each tick runs on the first model that is not cooling down. A ti
 a model's usage limit marks it in `state/model-cooldown/` for `MODEL_COOLDOWN_S` (1800 s) and
 re-runs at once on the next model; the launcher spawns nothing while every model is cooling.
 
+**Remote hosts.** `bin/host_health.sh` (cron, every 3 minutes) probes each host in
+`state/locks/remote-card`: ssh connect time, upload rate (1 MB to `cat > /dev/null`), load,
+cores, and the card's utilisation and memory, one row a host in `state/host_health.tsv`. A
+host is degraded when it does not answer or uploads under `HOST_MIN_UPLOAD_MB_S` (5); it is
+demoted after 2 bad probes in a row and promoted after 3 good ones. With `lease.sh
+harness-only` on, the probe keeps the harness hosts to the operator's preference,
+`state/locks/harness-host-preference` (one host a line, seeded once from the harness-only
+list), with demoted hosts moved last, never dropped. It applies a changed order through `lease.sh
+harness-only --on` and logs it to `state/host_health.log`; a running tick keeps its host.
+To change the preferred order, edit the preference file: an order set with `lease.sh
+harness-only --on` alone is replaced on the next probe.
+
+**Stall alarm.** `bin/stall_watch.sh` (cron, every 5 minutes) appends `<UTC> STALL <kind>
+<key> <detail>` lines to `state/stalls.log`: `lock_wait`, a process waiting `STALL_LOCK_MIN`
+(15) minutes on a remote build or suite lock in `/tmp`, with what the holder is running;
+`gpu_idle`, a card at 0 % on every probe of `STALL_GPU_IDLE_MIN` (30) minutes while a lock
+has a waiter or the allocator's last line counts claimable work; `queue_wait`, a run queue whose lease log
+has said BUSY for `STALL_QUEUE_MIN` (10) minutes on end while a card no live lease holds read 0 %, with
+the queue's own BUSY reason; `host_degraded`, once per
+demotion. A kind and key repeats at most every 30 minutes. It reads local state only.
+
+**Leftover pull requests.** `bin/pr_sweep.sh` (cron, every 30 minutes) closes each open pull request on an
+`ai/<n>-…` branch whose issue #<n> is closed, with a comment saying so. An issue that lands on another pull
+request, or that the operator closes, otherwise leaves its own one open. The branch stays, so a closed pull
+request can be reopened. `--dry-run` names them without closing; each close is logged to `state/logs/pr_sweep.log`.
+
+```
+*/3 * * * * /home/you/harness/bin/host_health.sh
+*/5 * * * * /home/you/harness/bin/stall_watch.sh
+*/30 * * * * /home/you/harness/bin/pr_sweep.sh
+* * * * * /home/you/harness/bin/card_dispatch.sh
+```
+
 ## Quickstart
 
 ```bash
@@ -111,6 +144,37 @@ in-flight ticks finish on their own.
 | `state/model-cooldown/` | one stamp per model that hit its usage limit |
 | `bin/slow_set.sh` | cron every 3 h: the whole doctest set, `[slow]` included, once per branch head; a red head files one issue naming the merge range |
 | `state/paused` | present: no new ticks chain; pair with commenting out the cron line |
+| `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
+| `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
+| `bin/pr_sweep.sh` | cron every 30 min: closes open `ai/<n>-…` pull requests whose issue is closed |
+| `bin/card_dispatch.sh` | cron every minute: unpins a queue waiting 5+ min on a busy card when another card is free, idle and quiet (`PULL` lines in `state/stalls.log`) |
+| `bin/build_host.sh` | prints the `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` exports for the host whose compile lock is free |
+| `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
+
+## Scenario arm queues
+
+A tick runs simulator arms through `bin/arm_queue.sh`, launched detached and polled, never through a
+copy of a runner. The packet holds the queue file, the inputs and the outputs:
+
+```bash
+setsid nohup bin/arm_queue.sh --issue <N> --packet "$PKT" --queue "$PKT/arms.queue" \
+    --deadline <epoch> --acquire-args "--all-remote" --collect /tmp/census.csv >/dev/null 2>&1 &
+```
+
+Each queue line is `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags`, with commas
+inside a field (`--no-moments,--through-sim-s,13`). The script holds the lease as its own PID
+(`LEASE_HOLDER_PID=$$`), polls `lease.sh acquire` until granted or the deadline, brings each tree up
+with `iter.sh up` and `iter.sh sidecar`, renews the lease between arms and polls again after a
+`YIELDED`, and on every exit, a `TERM` included, stops its container and releases. It writes
+`<packet>/runs/status` in the arm queues' format (`<arm> start`, `<arm> rc=<n> end`, `skipped`,
+`void<n>`, `STOP before`, `DEADLINE before`, `ALLDONE`), whose last line is always
+`RELEASED <queue> <time>`, beside `lease.log`, `queue.log` and each arm's `.out` and card-memory log.
+A STOP file in the packet ends the queue before its next arm. A kit crash or GPU out-of-memory
+voids an arm and runs it once more. A parent arm names `evidence/parent-<base9>` as its outdir:
+an empty folder there is the tick's mkdir claim, a missing one is claimed, a full one is skipped.
+`bin/arm_queue.sh --help` lists the options: the whole-card host (`--want-host`), the margins,
+the baseline runner, files to collect, host load sampling and the head check.
+`tests/test_arm_queue.sh` runs it against fake lease, iter, docker, card and host commands.
 
 ## Documentation
 

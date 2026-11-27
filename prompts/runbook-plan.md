@@ -3,6 +3,55 @@
 The harness implements the owner-approved manure plan. The plan binds over everything else,
 including `runbook.md` and `design.md` where they conflict.
 
+## Hosts (owner, 2026-11-21, 2026-11-23)
+
+Harness work runs on the remote cards alone: `worv@worv-worker-03.local` (RTX 5080) and `worv@10.50.1.6` (RTX 5090, 24 GB). `bin/host_health.sh` orders them every 3 minutes: the operator's preference, `state/locks/harness-host-preference`, with a degraded host (no ssh, or an upload under 5 MB/s) moved last; `lease.sh status`'s `harness ticks:` line shows the order. A host moved last still takes work that copies little, such as a device case on a staged copy; an arm that copies a tree goes to the first host. A compile goes where `bin/build_host.sh` says (below). Kits, tests with a card, AOT, device suites and cost reads go there, never to this host's own card. This host's CPU takes compiles when `bin/build_host.sh` names its local lane (owner, 2026-11-26); the shim refuses a tick's container with a card on the local daemon. `lease.sh harness-only` is on with both hosts in that order: an issue-number acquire tries the first host first, a device or whole-card run takes the first host, and `remote-env.sh` routes a tick's docker to the first host. A recipe that names another host runs on these two instead. A cost read's parent and change arms stay on one card.
+
+Each remote host is its own lane, with its own locks. The single remote lock names in the passages below (`/tmp/worv-dev-build-remote.lock`, `/tmp/worv-fast-set-remote.lock`) are replaced by per-host names:
+
+| host | compile lock (`WORV_DEV_BUILD_LOCK=`) | suite lock (`flock`) |
+|---|---|---|
+| `worv@10.50.1.6` | `/tmp/worv-dev-build-remote-5090.lock` | `/tmp/worv-fast-set-remote-5090.lock` |
+| `worv@worv-worker-03.local` | `/tmp/worv-dev-build-remote-w03.lock` | `/tmp/worv-fast-set-remote-w03.lock` |
+
+**Which host compiles (operator, 2026-11-26).** Before each `tools/dev/iter.sh build`, run `eval "$(<harness>/bin/build_host.sh)"`. It exports `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` for the first host whose compile lock is free, and leaves out a host that a cost read holds whole. It also leaves out the card a waiting cost read asks for, so that card can go quiet (a wait for any card keeps the quieter unheld host free). When every lock is taken, it picks the host with the fewest waiters. The build's outputs copy back here, so the arms may run on either card. Never queue a compile behind another host's compile while the other lane is free. With `state/local-cpu-lane` present, this host is a third lane, after the remote ones: its export line names `DOCKER_HOST=unix:///var/run/docker.sock`, the host's own dev build lock (shared with the owner's builds) and the builder image the file names. Every line sets `WORV_BUILDER_IMAGE`, so eval it again before each compile. The local lane is for compiles and card-less host tests; a device run, AOT or anything with a card stays on a remote host. CPU-only suites belong on it, so the remote cards stay free for runs that need one: the scheduled slow and fast sets run there, and a device-record run's host stage runs there too, before it takes a remote card for the device stage alone.
+
+- **Never build or run a suite on a host whose card a cost read holds** (`lease.sh status`: a live `remote-all` on its slots). Use the other host's lane, so the read times the engine and not a compile.
+- **Choosing a lane for a build or a suite.** Take the host whose lock is free. If both are free, take the one with the lower load1 per core (`ssh <host> cat /proc/loadavg; nproc`). If both are held, wait on the one with the shorter holder. Put that host in `DOCKER_HOST=ssh://<host>`.
+- `remote-env.sh`'s default route sends a bare `docker` to the first host as the order stood when the tick started. A build or a suite on the other host names it explicitly.
+- The binaries and logs come back to the worktree from either host, so a build on one host and its kits on the other are fine.
+- A recipe in an older pause comment that names the single remote lock, or one host for a build, may use either lane. A kit still runs where its lease's export line points.
+
+## Merge slots (owner, 2026-11-25): every hour is a slot
+
+The owner asked for the piled work to run and land in parallel. Every hour is now a merge slot: a slot is open at any time. This overrides every passage below that names `hh % 3 == 0`. Landings still go one at a time through `bin/merge-lock.sh`, and a class B landing still waits while a class A `ai:ready` issue is left to land. A ready landing is claimed before new work.
+
+## Testing (owner, 2026-11-24): implement, then check only what changed
+
+The owner: "each job takes excessive testing time, just implement and only check the modified part". This section overrides every passage below, every issue's Acceptance and every operator comment that asks a change to prove more.
+
+**What a change runs before it lands:**
+- Build the touched extensions.
+- Run the test files the change touches or adds: `tools/test/run_doctest_sharded.sh --file '*<file>.cpp' <binary>`, and the touched Python unittests. A new or changed behaviour gets its own case. Where the Ask names a case that fails on the parent, show it red there once.
+- If device code changed (`kernels/`, `mpm/MpmGpuSolver.h`, or a device test file), rebuild the cubin. Run only the device cases of the touched test files, by name, under the device lease.
+- Run a scenario arm only when the change exists to move that scenario, such as a cost cut or a law change. Use the one targeted scenario, seed 1322, one parent arm and one change arm.
+  - A cost cut reads that pair's mean tick.
+  - A law change reads the numbers its Ask names on that pair. If the resting surface can change, add one render pair of that scenario.
+- The image gates that run in seconds: `p1_role_ratchet.py` and `extension_version_gate.py`.
+- **A law change on by default is the exception (operator, 2026-11-25).** A change that is on by default and edits the material law (`mpm/MpmMaterial.h`, the constitutive return and its strength knots) or the contact law (`CouplingBoundary.h`, the guard, the exchange's convert and return) moves every behaviour case, so its touched part is the whole host `test_manure_spec` set, `[slow]` included, host only, before it lands. A change behind a setting that is off by default keeps the touched-file rule; the full host set runs when the default is turned on.
+
+- **A measurement-only step lands with its feature, not alone (operator, 2026-11-25).** A census, counter or probe written to read a design's estimate before the build is read from the issue's own branch, and lands with the feature it measures. Landing it on its own costs a merge, a rebuild and a re-test each time the head moves, for code that changes nothing.
+
+**What a change does not run:** the whole fast set, the whole device suite, RS1–RS6 identity arms, extra seeds, repeated cost sequences, kernel captures, or V5 beyond that one pair. `device_record.py check` may read stale on a change, and the full regression below rewrites the record.
+
+**Landing:**
+- Merge the head, rebuild, re-run the touched files, then push and merge.
+- If the head moved since the proof, re-run only the touched files. Nothing else is re-proven, unless the move changed one of the same files, in which case re-run that file's tests too.
+- A class B change still waits for the operator's sign-off, read on the evidence above.
+- **This holds for class B landings and for the device record too.** A landing, of any class, never runs the whole fast set or the whole device suite, and never writes the device record. Older passages below that ask a class B landing or a batch-mate for them are overridden. If device code changed, run only the device cases of the touched device test files, by name.
+
+**The full regression** runs as its own issue, which the operator files about once a day: the whole fast set, the whole device suite and its record, and RS1–RS6 against the last full run's parent arms. A red there is filed against the landing that caused it.
+
 ## What binds, in this order
 
 1. **`PRINCIPLE.md`** of the plan — engine rules P1–P10, validation rules V1–V5 and V2a.
@@ -27,6 +76,8 @@ repository under `docs/manure-plan/` on `ai/manure-mpm` (merged by #1318). Read 
   (dead claimant), the one whose last pause comment is oldest first, so
   one long issue cannot take every tick while others wait; then the oldest `ai:plan` issue whose
   `Depends on:` issues are all closed.
+- An issue labelled `ai:low` (owner, 2026-11-24) is lower priority. Claim one only when no claimable issue without `ai:low` is left, landings included. The speed path (the first version's 150 ms bar) carries `ai:first`, and always goes first.
+- **While an `ai:first` issue is claimable, an `ai:fable` issue without `ai:first` is not claimed either** (owner, 2026-11-26): new design rounds and low-priority work wait for the take-first queue. `bin/claimable.sh` counts the same way, so ticks are not started for work that waits.
 - An issue labelled `ai:signoff` is waiting for a sign-off. Never claim it; never merge its PR. The owner
   waived class B sign-off on 2026-09-26, so the operator reviews the packet and signs off in the owner's place.
 - An issue labelled `ai:ready` waits for a merge slot (override 3c). While a slot is open, resume it before
@@ -87,6 +138,30 @@ overridden below.
    reference value wherever the step names one (T05 and T06 list them, for example FC1, FC3, EX1, EX4 and
    SL2). A pinned document, string, counter or hash is a guard, never the fixture. A test that pins a known
    wrong result (a negative convergence order, an out-of-band ratio) reports the value, not a pass.
+   **A cost read may take a whole remote card (operator, 2026-11-16).** A per-change gain read (parent and change
+   alternated) needs a card with no other process on it and a quiet host, not the local card in particular.
+   `lease.sh acquire <issue> --all-remote` grants every slot of one remote host whose card runs nothing else and whose
+   load1 is under 6 (`bin/remote_room.sh --alone`); ask again between arms to keep it. Run every arm of the read on
+   that one card, and name the card and the host load in the report. Take it before waiting for the local card's whole-card
+   grant. The first version's speed item (the engine against PhysX particles) is still read on the local card.
+   **A cost read times the engine's own spans, not an nsys capture (operator, 2026-11-16).** The gain read takes the
+   tick, the GPU step and the named phase rows from the kit's tick-wall and profiler spans. `nsys start` has hung the
+   kit in three arms (#2233 twice, #2235 once). Capture nsys only when the Ask names a kernel row, and as its own
+   arm after the span arms. A hung capture voids that arm only. The scheduled suites now skip a host whose card a
+   cost read holds (`bin/slow_set.sh`), so check `lease.sh status` rather than the suite logs before an arm.
+   **A cost arm ends after the step it reads (operator, 2026-11-16, e7c69b8d4).** Run each arm of a gain read with
+   `--through-sim-s` at the end of the step or window it reads: RS6's push 13, RS3's drive and its windows 2–3 20.
+   A rest-tick read is a separate, unclipped arm. A clipped arm is never an identity arm (`series_compare` voids it).
+   **Bring a container up with `iter.sh up <exts> && iter.sh sidecar`.** The sidecar starts from a toolset image
+   built once per host, so no queue backgrounds `iter.sh topics`, greps its log or kills it mid-replacement any more;
+   the runner kills the kit at collect, so no queue waits on a kit stop either.
+   **What a PR carries from the packet (operator, 2026-11-15).** Under `docs/manure-plan/evidence/<packet>/` a PR commits
+   only what a reader needs to follow and repeat the reading: `INDEX.md` and any other `.md` reading with the tables, the
+   readers and scripts (`.py`, `.sh`), queue files (`.queue`), scenario and probe inputs (`.toml`, `.diff`). Raw outputs stay in the
+   artifacts packet and are never committed: suite and build logs, boot checks, comparison dumps, status files, state
+   series (`.log`, `.txt`, `.jsonl`, `.out`, `.pid`, `status`). The main repository's `info/exclude` skips them; never
+   `git add -f` one. `INDEX.md` gives every number the sign-off or the landing reads, so nothing it cites must be opened.
+   Before a PR is marked ready, `git rm --cached` any such file it already carries.
 3. **Capture runs and the card.** Three render products at 1280×720 do not fit beside two sibling
    kits on the 16 GB card: captures come back empty and a kit can die of it (#1320). A capture run
    arms one camera at a time. Even then a sibling kit of about 7 GB beside a capture kit and the
@@ -127,6 +202,22 @@ overridden below.
      video as well as the moments, so a kit holds about 5.1 GB and two run side by side. Take a plain
      `lease.sh acquire <issue>` on a tree that includes 257d59520. Parent and change trees both have it once
      you merge the head. Only a baseline or a perf A/B reading takes `--all --render`.
+   - **Balance the identity queues (operator, 2026-11-16).** Since 9595097a1 (#2227) RS6's zone freezes 9 s after
+     its push (stamp 34.0 s on seed 1322), and its arm runs 175–186 s on a quiet host, like RS1's. With three slots
+     run {RS6, RS2}, {RS1, RS4}, {RS3, RS5}; with two, {RS6, RS1, RS2}, {RS3, RS4, RS5}. A tree without 9595097a1
+     does not freeze on RS6 and runs about 430 s: merge the head first.
+   - **RS6's identity arm ends after the freeze (operator, 2026-11-16, e7c69b8d4).** A class A change arm runs RS6 as
+     `--variant identity` (the push, then 12 simulated s of rest) and is compared with the shared parent's whole
+     `RS6-p`; `series_compare` pairs the marks and wrench lines both hold.
+     - The variant arm must end frozen: its last document reads `zone_frozen: true`, `frozen_steps` of at least 480
+       and every `freeze_wakes` cause 0. An arm that ends unfrozen is void for identity: run RS6 whole.
+     - The parent arm stays whole. It also serves class B pairs and the chain check, which never run the variant.
+     - Run RS6 whole, never the variant, when the change touches `mpm/ZoneFreeze.h`, `model/BodySleepGate.h`,
+       `mpm/ZoneSurface.h`, `mpm/LodExchange.h`, `model/LegacyExchange.h`, `mpm/FieldSupport.h`, `HeapField.h`,
+       `model/PhysxBackend.h`, `model/IPhysicsBackend.h`, a hunk of `mpm/ManureZone.h` that names freeze, sleep,
+       wake, rest or quiet, or `rest_freeze_after_s`. Four changes have parted RS6 first inside its rest (#1744,
+       #2026, #2227, #1858), the last at 83.75 s, and all four touch that list.
+     - A class B review, a release reading and every reading of M2→M3 run RS6 whole.
    - **A single-slot grant may be on the remote card** (slots 4–5, domains 80–81, `remote=` in the ACQUIRED line).
      - Its export line sets `DOCKER_HOST` and puts `bin/remote-docker` first on `PATH`. So every `docker` and
        `nvidia-smi` call made under it, from `iter.sh`, `scenario_run.py` and the queue, runs on that host.
@@ -134,9 +225,12 @@ overridden below.
      - A remote arm is identical to a local one: RS4 on parent-af846aec8 matched bit for bit, 431/431
        documents and the whole wrench trace. So change and parent arms may run on either card.
      - **Two build lanes.** The local compile lock (`/tmp/worv-dev-build.lock`, held by `iter.sh build` for the
-       compile only) serves one compile at a time for every tick on this host. When it already has a waiter, or the
-       local load1 is past twice `nproc`, build and run host suites on the remote host instead:
-       `DOCKER_HOST=ssh://worv@10.50.2.178 PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
+       compile only) serves one compile at a time for every tick on this host. When it is held at all (operator,
+       2026-11-16: a first waiter sat 40 minutes behind two compiles and missed its merge slot), or the local load1 is
+       past twice `nproc`, build and run host suites on a remote host instead: the first of `worv@10.50.1.6` and  (See "Hosts" above.)
+       `worv@worv-worker-03.local` whose `REMOTE_CARD_HOST=<host> bin/remote_room.sh` prints `ok` and whose card no
+       cost read holds (`lease.sh status`: no live `remote-all` on its slots):
+       `DOCKER_HOST=ssh://<host> PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock tools/dev/iter.sh build …`
        (#2002, 2026-10-28). Every tick uses that one remote lock name, so the remote lane also compiles one build at
        a time beside its kits. The binaries and logs come back to the worktree as from any remote run.
      - **One fast set per host at a time.** The doctest runner shards a suite over min(nproc, 8) processes, so two or
@@ -159,10 +253,16 @@ overridden below.
      - Keep every kit-side call of the run under the export line.
      - **Both hosts run work (owner, 2026-10-08: "use both devices, this one and also the remote one together").** The
        local host has been on since 2026-10-07 23:59Z (`lease.sh local --on`; no `state/locks/local-card-off`).
-       - Leases grant the local card's slots and the remote host's (10.50.2.178) together. A local grant's export line
+       - Leases grant the local card's slots and each remote host's together (`lease.sh status` lists the hosts and their slots). A local grant's export line
          carries no `DOCKER_HOST`, so its run, a `--device` run included, runs here. That is correct: never stop such a
          run as a breach.
-       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@10.50.2.178
+       - The remote host is shared with other sessions. Before a build, a test suite or a kit on the remote lane, run
+         `bin/remote_room.sh` (`--render` for a rendering kit). Use the remote lane only when it prints `ok`; on `busy`
+         run the work locally. A lease grants a remote slot under the same check.
+       - Two remote hosts take explicit runs: `worv@worv-worker-03.local` (16 GB card, shared) and `worv@10.50.1.6`  (See "Hosts" above.)
+         (24 GB card, the faster CPU, usually free). Check a host with `REMOTE_CARD_HOST=<host> bin/remote_room.sh` and
+         put that host in `DOCKER_HOST=ssh://<host>` below; prefer `worv@10.50.1.6` when both print `ok`.  (See "Hosts" above.)
+       - The remote lane is reached explicitly: `DOCKER_HOST=ssh://worv@worv-worker-03.local
          PATH=<harness>/bin/remote-docker:$PATH WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock …`, under
          `flock /tmp/worv-fast-set-remote.lock` for a fast set. Prefer it for a suite while the local load is high: the
          cron slow set runs on the local host every third hour.
@@ -185,12 +285,12 @@ overridden below.
      - **Every scenario arm mounts `worv.core.scene` from its own tree, parent arms included,** until the runtime image is
        rebuilt from `ai/manure-mpm` (owner's release step). The image bakes master's 0.5.4, which lacks #1636's
        external-force flag (0.5.6). So an arm without the mount runs pre-flag physics, and a pair that mounts it on one
-       side only parts at the pile's build (#1682). Put it in `BASE_EXTS`. `tools/eval/series_compare.py` voids a pair
+       side only parts at the pile's build (#1682). `bin/arm_queue.sh`'s default `--base-exts` mounts it. `tools/eval/series_compare.py` voids a pair
        whose kits loaded different builds of an extension.
      - **Every scenario arm mounts `worv.core.utils` from its own tree too, parent arms included,** once #1750 has
        landed and until the image is rebuilt. RS6's ground is an `omniverse://` URL. The image's 0.2.2 reduces it to its
-       basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. Put it
-       in `BASE_EXTS` beside `worv.core.scene`.
+       basename and loads the original trimesh map without an error, and `scenario_run.py` then fails the arm. The
+       default `--base-exts` mounts it beside `worv.core.scene`.
      - **A per-point impulse from PhysX's contact report is not evidence where a pair has more than one friction
        patch** (#1754). The report lists points in narrowphase order, while the solver writes impulses in patch
        order. Read per-pair totals, and per-point separations and normals. A per-point attribution needs a diagnosis
@@ -199,10 +299,19 @@ overridden below.
      - **Closed issues' packets are trimmed daily** (`bin/evidence_trim.py`). Their wrench traces over 20 MB are
        `wrench-trace.csv.zst` (read with `zstd -dc`); their `.npy` AOVs, the video frames an MP4 holds, and void runs are
        gone (`CLEANED.txt` says what). Old bases' parent folders keep only their small text. Re-run an arm to regenerate.
-     - Copy `run_queue.sh` from a packet that waits for the sidecar in the new container's IPC namespace, for example
-       `evidence/2026-09-29-1584-landing-af846aec8/run_queue.sh`.
-       - An rclpy check against the old sidecar passes while `iter.sh topics` is still replacing it. The queue then
-         kills `topics` mid-replacement, and every arm dies without a kit. Docker over ssh widens that window.
+     - **Which card a timing read takes (operator, 2026-11-26).** A change read against its parent, as pairs on one card, holds on either card: run it on whichever card is free (no `--want-host`, so the queue takes the first card that is free and quiet). Only a phase read against the 150 ms bar needs worker-03, the card every bar number comes from. Never leave a card idle waiting for the other one for a pair read; `bin/card_dispatch.sh` unpins a queue that waits 5+ minutes on a busy card while another is free, idle and quiet, by writing `any` to its `<runs>/want-host`. A queue that reads the bar passes `--bar-read` to `bin/arm_queue.sh`, and is never moved. A whole-card run that times nothing, such as a render pair for V5, takes `--acquire-args "--all-remote --no-cost"`: the card still runs nothing else, but the host's load is not read and its builds go on beside it, so a render never waits for the build host to go quiet.
+- **Work while a queue waits (operator, 2026-11-26).** A queue waiting for a card needs no watching: the runner polls and the stall watch reports a long wait. While it waits, do the issue's card-free work: the next Ask's design, code, compile and host cases. Do it in a separate worktree on its own branch, because an arm reads the queued trees' `bin/`; never rebuild or edit a tree a live queue may still run. Never spend a wait in a sleep loop, and never pause an issue for want of a card while card-free work is left. A device-record or other card run takes its card only for its device stage: host suites first, with no card.
+- **Readings ride with the change (operator, 2026-11-26).** A reading that only measures (a bar table, an attribution, a setting read alone) is part of the issue whose change it decides, never an issue of its own; its numbers go in that issue's packet. A test-only issue exists only for the daily full regression, its device run, and a failing gate.
+- **Run arms through `bin/arm_queue.sh`, never a copy of a runner script.** The packet holds a queue file
+       (`<name>.queue`, one `tree|arm|scenario|extra_exts|kit_settings|seconds|outdir|flags` line an arm), its inputs
+       and its outputs. The script takes the lease itself, so launch it detached, outside any export line:
+       `setsid nohup <harness>/bin/arm_queue.sh --issue <n> --packet <packet> --queue <packet>/<name>.queue
+       --deadline <epoch> [--acquire-args "--all-remote"] [--collect /tmp/<file>,…] >/dev/null 2>&1 &`.
+       - Poll `<packet>/runs/status` until its last line is `RELEASED`. Exit 4 is no lease by the deadline, 3 an early
+         end (STOP, the deadline, a lost lease).
+       - `--help` lists the rest: a wanted host for a whole remote card, the margins, the baseline runner
+         (`--runner baseline`), host load sampling and the head check.
+       - A second queue of the issue runs as its own process with its own queue file, and takes its own slot.
    - **A class B render session takes one slot, with `lease.sh acquire <issue> --render`.** Change against
      parent, lockstep with moments, frames for V5, run on that one slot.
      - **The frames are the same whatever shares the card.** Moments are step-locked (#1386).
@@ -241,7 +350,8 @@ overridden below.
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
      loop ended, and a sibling would take the card mid-capture. A script that holds the lease for its
-     whole run sets `LEASE_HOLDER_PID=$$`. Never edit `state/locks/`, including the `all-wait.*` records.
+     whole run sets `LEASE_HOLDER_PID=$$`, as `bin/arm_queue.sh` does. Never edit `state/locks/`, including the
+     `all-wait.*` records.
    - **A tick that holds the whole card for a baseline** runs only the baseline's arms under it, and
      releases before any other arm. A series of arms run under `--all` keeps every sibling off the card for
      the whole series. Between the baseline's runs, renew with `lease.sh acquire <issue> --all --render`. While
@@ -257,20 +367,30 @@ overridden below.
    - **Reuse a finished one.** Before running a parent arm, look there. If `<scenario>-p rc=0 end`
      is in its `status` and the run passed override 13's boot check, compare your change arm against
      it and cite it in your packet.
+   - **A landed change's arms are the new base's first parent arms (operator, 2026-11-16).** Before running
+     `parent-<new9>/<scenario>-p`, compare `git rev-parse <new head>^{tree}` with the tree of the `commit` in a
+     finished `<scenario>-c/run.json` from the landing's packet. If they are equal, and the flags, seed, kit settings
+     and mount set match, link that arm in as `<scenario>-p` with a `status` line naming its source, and run only
+     `-p2` if the proof asks for a second parent arm. A slot that landed two changes has no such arm: run them.
    - **Otherwise claim and run it there.** `mkdir evidence/parent-<base9>/<scenario>-p` claims the arm:
      only the tick whose `mkdir` succeeds runs it, into that folder, not into its own packet. If the
      folder exists without a finished status, another tick is running it: run your change arms
-     meanwhile.
-   - **A queue's STOP file stays in its own packet.** A queue that runs a parent arm into the shared folder
-     still writes its STOP, including the self-stop on a CPU-reference fallback, into its own packet. A STOP
-     in `evidence/parent-<base9>/` stops every other tick's queue that writes there (operator, 2026-10-15:
-     #1871's fallback STOP stopped #1845's `RS6-pm-s1323`).
-     A STOP meant for the next arm waits for the running arm's `rc=` line: the queue's check also ends the running arm,
-     and its state series and census are written only at its end (#1905's census arm, 2026-10-15).
-   - **Check the base first.** Each parent arm runs twice (`<scenario>-p` and `<scenario>-p2`), and a proof
-     uses a base only once each scenario's two parent arms are identical. If a pair parts, the base does not
-     replay itself (§F.3's precondition). Post a `Plan finding:` before proving against it, as with #1436. A
-     single parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
+     meanwhile. The arm's queue line names `evidence/parent-<base9>` as its outdir: `bin/arm_queue.sh` runs into
+     the empty folder your `mkdir` made, and its `start` and `rc=` lines go to that folder's `status` too.
+   - **A queue's STOP file stays in its own packet.** `bin/arm_queue.sh` reads `<packet>/STOP` and
+     `<packet>/runs/STOP`, and writes its self-stop on a CPU-reference fallback to `<packet>/runs/STOP`, also while it
+     runs a parent arm into the shared folder. Never put a STOP in `evidence/parent-<base9>/` (operator, 2026-10-15:
+     #1871's fallback STOP there stopped #1845's `RS6-pm-s1323`).
+     It reads STOP before each arm, so the running arm finishes and writes its state series and census.
+   - **Check the base first.** A proof uses a base only once each scenario replays on it (§F.3's precondition).
+     Two readings show that, and a scenario needs one of them:
+     - **The chain line** (3c). The base's `<scenario>-p` identical to the window base's `-p` in `chain.txt` is two
+       runs of the same physics that agree. Run no `-p2` for that scenario.
+     - **A second parent arm.** Where the chain line is missing, was skipped for a class B landing, or parts, run
+       `<scenario>-p2` and use the base once `-p` and `-p2` are identical.
+
+     If neither holds, the base does not replay itself. Post a `Plan finding:` before proving against it, as with
+     #1436. A single unchecked parent arm per base let #1411's proof pass by chance while RS2 had begun to split.
    - **Every scenario of the set.** A §F.3 proof covers RS1–RS6. RS4 joined on bases from 8ec107ad3 (#1417,
      D16a), and runs under `lockstep_sync --no-moments` like the rest. A missing parent arm is a reason to claim and run it, never a reason to leave its scenario
      out. A class A merge with a scenario left out is not proven: pause instead, and say which arms are owed.
@@ -286,6 +406,23 @@ overridden below.
    runs in an identity arm, stop arming the old base. The arms already recorded stay as evidence. Merge the
    head, rebuild, and arm the new base's parents and your change there, because a proof on a base the slot
    no longer has cannot land.
+   **A head move re-runs only what its overlap touches (operator, 2026-11-16).** Merge the head and rebuild, then
+   read `git diff --name-only <old base> <new base>` against the change's own files:
+   - **Change arms.** Read the new base's `chain.txt` before arming anything. If it is not written yet, run the new
+     base's `-p` arms (3a) and write it; never re-run the six change arms ahead of it. A scenario whose chain line is
+     identical carries by the rules below; only a scenario that parts, or that a class B landing moved, is re-run.
+   - **Touched test files.** The change's own touched test files, never the ones the move touched. Re-run them
+     on the merge result when the move changed one of them, a header they include, or a production file the
+     change also edits. Otherwise the earlier log carries. A move's own test files are read by the fast set on the
+     merge result and by the scheduled whole set, not by the landing.
+   - **The fast set.** It runs once, on the merge result that lands (override 5, one run per tree). A prepared run
+     carries across a move that brings no production file and no test file of the extensions the change touches.
+   - **The device suite.** Re-run it only when the move or the change touches device code (override 5).
+   - **Never re-run for a head move:** the fail-on-head output, a mutation, a class B render pair on a scenario
+     that carries, or a cost read. A mutation is re-run only when the merge changed the lines it mutates. A cost
+     read is a difference of arms on one base and stands unless the move changes a file under the phase rows it
+     reports; say so in the packet.
+
    **A proof carries across a base move, scenario by scenario, where the chain check allows it.**
    - **The check.** Compare the new base's `<scenario>-p` against the old base's `-p` (`chain.py`, as 3c's batch check does).
    - **The condition.** They may part only in state keys the landings in between added or changed, with the particle
@@ -336,6 +473,9 @@ overridden below.
      identity kits mount, the scenario runner, the render companion or a scenario file. Docs, tests,
      analysis tools, unmounted extensions and investigations merge when ready, as before; 3b exempts them.
    - **Ready.** When the proof holds against the current head and the packet is written:
+     - a perf step, whose issue asks for a gain, is ready only once its gain read has posted, card alone,
+       against the same base. Identity alone does not make it ready: a cut that does not pay is dropped,
+       not landed (operator, 2026-11-03, #2148; P7);
      - add `ai:ready` to the issue and the PR;
      - post `harness tick pid <PID> pausing: ready for the merge slot, proven on <base9>, packet <path>`;
      - END without merging.
@@ -348,7 +488,7 @@ overridden below.
      3. Check what the merge brought: every commit between the proof base and the head must be a
         batch-mate that landed in this slot or a move 3b exempts. Otherwise, as after an owner-signed
         class B landing, release, remove `ai:ready` and re-prove on the new head.
-     4. Rebuild and run every case of the touched test files on the merge result. A landing that changes code in
+     4. Rebuild and run the touched test files (override 5's definition) on the merge result. A landing that changes code in
         an extension the identity kits mount also runs the whole fast set there, class A included (operator,
         2026-10-09, #1822). A change to a shared quantity can red a test it never touched: #1812's audit change
         to the thin-plate split reddened `test_added_mass_exchange.cpp`'s contact-energy check, and only the
@@ -374,6 +514,21 @@ overridden below.
        Take it only once the merge result's suites are green. A preparation still running when the slot closes
        waits for the next slot; taking the lock to keep the slot while a suite runs is the case this rule forbids
        (operator, 2026-10-10, #1835: lock at 09:57Z, fast set under it until 10:06Z, merged 10:07Z).
+   - **A train for PRs that share a file (operator, 2026-11-17).** Two ready PRs that edit the same production file
+     conflict when the first lands, and the second then re-proves on the new head. On 11-16 #2242 and #2244 were
+     each proven three times this way. So, before a PR proves for a slot:
+     - **Find the PR ahead.** List the open `ai:ready` PRs (and any PR whose tick posted `ready` earlier) that share a
+       production file with yours (`gh pr view <n> --json files`). Ignore version, CHANGELOG and device-record files.
+     - **None:** prove against the window base as now; PRs that share no file land as one batch.
+     - **One or more:** take the earliest-ready one as your base. Merge its branch into yours, resolving the shared hunks
+       as unions, and prove on that merge result. Say `rides on #<pr>` in your ready line and in the PR body.
+     - **Landing a rider.** Land it in the same slot right after the PR it rides on. Step 3 accepts the commits
+       that PR's landing brought as a batch-mate's, and step 2 then meets no conflict outside version and
+       CHANGELOG, because the rider already holds them.
+     - **If the PR ahead is dropped or re-proves,** the rider re-merges onto whatever is ahead of it then, and
+       proves once more. That is one re-proof, where without the train it pays one per slot until it lands first.
+     - **Proofs still run in parallel.** Only the base a rider proves on changes. Its cost read carries, unless the
+       PR ahead changes a file under the rows the rider reports.
    - **The batch is checked as a whole.** Each batch-mate was proven against the window base, not against
      the others.
      - **Who checks.** The first tick that records a parent arm on a head a slot produced also compares it
@@ -463,14 +618,67 @@ overridden below.
        census of the particles there: support root, asleep or awake, the holding rule, speed. Supported debris of the
        branch does not block; material the change itself holds up does.
 5. **Merge rule by class** (the issue states the class):
+   - **What each kind of change owes (operator, 2026-11-16).** A change runs its row and nothing more, unless the
+     issue's Ask names another run. A check outside the row is read by the scheduled suites (`bin/slow_set.sh`:
+     the fast set hourly, the whole set every third hour) or at the release, not by the tick.
+
+     | kind | owes | does not run |
+     |---|---|---|
+     | **Evidence or harness only** (packets, readings, investigations, analysis and comparison tools that never run inside an arm) | the tool's own unittest, if it has one | builds, suites, arms, gates |
+     | **Tests or docs only** (no file an identity arm runs) | build; the touched test files; the fast set only when a shared test header changed; the image gates | arms, cost, mutations; the device suite unless a device test file changed |
+     | **Class A, identity holds** | build; the fixture failing on head, or one mutation where no fixture can fail on head; the touched test files; RS1–RS6 change arms against the shared parents, once; on the merge result the fast set once and the image gates; the device suite only for device code; tick cost from the identity arms' own spans | a second set of arms on a head move that carries; the device suite for host code; a cost arm, unless the issue asks for a gain |
+     | **Class B, behaviour change** | all of class A's row with the fixture checking the law (override 2); with the setting off, RS1–RS6 identical to the parent where the change has a setting; change against parent on each scenario the change moves (RS3 and RS6 on three seeds when they are among them); one render pair and V5 on those scenarios only; on the merge result the fast set and the device suite once | pairs, seeds or renders on a scenario the off arm or the chain line shows unmoved |
+
+     - **Touched test files** means the cases outside `[slow]` of each test file the diff changes, plus the `[slow]`
+       cases the diff adds or edits, run by name. The file's other `[slow]` cases run too when the diff changes
+       code outside a case body in that file, a test header the file includes, or the fixture those cases call.
+       Otherwise the whole set reads them on the head.
+     - **Device code** is `kernels/`, `MpmGpuSolver.h`, `GpuBoundary.h`, `GpuHostTraffic.h`,
+       `worv.core.warp_compat` and the device project's own test files and stubs. A change to another file of the
+       record's hash set runs only the device cases that read it, by file
+       (`tools/test/run_doctest_sharded.sh --file '*test_zone_hold.cpp' <binary> 1` under the device lease), and
+       writes no record.
+     - **A perf step** (the Ask names a gain) adds one gain read: the one scenario and phase rows the Ask names,
+       parent and change alternated twice (p c p c), card alone. A second scenario or an nsys capture only when the
+       Ask names it.
    - **Class A** — no engine behaviour change (tools, tests, docs, investigations, reporting that
      changes no motion, or a refactor proven by byte-identical traces under lockstep): the tick may
-     merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and every case in
-     every touched test file pass, and the packet is written.
+     merge its own PR into `ai/manure-mpm` once the build, the fail-on-head fixture and the touched test
+     files (as defined above) pass, and the packet is written.
    - **Every landing, class A or B, runs the image gates on its merge result:**
      `python3 tools/test/p1_role_ratchet.py` and `tools/test/extension_version_gate.py`. A word above its
      baseline lands only on an operator grant named in the landing comment; otherwise stop with a
      `Plan finding:`.
+   - **Every landing also reads the device record on its merge result:**
+     `python3 tools/test/device_record.py check --root .` (no GPU). A red check means the merge result changed a
+     file of the device suite's hash set. What the landing then owes depends on the files (operator, 2026-11-16):
+     - **Device code, or any class B change in the hash set.** Run the device suite on the merge result, once
+       (`tools/dev/iter.sh build --test --device --suite test_mpm_gpu_parity worv.env.manure`, holding the device
+       lease), commit the `tests/device_record.toml` that run writes as its own commit, and read `check` green
+       before the merge.
+     - **A class A change to host code only.** Its identity arms ran the device path on RS1–RS6 and came back
+       identical. Land with the record as the head has it, name the changed hash-set files in the landing comment
+       under `Device record: stale, <files>`, and leave `tests/device_record.toml` untouched, so two such landings
+       in one slot never conflict on it.
+     - **The refresh (operator, 2026-11-26).** A stale record is repaired once a day, by the daily full
+       regression's one device run on that day's head, not after each landing: a landing never opens a refresh
+       issue. A stale record blocks only the release image build, which the release-readiness issue runs after
+       reading `check` green, so between those the head carries a stale record named in each landing comment. A
+       device-code landing still runs the device suite on its own merge result, as above.
+
+     Never write the record by hand. A device run that fails only in `cuMemAlloc: out of memory` is a card reading,
+     not a verdict: re-run those cases alone by name once the card has room, and never the whole suite twice.
+   - **One run per tree (operator, 2026-11-11).** A suite's green log belongs to the tree it ran on
+     (`git rev-parse HEAD^{tree}`). Never run the fast set, a whole-binary suite or the device suite twice on one
+     tree: cite the log. Before its merge result exists, a branch runs only the cases of its touched test files;
+     the fast set and the device suite run on the merge result, once. A re-merge that brings no file the change or
+     its tests touch carries the earlier logs by the file check of 3b.
+   - **Mutations (operator, 2026-11-11; narrowed 2026-11-16).** A mutation shows that a new case can go red. A
+     fixture that fails on head already shows it, so such a case needs none. Where no fixture can fail on head (the
+     change adds the API its case reads, or the behaviour is unchanged by design), run one mutation for each rule
+     the change adds, at most three, unless the issue names more. Build the mutant in the change's own worktree
+     (dev build, one file), run the one case by name (`-tc=`), revert, and quote the red lines. No suite, no arm
+     and no device run on a mutant.
    - **A class B landing also runs the whole fast set on its merge result** (`bin/slow_set.sh fast`, host), not only its
      touched files. A case green on the head and red on the merge blocks the landing. #1464 turned two cases in files
      it did not touch red (#1524).
@@ -499,8 +707,10 @@ overridden below.
    run), P9 (every new constant with its class: MATERIAL, DERIVED, SHARED RULE, SETTING — a bare
    number in a law is a defect), P10 (which interface the change sits behind, once A0 exists).
 7. **Tick cost (P8, owner decision D4).** Correctness first: a change may slow the tick, but a PR
-   that changes runtime code reports its tick-wall cost against the parent (TickWallSplit or the
-   profiler, same session, both arms). No perf bar blocks a merge; T09 restores real time.
+   that changes runtime code reports its tick-wall cost against the parent. It is read from arms the proof
+   already ran: the tick-wall spans of one identity change arm against the shared parent arm of the same scenario,
+   marked `shared card`. No arm is run for it. Only a perf step runs a gain read (override 5's table). No perf
+   bar blocks a merge; T09 restores real time.
    The host runs a kit tick in one of two modes about 100 ms apart on RS6, whatever the commit, and an arm can
    switch mid-run (#1875). So compare windows matched by a host-only stage both arms share (zone-sync `account`),
    or alternate the arms several times; one median per arm measures the mode, not the change.

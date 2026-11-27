@@ -8,6 +8,14 @@ sleep 600 >/dev/null 2>&1 & B=$!
 trap 'kill $A $B 2>/dev/null; rm -rf "$H"' EXIT
 mkdir -p "$H/bin" "$H/state/locks" "$H/cache/cache-slot2" "$H/cache/cache-slot3"
 cp "$here/bin/lease.sh" "$H/bin/lease.sh"
+# The room check: a remote card that answers has room, but for one rendering kit at a time.
+cat > "$H/bin/remote_room.sh" <<'R'
+#!/usr/bin/env bash
+ssh "$REMOTE_CARD_HOST" true >/dev/null 2>&1 || exit 1
+[ "${1:-}" = --render ] && grep -qs ' render' "$(dirname "$0")/../state/locks"/resource.lease.[4-9] && exit 1
+exit 0
+R
+chmod +x "$H/bin/remote_room.sh"
 export HARNESS_HOME="$H" GPU_SLOTS=3 LEASE_CACHE_BASE="$H/cache"
 L="$H/state/locks"; LEASE="$H/bin/lease.sh"
 ago() { date -u -d "-$1 sec" +%FT%TZ; }
@@ -411,6 +419,18 @@ out=$("$LEASE" local --on); out2=$("$LEASE" acquire 3); check "with the local ca
 "$LEASE" release 3 >/dev/null; "$LEASE" remote --off >/dev/null
 kill $LA $LB 2>/dev/null; wait $LA $LB 2>/dev/null
 reset; rm -f "$L"/all-wait.* "$L"/slot-wait.* "$L/operator-priority" "$L"/resource.lease.4 "$L"/resource.lease.5 "$L/remote-card" "$L/local-card-off"
+
+# A local grant names this host's daemon for a requester the harness keeps off it.
+reset; out=$(WORV_LOCAL_OFF_DOCKER_HOST=unix:///run/off.sock DOCKER_HOST=unix:///run/off.sock "$LEASE" acquire 3)
+check "a local grant to a requester kept off this host exports this host's daemon" \
+  '[[ "$out" == "ACQUIRED slot=1 "* ]] && printf "%s\n" "$out" | grep -q "^export .* DOCKER_HOST=unix:///var/run/docker.sock$"' "$out"
+reset; out=$(env -u WORV_LOCAL_OFF_DOCKER_HOST "$LEASE" acquire 3)
+check "a local grant to any other requester leaves the docker host alone" \
+  '[[ "$out" == "ACQUIRED slot=1 "* ]] && ! printf "%s\n" "$out" | grep -q DOCKER_HOST' "$out"
+reset; out=$(WORV_LOCAL_OFF_DOCKER_HOST=unix:///run/off.sock "$LEASE" acquire 9 --device)
+check "a local device grant to a requester kept off this host exports this host's daemon" \
+  '[[ "$out" == "ACQUIRED device "* ]] && printf "%s\n" "$out" | grep -q "^export .* DOCKER_HOST=unix:///var/run/docker.sock$"' "$out"
+reset
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

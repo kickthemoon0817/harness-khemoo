@@ -13,13 +13,67 @@ HARNESS_HOME="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${HARNESS_STATE:=$HARNESS_HOME/state}"
 : "${TARGET_REPO:?}"; : "${GH_REPO:?}"
 : "${WORK_BRANCH:=ai/manure-mpm}"
-: "${SLOW_SET_WORKTREE:=$(dirname "$TARGET_REPO")/ai-worktrees/slowset}"
 : "${BUILDER_IMAGE:=worv-builder:isaac6}"
 export PATH="${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 if [ "$mode" = fast ]; then S="$HARNESS_STATE/fast-set"; fast_flag="--fast"; set_name="fast set"; lock="fastset"; else S="$HARNESS_STATE/slow-set"; fast_flag=""; set_name="whole doctest set, \`[slow]\` cases included"; lock="slowset"; fi
+# Each mode has a worktree of its own: the hourly fast set never checks out a commit under a whole
+# set still testing, and never waits on its tree.
+: "${SLOW_SET_WORKTREE:=$(dirname "$TARGET_REPO")/ai-worktrees/$lock}"
 mkdir -p "$S/logs" "$HARNESS_STATE/locks"
 # shellcheck source=/dev/null
 . "$HARNESS_HOME/bin/remote-env.sh"; remote_host_env
+# The scheduled suites run on a host no cost read holds, so they never load the
+# host a cost read is timing: SLOW_SET_REMOTE_HOST first, then the other remote
+# hosts, then the local one. With every host held, the run is deferred to the
+# next schedule.
+lease_status=$("$HARNESS_HOME/bin/lease.sh" status < /dev/null 2>/dev/null)
+# held_by_cost_read <host|local>: a live whole-card lease on that host's slots.
+held_by_cost_read() {
+    printf '%s\n' "$lease_status" | awk -v h="$1" '
+        /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
+        /^slot [0-9]+ HELD / && /\(alive\)$/ { held[$2] = $0 }
+        END {
+            for (s in held) {
+                if (h == "local") { remote = 0; for (x in lo) if (s + 0 >= lo[x] && s + 0 <= hi[x]) remote = 1
+                                    if (!remote && held[s] ~ / exclusive /) exit 0 }
+                else if (s + 0 >= lo[h] && s + 0 <= hi[h] && held[s] ~ / remote-all / && held[s] !~ / no-cost /) exit 0
+            }
+            exit 1
+        }'
+}
+run_on=""
+# The scheduled suites are CPU work, so with this host's CPU lane on (state/local-cpu-lane, owner
+# 2026-11-26) they run here, under the host's dev build lock and the lane's builder image, which keeps
+# both remote cards free for the runs that need a card. Otherwise, with the harness kept to its remote
+# hosts, bin/build_host.sh names a remote host and that host's compile lock and builder image.
+if [ -s "$HARNESS_STATE/local-cpu-lane" ]; then
+    read -r BUILDER_IMAGE _ < "$HARNESS_STATE/local-cpu-lane"
+    export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build.lock WORV_BUILDER_IMAGE="$BUILDER_IMAGE" WORV_LOCAL_LANE=1
+    run_on=local
+elif [ -e "$HARNESS_STATE/locks/harness-first-remote-only" ]; then
+    lane=$(BUILD_HOST_REMOTE_ONLY=1 "$HARNESS_HOME/bin/build_host.sh") || exit 1
+    eval "$lane"
+    run_on=${DOCKER_HOST#ssh://}
+    export PATH="$HARNESS_HOME/bin/remote-docker:$PATH"
+    if held_by_cost_read "$run_on"; then
+        echo "$(date -u +%FT%TZ) $set_name deferred: every host is held by a cost read" >> "$S/deferred.log"
+        exit 0
+    fi
+fi
+for h in ${SLOW_SET_REMOTE_HOST:-} $(grep -v '^[[:space:]]*$' "$HARNESS_STATE/locks/remote-card" 2>/dev/null); do
+    [ -z "$run_on" ] || break
+    [ -e "$HARNESS_STATE/locks/local-card-off" ] && break
+    held_by_cost_read "$h" && continue
+    REMOTE_CARD_HOST="$h" "$HARNESS_HOME/bin/remote_room.sh" >/dev/null 2>&1 || continue
+    run_on="$h"; break
+done
+if [ -n "$run_on" ] && [ -z "${WORV_DEV_BUILD_LOCK:-}" ]; then
+    export DOCKER_HOST="ssh://$run_on" PATH="$HARNESS_HOME/bin/remote-docker:$PATH" \
+        WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote.lock
+elif [ -z "$run_on" ] && held_by_cost_read local; then
+    echo "$(date -u +%FT%TZ) $set_name deferred: every host is held by a cost read" >> "$S/deferred.log"
+    exit 0
+fi
 exec 7>"$HARNESS_STATE/locks/$lock.lock"; flock -n 7 || exit 0
 [ -e "$HARNESS_STATE/paused" ] && exit 0
 

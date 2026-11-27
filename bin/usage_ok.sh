@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prints the rate-limit reading and exits 0 while both windows are under the point where a tick
-# stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT), 1 at or above it,
+# stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT unless set; the
+# weekly window reads USAGE_TICK_STOP_WEEK_PCT, the same point unless set), 1 at or above it,
 # and 2 when no fresh reading exists. Ticks run it before starting any build, suite, kit, render
 # queue or agent.
 set -u
@@ -44,9 +45,10 @@ if [ -z "$five" ] || [ -z "$week" ]; then
     echo "usage unknown: no fresh reading in $USAGE_CACHE; start nothing"
     exit 2
 fi
-if under_ceiling "$USAGE_TICK_STOP_PCT"; then
-    echo "five=${five}% week=${week}% stop=${USAGE_TICK_STOP_PCT}% ceiling=${USAGE_CEILING_PCT}%: go on"
+stops="stop=${USAGE_TICK_STOP_PCT}% week_stop=${USAGE_TICK_STOP_WEEK_PCT}% ceiling=${USAGE_CEILING_PCT}%"
+if under_ceiling "$USAGE_TICK_STOP_PCT" "$USAGE_TICK_STOP_WEEK_PCT"; then
+    echo "five=${five}% week=${week}% $stops: go on"
     exit 0
 fi
-echo "five=${five}% week=${week}% stop=${USAGE_TICK_STOP_PCT}% ceiling=${USAGE_CEILING_PCT}%: start nothing, pause and end"
+echo "five=${five}% week=${week}% $stops: start nothing, pause and end"
 exit 1

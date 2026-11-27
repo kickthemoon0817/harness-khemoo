@@ -18,11 +18,187 @@ unset -f docker 2>/dev/null
 self_dir=$(cd "$(dirname "$0")" && pwd)
 real=$(PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$self_dir" | paste -sd: -) type -P docker)
 [ -n "$real" ] || { echo "remote-docker: no docker on PATH" >&2; exit 127; }
-case "${DOCKER_HOST:-}" in ssh://*) ;; *) exec "$real" "$@" ;; esac
+# While state/ov-aliases.toml exists (the operator's Nucleus redirects during an outage), every
+# container a run or create starts here gets it as its client's config, read-only, so its kit
+# resolves the aliased omniverse:// URLs. Removing the file ends the redirect for new containers.
+ov_aliases="$(cd "$self_dir/../.." && pwd)/state/ov-aliases.toml"
+if [ -f "$ov_aliases" ] && [ -s "$ov_aliases" ]; then
+  ov_args=("$@"); ov_si=-1
+  for ((ov_i = 0; ov_i < ${#ov_args[@]}; ov_i++)); do case "${ov_args[$ov_i]}" in -*) ;; *) ov_si=$ov_i; break ;; esac; done
+  if [ "$ov_si" -ge 0 ] && { [ "${ov_args[$ov_si]}" = run ] || [ "${ov_args[$ov_si]}" = create ]; }; then
+    set -- "${ov_args[@]:0:$((ov_si + 1))}" -v "$ov_aliases:/root/.nvidia-omniverse/config/omniverse.toml:ro" "${ov_args[@]:$((ov_si + 1))}"
+  fi
+fi
+# This host's card is the owner's, and its default runtime hands every container the card unless
+# told otherwise. A tick on the local daemon (bin/build_host.sh's local lane) runs only what
+# `tools/dev/iter.sh build` needs: `docker run` with the options listed below in their separate or
+# `--long=` forms, each bind source an absolute path under the user's tmp_workspace (passed on
+# resolved) or a named volume, no NVIDIA_* but a hidden card, and runc and NVIDIA_VISIBLE_DEVICES=void
+# forced on; besides that, read-only commands. A global option is refused. Runs outside a tick are
+# left to their caller. A tick runs as the same user, so this keeps a mistake off the owner's card;
+# it is not a boundary against a process set on crossing it.
+case "${DOCKER_HOST:-}" in ssh://*) ;; *)
+  in_tick=""; listed_lane=""
+  if tick_pid=$("$(cd "$self_dir/../.." && pwd)/bin/tick-pid.sh" "$$" 2>/dev/null); then
+    in_tick=1
+    # A tick whose issue the owner lists in state/locks/local-card-issues may use this host's card
+    # and daemon as a named holder would. Its card-less runs (a compile, a host test suite) are lane
+    # runs all the same, bounded below as every harness run here is.
+    hh="$(cd "$self_dir/../.." && pwd)"
+    allowed=$(grep -lE "^[0-9]+ $tick_pid( |$)" "$hh"/state/locks/claim.* 2>/dev/null | head -1)
+    allowed=${allowed##*.}
+    if [ -n "$allowed" ] && grep -qx "$allowed" "$hh/state/locks/local-card-issues" 2>/dev/null; then
+      case "${1:-} $*" in "run "*NVIDIA_VISIBLE_DEVICES=void*) listed_lane=1 ;; *) exec "$real" "$@" ;; esac
+    fi
+  fi
+  if [ -n "$in_tick" ] && [ -z "$listed_lane" ]; then
+    refuse() { echo "remote-docker: on this host a tick runs only card-less build containers ($1); the local card and containers are the owner's" >&2; exit 75; }
+    case "${1:-}" in -*) refuse "global option $1" ;; "") exec "$real" ;; esac
+    case "$1" in
+      run) ;;
+      ps|version|info|logs|wait|inspect|images) exec "$real" "$@" ;;
+      image) case "${2:-}" in ls|inspect|history) exec "$real" "$@" ;; esac; refuse "docker image ${2:-}" ;;
+      volume) case "${2:-}" in ls|inspect) exec "$real" "$@" ;; esac; refuse "docker volume ${2:-}" ;;
+      *) refuse "docker $1" ;;
+    esac
+    mount_root=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
+    # Prints the spec docker gets: a bind source resolved, a named volume as given.
+    resolve_volume() {
+      local src=${1%%:*} rest=""
+      [[ "$1" == *:* ]] && rest=":${1#*:}"
+      if [[ "$src" == /* ]]; then
+        src=$(realpath -m "$src")
+        [[ "$src" == "$mount_root"/* ]] || refuse "bind source $src outside $mount_root"
+        printf '%s%s' "$src" "$rest"
+      elif [[ "$src" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        printf '%s' "$1"
+      else
+        refuse "volume $1"
+      fi
+    }
+    check_env() {
+      case "$1" in
+        NVIDIA_VISIBLE_DEVICES=void|NVIDIA_VISIBLE_DEVICES=none) ;;
+        NVIDIA_*) refuse "env $1" ;;
+      esac
+    }
+    shift; opts=()
+    while [ "$#" -gt 0 ]; do
+      a=$1
+      case "$a" in
+        --rm|-i|-t|-it|-ti|--init) opts+=("$a"); shift ;;
+        -v|--volume) [ "$#" -ge 2 ] || refuse "$a without a value"; spec=$(resolve_volume "$2") || exit 75; opts+=(-v "$spec"); shift 2 ;;
+        --volume=*) spec=$(resolve_volume "${a#--volume=}") || exit 75; opts+=(-v "$spec"); shift ;;
+        -e|--env) [ "$#" -ge 2 ] || refuse "$a without a value"; check_env "$2"; opts+=("$a" "$2"); shift 2 ;;
+        --env=*) check_env "${a#--env=}"; opts+=("$a"); shift ;;
+        --entrypoint|-w|--workdir|-u|--user|--name) [ "$#" -ge 2 ] || refuse "$a without a value"; opts+=("$a" "$2"); shift 2 ;;
+        --entrypoint=*|--workdir=*|--user=*|--name=*) opts+=("$a"); shift ;;
+        -*) refuse "option $a" ;;
+        *) break ;;
+      esac
+    done
+    cmd=("$real" run --runtime=runc -e NVIDIA_VISIBLE_DEVICES=void "${opts[@]}" "$@")
+    lane=1
+  else
+    cmd=("$real" "$@"); orig=("$@"); opts=(); lane=${WORV_LOCAL_LANE:-}; [ -n "$listed_lane" ] && lane=1
+    if [ "${1:-}" = run ]; then
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -d|--detach|--detach=true) cmd=(); break ;;
+          -v|--volume) opts+=(-v "${2:-}"); shift 2 ;;
+          --volume=*) opts+=(-v "${1#--volume=}"); shift ;;
+          -*) shift ;;
+          *) break ;;
+        esac
+      done
+    fi
+    # A detached run is not waited on, bounded or handed back: it goes to docker whole.
+    [ "${#cmd[@]}" -gt 0 ] || exec "$real" "${orig[@]}"
+  fi
+  # The harness's own runs here (a tick's, or a lane run marked WORV_LOCAL_LANE=1 by
+  # bin/build_host.sh or bin/slow_set.sh) share the owner's machine: one at a time under
+  # LOCAL_LANE_LOCK, each bounded by LOCAL_LANE_CPUS and LOCAL_LANE_MEMORY, a compile's jobs by
+  # LOCAL_LANE_MAX_JOBS. A lane run starts only once the host has its memory bound plus
+  # LOCAL_LANE_SPARE_MIB available (kits on this host's card hold 10+ GB each), waiting while it
+  # does not. The owner's own runs through this shim are left as given.
+  if [ "$lane" = 1 ] && [ "${cmd[1]:-}" = run ]; then
+    max_jobs=${LOCAL_LANE_MAX_JOBS:-4}
+    for ((k = 2; k < ${#cmd[@]}; k++)); do
+      case "${cmd[$k]}" in
+        WORV_BUILD_JOBS=*) j=${cmd[$k]#WORV_BUILD_JOBS=}; [[ "$j" =~ ^[0-9]+$ ]] && [ "$j" -gt "$max_jobs" ] && cmd[$k]="WORV_BUILD_JOBS=$max_jobs" ;;
+      esac
+    done
+    lane_mem=${LOCAL_LANE_MEMORY:-12g}
+    cmd=("${cmd[0]}" run --cpus="${LOCAL_LANE_CPUS:-8}" --memory="$lane_mem" "${cmd[@]:2}")
+    exec 7>"${LOCAL_LANE_LOCK:-/tmp/worv-local-lane.lock}" && flock 7
+    case "$lane_mem" in *g|*G) need=$(( ${lane_mem%[gG]} * 1024 )) ;; *m|*M) need=${lane_mem%[mM]} ;; *) need=0 ;; esac
+    need=$(( need + ${LOCAL_LANE_SPARE_MIB:-4096} )); said=""
+    while :; do
+      avail=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' "${LOCAL_LANE_MEMINFO:-/proc/meminfo}" 2>/dev/null)
+      [[ "$avail" =~ ^[0-9]+$ ]] && [ "$avail" -lt "$need" ] || break
+      [ -n "$said" ] || { echo "remote-docker: lane run waits for ${need} MiB available on this host (${avail} MiB now)" >&2; said=1; }
+      sleep "${LOCAL_LANE_MEM_POLL_S:-15}"
+    done
+  fi
+  # A container writes as root, so each writable bind under the user's tmp_workspace is handed back
+  # to the user once a foreground run ends; the next host-side step writes there.
+  "${cmd[@]}"; rc=$?
+  exec 7>&- 2>/dev/null
+  ws=$(realpath -m "$(getent passwd "$(id -u)" | cut -d: -f6)/tmp_workspace")
+  for ((k = 0; k + 1 < ${#opts[@]}; k++)); do
+    [ "${opts[$k]}" = -v ] || continue
+    spec=${opts[$((k + 1))]}; src=${spec%%:*}
+    [[ "$src" == /* ]] || continue
+    case "$spec" in *:ro|*:ro,*) continue ;; esac
+    src=$(realpath -m "$src"); [[ "$src" == "$ws"/* ]] && [ -d "$src" ] || continue
+    "$real" run --rm --runtime=runc --network none -v "$src:/w" --entrypoint chown \
+        "${REMOTE_DOCKER_CHOWN_IMAGE:-worv-builder:isaac6}" -R "$(id -u):$(id -g)" /w >/dev/null 2>&1
+  done
+  exit "$rc" ;;
+esac
 target=${DOCKER_HOST#ssh://}
 sub=""
 for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
 [ "$sub" = run ] || [ "$sub" = create ] || exec "$real" "$@"
+
+# A cost read holds a remote card whole (`lease.sh acquire --all-remote`), so the read times
+# the engine and not another tick's compile: a tick that does not hold that lease starts no
+# container on the host. Runs outside a tick (the operator, the scheduled suites) are not held.
+# A whole card held with `--no-cost` times nothing, so the host's other work goes on beside it.
+# A cost read still waiting for a card asks it to go quiet (bin/cost_wait_hosts.sh): another
+# tick's container without a card (`--gpus` absent) is refused there too. Containers with a card
+# answer to their own lease, and the waiting issue's own containers run.
+harness_home=$(cd "$self_dir/../.." && pwd)
+if caller_tick=$("$harness_home/bin/tick-pid.sh" "$$" 2>/dev/null); then
+  holder=$("$harness_home/bin/lease.sh" status < /dev/null 2>/dev/null | awk -v h="$target" '
+      /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
+      /^slot [0-9]+ HELD / && / remote-all / && !/ no-cost / && /\(alive\)$/ { held[$2] = $4 " " $5 }
+      END { for (s in held) if ((h in lo) && s + 0 >= lo[h] && s + 0 <= hi[h]) { print held[s]; exit } }')
+  if [ -n "$holder" ]; then
+    holder_issue=${holder%% *}; holder_pid=${holder##* }; own=""
+    [ "$caller_tick" = "$holder_pid" ] && own=1
+    p=$$
+    while [ -z "$own" ] && [ "$p" -gt 1 ]; do
+      [ "$p" = "$holder_pid" ] && own=1
+      p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null || echo 1)
+    done
+    if [ -z "$own" ]; then
+      echo "remote-docker: $target is held whole by #$holder_issue's cost read (lease.sh status shows remote-all); run this on the other host's lane" >&2
+      exit 75
+    fi
+  fi
+  gpus=""; for a in "$@"; do case "$a" in --gpus|--gpus=*) gpus=1 ;; esac; done
+  if [ -z "$gpus" ]; then
+    caller_issue=$(grep -lE "^[0-9]+ $caller_tick( |$)" "$harness_home"/state/locks/claim.* 2>/dev/null | head -1)
+    caller_issue=${caller_issue##*.}
+    waiter=$("$harness_home/bin/cost_wait_hosts.sh" ${caller_issue:+--except-issue "$caller_issue"} | awk -v h="$target" '$1 == h { print $2; exit }')
+    if [ -n "$waiter" ]; then
+      echo "remote-docker: #$waiter's cost read waits for $target to go quiet; run this container on the other host's lane (bin/build_host.sh names it)" >&2
+      exit 75
+    fi
+  fi
+fi
 
 ssh_cmd="ssh -o BatchMode=yes"
 lock_parents="${REMOTE_DOCKER_LOCK_PARENTS:-$HOME/tmp_workspace/ai-worktrees:$HOME/tmp_workspace/artifacts/manure-plan/evidence}"

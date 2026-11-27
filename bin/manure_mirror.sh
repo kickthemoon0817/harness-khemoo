@@ -8,8 +8,10 @@
 # commits already pushed and only appends new ones; the push is refused unless
 # it is a fast-forward of the remote main.
 #
-# Versions: a landed version is tagged v<version> at its first appearance on
-# main's first-parent chain (config/extension.toml). A minor or major version
+# Versions: a landed version is tagged v<version> at its last commit on main's
+# first-parent chain (config/extension.toml), the state it landed as: the
+# split lays a landing's branch commits on that chain, so its first commit
+# carrying the version is mid-development. A minor or major version
 # (X.Y.0) also gets a GitHub Release with its CHANGELOG section as notes; a
 # patch version is a tag only. Pushed tags are never moved.
 #
@@ -95,8 +97,8 @@ if [ -n "$remote_main" ] && ! git -C "$MIRROR/push.git" merge-base --is-ancestor
     exit 1
 fi
 
-# Versions on the first-parent chain, at their first appearance; skip tags
-# that already exist.
+# Versions on the first-parent chain, at their last commit; skip tags that
+# already exist.
 mapfile -t new_tags < <(python3 -I - "$MIRROR/push.git" <<'PY'
 import re, subprocess, sys
 repo = sys.argv[1]
@@ -106,7 +108,7 @@ def run(*a, inp=None):
 fp = run("rev-list", "--first-parent", "--reverse", "main").split()
 data = run("cat-file", "--batch", inp="".join(f"{c}:config/extension.toml\n" for c in fp))
 existing = set(run("tag", "-l").split())
-pos, prev, seen = 0, None, set()
+pos, last = 0, {}
 for c in fp:
     end = data.index("\n", pos)
     header = data[pos:end]
@@ -118,11 +120,11 @@ for c in fp:
         pos += size + 1
         m = re.search(r'^version\s*=\s*"([^"]+)"', body, re.M)
         version = m.group(1) if m else None
-    if version and version != prev and version not in seen:
-        seen.add(version)
-        if f"v{version}" not in existing:
-            print(f"v{version} {c}")
-    prev = version or prev
+    if version:
+        last[version] = c
+for version, c in last.items():
+    if f"v{version}" not in existing:
+        print(f"v{version} {c}")
 PY
 )
 

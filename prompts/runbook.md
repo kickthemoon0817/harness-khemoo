@@ -55,6 +55,8 @@ read-only.
   closed (their PRs merged into `ai/manure-mpm`). If the oldest is blocked by dependencies, take
   the next one that is not. Prefer resuming a released claim (issue with `ai:wip` whose
   recorded PID is dead) over fresh work.
+- An open issue labelled `ai:first` is taken before any older fresh issue (operator, 2026-11-16): it
+  shortens every later proof. Resuming a released claim still comes first.
 - Do not file a new issue unless it blocks the fix in hand. Note anything else in one
   sentence in the tick log.
 - A tick that ends with no code change and no verified evidence is a failed tick unless it
