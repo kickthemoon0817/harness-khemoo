@@ -50,6 +50,8 @@ from dashboard_lib.redact import CommandRedactor  # noqa: E402
 from dashboard_lib.runqueue import RunQueueReader  # noqa: E402
 from dashboard_lib.render import HtmlRenderer  # noqa: E402
 
+linux_only = unittest.skipUnless(sys.platform.startswith("linux"), "needs /proc, flock, setsid and lslocks")
+
 
 class FixtureHarness:
     """
@@ -509,6 +511,7 @@ class SecretSurfaceTest(unittest.TestCase):
     stall log, and requires none to reach the JSON or the page.
     """
 
+    @linux_only
     def test_no_secret_reaches_the_json_or_the_page(self) -> None:
         shapes: list[JsonDict] = json.loads((FIXTURES / "secret_shapes.json").read_text())
         harness: FixtureHarness = FixtureHarness()
@@ -554,6 +557,7 @@ class SecretSurfaceTest(unittest.TestCase):
                 self.assertNotIn(secret, page)
 
 
+    @linux_only
     def test_no_quoting_bypass_reaches_the_json_or_the_page(self) -> None:
         shapes: list[JsonDict] = json.loads((FIXTURES / "bypass_shapes.json").read_text())
         harness: FixtureHarness = FixtureHarness()
@@ -605,6 +609,7 @@ class TickMappingTest(unittest.TestCase):
         self.assertEqual(mapping[30], (2300, "claim"))
         self.assertEqual(mapping[40], (2600, "github"))
 
+    @linux_only
     def test_finds_a_live_tick_with_slot_log_issue_and_tool_call(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -626,6 +631,7 @@ class TickMappingTest(unittest.TestCase):
         self.assertEqual(tick.tool_shells, 1)
         self.assertGreaterEqual(tick.age_s, 0)
 
+    @linux_only
     def test_ignores_claude_p_outside_the_harness(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -811,6 +817,7 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertEqual(github["error"], "ZeroDivisionError: boom")
         self.assertIsNotNone(github["fetched_at"])
 
+    @linux_only
     def test_every_panel_has_data(self) -> None:
         snapshot = self.snapshot
         self.assertEqual([machine["key"] for machine in snapshot["machines"]],
@@ -905,6 +912,7 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertNotIn(token, repr(self.collector.github))
         self.assertNotIn(token, repr(self.collector.config))
 
+    @linux_only
     def test_gh_failure_is_redacted_and_keeps_the_last_read(self) -> None:
         (self.harness.home / "gh-fail").touch()
         self.collector.refresh_github_in_place()
@@ -932,6 +940,7 @@ class CollectorAndPageTest(unittest.TestCase):
         harness = self.collector.snapshot()["harness"]
         self.assertEqual((harness["paused"], harness["paused_reason"]), (True, "state/paused present"))
 
+    @linux_only
     def test_counts_taken_while_the_own_read_fails_are_unverified(self) -> None:
         clock_epoch: list[float] = [1795656600.0]
         collector: Collector = self.harness.collector(clock=lambda: clock_epoch[0])
@@ -967,6 +976,7 @@ class CollectorAndPageTest(unittest.TestCase):
         self.assertEqual(snapshot["queue"]["github_outages"],
                          [{"from": "2026-11-26T01:30:00Z", "to": "2026-11-26T01:40:00Z"}])
 
+    @linux_only
     def test_restart_serves_the_saved_github_read(self) -> None:
         restarted: Collector = self.harness.collector()
         restarted._load_github_cache_in_place()
@@ -1041,6 +1051,7 @@ class HttpServerTest(unittest.TestCase):
 
     ACCESS_TOKEN: ClassVar[str] = "test-access-token-0123456789"
 
+    @linux_only
     def test_serves_page_json_and_health_on_loopback_without_the_github_token(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -1211,6 +1222,7 @@ class HttpServerTest(unittest.TestCase):
             "GH_TOKEN", "GH_REPO", "ISSUE_LABEL", "WIP_LABEL", "SIGNOFF_LABEL", "OPERATOR_LABEL", "READY_LABEL",
             "FABLE_LABEL", "FIRST_LABEL", "LOW_LABEL"}))
 
+    @linux_only
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -1331,6 +1343,7 @@ class BuildLockTest(unittest.TestCase):
                          (2088784, "/home/x/tmp_workspace/ai-worktrees/mpm-2464"))
         self.assertEqual(BuildLockReader.parse_lock_file(""), (None, None))
 
+    @linux_only
     def test_reads_a_live_holder_and_waiter(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
@@ -1509,6 +1522,7 @@ class MachineCardTest(unittest.TestCase):
 
 
 class FlowPageTest(unittest.TestCase):
+    @linux_only
     def test_the_collector_builds_a_live_flow_and_the_page_draws_it(self) -> None:
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
