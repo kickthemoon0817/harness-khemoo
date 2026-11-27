@@ -27,10 +27,11 @@ class ProcessScanner:
     """
     Reads the process table and recognises harness ticks.
 
-    A tick is a process whose argv[0] is the claude binary and argv[1] is `-p` (bin/tick-pid.sh's rule) and whose
-    stdout is a `state/logs/tick-*.log` of this harness home, as tick.sh's runner redirects it; a `claude -p` of
-    another harness home or outside any harness is left out. Its issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then from a lease it
-    holds, then from a cached GitHub claim-comment lookup the caller supplies.
+    A tick is a process whose argv[0] base name is claude, claude-code or node and argv[1] is `-p`, the local
+    ticks tick.sh runs and bin/tick-pid.sh's default TICK_AGENT_EXES, and whose stdout is a `state/logs/tick-*.log`
+    of this harness home, as tick.sh's runner redirects it; a `claude -p` of another harness home or outside any
+    harness is left out. Its issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its
+    pid, then from a lease it holds, then from a cached GitHub claim-comment lookup the caller supplies.
     """
 
     CLAUDE_BINARIES: ClassVar[frozenset[str]] = frozenset({"claude", "claude-code", "node"})

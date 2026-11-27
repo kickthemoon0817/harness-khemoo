@@ -96,7 +96,7 @@ in its argv.
 |---|---|---|
 | `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
 | `TICK_AGENT` | `claude` | the adapter a tick runs; another value needs `FLEET_DISPATCH=1`, or `check` fails and the launcher logs the instance as incomplete |
-| `TICK_AGENT_EXES` | `claude` | the executable names a tick runs as; `bin/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has one of these base names |
+| `TICK_AGENT_EXES` | `claude:-p claude-code:-p node:-p` | the agent processes a tick runs as, space-separated, each `exe` or `exe:arg`; `bin/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has base name `exe` and, with `:arg`, whose argv[1] is exactly `arg`. The argument keeps an operator's interactive `claude` from taking claims or the merge lock. Add `codex:exec` for codex ticks |
 | `FLEET_DEVICE` | `auto` | a device name from `fleet.toml`, or `auto` |
 | `FLEET_BIN` | `fleet` | the fleet CLI |
 | `FLEET_CONFIG` | `$HARNESS_INSTANCE_DIR/fleet.toml` | the device registry (`templates/instance/fleet.toml.example`) |

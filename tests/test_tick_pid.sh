@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Exercises bin/tick-pid.sh: the nearest ancestor whose argv[0] or executable base name is in
-# TICK_AGENT_EXES is the tick. Agent names here are made up, so an agent that runs the suite is
-# never mistaken for one.
+# Exercises bin/tick-pid.sh: the nearest ancestor matching an `exe` or `exe:arg` entry of
+# TICK_AGENT_EXES is the tick. Agent names here are made up where they can be, so an agent that runs
+# the suite is never mistaken for one; the default's cases use claude and only check that the fake
+# process was or was not chosen, since a real `claude -p` may sit further up.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -26,6 +27,24 @@ check "the nearest listed ancestor wins" '[ "$(cat "$OUT")" = "$(cat "$H/inner")
 
 (exec -a renamed "$H/agent-b" -c 'echo $$ > "$0"; TICK_AGENT_EXES=agent-b "$TP" > "$OUT"; true' "$H/pid")
 check "an ancestor whose executable is a listed agent is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+
+TICK_AGENT_EXES=agent-a:-p run_as agent-a '"$TP" > "$OUT" 2>&1'
+check "an entry with an argument refuses another first argument" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+
+# bash's argv[1] here is -c, as an interactive `claude` has no -p.
+(unset TICK_AGENT_EXES; run_as claude '"$TP" > "$OUT" 2>&1')
+check "by default an interactive claude is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+
+# bash -p only skips the startup files here; it makes argv[1] -p.
+(unset TICK_AGENT_EXES; exec -a claude bash -p -c 'echo $$ > "$0"; "$TP" > "$OUT"; true' "$H/pid")
+check "by default claude -p is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+
+# bash runs the script file named exec, so the process reads as `codex exec`.
+printf '%s\n' 'echo $$ > "$H/pid"; "$TP" > "$OUT" 2>&1; true' > "$H/exec"
+(unset TICK_AGENT_EXES; cd "$H" && exec -a codex bash exec)
+check "by default codex exec is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+(export TICK_AGENT_EXES="claude:-p codex:exec"; cd "$H" && exec -a codex bash exec)
+check "codex exec is the tick once codex:exec is listed" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
