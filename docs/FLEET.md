@@ -89,9 +89,11 @@ granting `monitor`, then the error with id 0, then closes. A connection refused 
 is read (a wrong peer uid, a peer outside `allow_cidrs`, a tls connection over a limit) is closed
 without a frame.
 
-`Connection::client_hello` and `Connection::server_hello` implement both sides. A relay takes the
-stream back with `Connection::into_parts`, which also returns any bytes already read past the
-`Hello`; it forwards those first.
+`Connection::client_hello` and `Connection::server_hello` implement both sides. A relay reads the
+client's `Hello` with `Connection::recv_hello` (version first, as above), since it can answer only
+once the daemon behind it has granted a role. It takes each stream back with
+`Connection::into_parts`, which also returns any bytes already read past the `Hello`; it forwards
+those first.
 
 ### Requests and responses
 
@@ -203,8 +205,9 @@ Every string in a report other than `event` data comes from the device. fleetd r
 characters in them with U+FFFD and cuts each at 1024 bytes (`MAX_REPORTED_STR`) on a character
 boundary, which with `MAX_SESSIONS` keeps every reply within one frame. The hub still treats
 them as untrusted: its human tables replace control characters again, and the dashboard passes
-them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw,
-since it is the agent's own output.
+them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw to
+a pipe, since it is the agent's own output, and with its control characters replaced to a
+terminal (see [fleet](#fleet)).
 
 - An `AdapterInfo` with `max_concurrent` 0 is discovery-only: it cannot be dispatched to.
   `models[0]` is the model a dispatch without `model` gets.
@@ -228,7 +231,7 @@ A message is for people and never holds a prompt, environment value or secret.
 | `forbidden` | fleetd | the device's policy refuses it: workdir outside the roots, model not allowed, a discovery-only adapter, or `logs`, `wait` or `cancel` on a discovered session |
 | `bad_request` | fleetd | the frame did not decode or a value failed validation |
 | `not_found` | fleetd | no such adapter or session, or the workdir does not exist |
-| `busy` | fleetd | the adapter is at `max_concurrent`, or fleetd is at `max_connections` |
+| `busy` | fleetd | the adapter is at `max_concurrent`, or the unix socket is at `max_connections` |
 | `too_large` | fleetd | a frame exceeded 1 MiB |
 | `version_mismatch` | fleetd, hub | the peers' protocol versions differ |
 | `unavailable` | fleetd | `fleetd --stdio` found no running daemon to relay to |
@@ -262,7 +265,8 @@ socket, completes the handshake there asking for the lesser of the client's role
 `[stdio] max_role`, returns the granted `Hello` to the client, and then copies bytes both ways
 until either side closes. Sessions therefore belong to the daemon and outlive the ssh connection.
 If no daemon is running, the relay sends a `Hello` granting `monitor`, then an `unavailable`
-error with id 0, and exits 1.
+error with id 0, and exits 1. If its config does not load, it answers the same way with an
+`internal` error, and exits 2.
 
 Pin the key's command in the device's `~/.ssh/authorized_keys`, so the key can do nothing else:
 
@@ -334,9 +338,16 @@ These apply to the tls transport:
   `0.0.0.0` or `::` unless `allow_cidrs` is non-empty.
 - When `allow_cidrs` is non-empty, a peer whose address is in none of them is closed right after
   `accept`, before the TLS handshake. IPv4-mapped IPv6 addresses are matched as IPv4.
-- At most `max_connections` connections are open across all transports, and at most
-  `max_connections_per_ip` from one address. A tls connection over a limit is closed before the
-  handshake; a unix one gets a `Hello` granting `monitor`, then a `busy` error with id 0.
+- The tls listener has its own connection budget, `[tls] max_connections`, apart from the unix
+  socket's (top-level `max_connections`, which ssh relays also count against). A tls connection
+  holds a place from `accept` to close, so peers that have not authenticated, or never will, can
+  fill only the tls budget and never lock out local or ssh clients. Within it, at most
+  `[tls] max_connections_per_ip` come from one address, and at most `[tls] max_handshakes` are
+  still in their TLS handshake or `Hello`, so slow handshakes cannot fill it either; a finished
+  handshake gives its slot back.
+- A tls connection over any of these limits is closed right after `accept`, before the handshake;
+  a unix one over `max_connections` gets a `Hello` granting `monitor`, then a `busy` error with
+  id 0.
 - `handshake_timeout_s` bounds the TLS handshake plus the `Hello`. `idle_timeout_s` closes a
   connection that sends no frame while it has no request in progress.
 
@@ -354,8 +365,8 @@ A dispatch only selects among what the operator configured. For an adapter:
   `workdir_roots` or below one, compared by path components. The child runs there, and
   `{workdir}` is the canonical path.
 - The environment is cleared. The child gets `HOME` and `PATH` from fleetd's environment, plus
-  each name in `env_allow` that fleetd's environment sets. Secrets therefore come from the device,
-  never from the request.
+  each name in `env_allow` that fleetd's environment sets, then the adapter's static `env` table.
+  Secrets therefore come from the device, never from the request.
 - At most `max_concurrent` dispatched sessions of the adapter run at once.
 - The effective timeout is the lesser of the request's `timeout_s` and the adapter's.
 - The child runs in its own process group. Its stdout and stderr are pipes that fleetd drains
@@ -365,9 +376,11 @@ A dispatch only selects among what the operator configured. For an adapter:
 - On Linux, fleetd sets `RLIMIT_CORE` to 0 and `RLIMIT_NOFILE` to `rlimit_nofile` on the child
   with `prlimit` right after spawning it. Other systems get no rlimits.
 - Cancel and timeout send SIGTERM to the process group, then SIGKILL after `kill_grace_s`, through
-  rustix's safe wrappers.
+  rustix's safe wrappers. When the agent exits on its own, anything left in its group gets the
+  same SIGTERM then SIGKILL, so no helper outlives its session.
 - fleetd logs every dispatch and cancel at info level with the peer's identity: the certificate's
-  subject and serial, `unix uid N`, or `stdio`.
+  subject and serial, or `unix uid N`. A `--stdio` relay reaches the daemon over the socket, so
+  ssh peers log as `unix uid N`; the relay logs its own connection and granted role.
 
 Discovery is read-only. It reports only processes of fleetd's own uid unless
 `[discovery] all_users` is true. A process in the process group of a session fleetd dispatched is
@@ -488,7 +501,7 @@ be absolute unless the table says otherwise.
 | `session_retention_s` | integer ≥ 0 | 604800 | how long an ended dispatched session (metadata and log) is kept |
 | `log_max_bytes` | integer ≥ 4096 | 67108864 | per-session log cap |
 | `kill_grace_s` | integer 1 to 300 | 10 | the wait between SIGTERM and SIGKILL |
-| `max_connections` | integer ≥ 1 | 32 | open connections across all transports |
+| `max_connections` | integer 1 to 4096 | 32 | open unix socket connections, the ssh relays' included; tls has its own budget |
 | `handshake_timeout_s` | integer 1 to 300 | 10 | TLS handshake plus `Hello` |
 | `idle_timeout_s` | integer ≥ 1 | 300 | a connection with no request in progress that sends nothing this long is closed |
 
@@ -535,7 +548,8 @@ prints the same lines.
 |---|---|---|---|
 | `all_users` | boolean | false | also report other users' agent processes; their `cwd` and `exe` are `null` where unreadable |
 
-Discovery scans the process table on each `status` and `sessions` request.
+Discovery scans the process table on each `sessions` request, and when a `logs`, `wait` or
+`cancel` names a session fleetd did not dispatch.
 
 ### `[tls]`
 
@@ -548,8 +562,10 @@ Absent means fleetd listens on no TCP port.
 | `ca` | path | required | PEM file with one or more CA certificates that client certificates must chain to |
 | `cert` | path | required | PEM chain, leaf first; the leaf must have a DNS SAN equal to `device`, checked at startup |
 | `key` | path | required | PEM private key (PKCS#8, SEC1 or PKCS#1), mode 0600 or 0400, owned by fleetd's user |
-| `max_connections_per_ip` | integer ≥ 1 | 8 | open tls connections from one address |
-| `revoked_serials` | array of strings | `[]` | client certificate serials to refuse, as hex (case and `:` separators ignored) |
+| `max_connections` | integer 1 to 4096 | 64 | open tls connections, from `accept` to close |
+| `max_connections_per_ip` | integer 1 to `max_connections` | 8, or `max_connections` if lower | open tls connections from one address |
+| `max_handshakes` | integer 1 to `max_connections` | 32, or `max_connections` if lower | tls connections still in the TLS handshake or `Hello` |
+| `revoked_serials` | array of strings | `[]` | client certificate serials to refuse, as hex (case, `:` separators and leading zeros ignored) |
 
 ### `[adapters.<name>]`
 
@@ -564,13 +580,14 @@ without `exe` is discovery-only.
 | `models` | array of model names | preset, else `[]` | the allowlist; `models[0]` is the default. Required non-empty when `args` uses `{model}`. A request naming a model not listed is `forbidden`. |
 | `workdir_roots` | array of paths | required with `exe` | each must exist; canonicalized at startup |
 | `env_allow` | array of names | `[]` | variables copied from fleetd's environment; each `[A-Za-z_][A-Za-z0-9_]*`. `HOME` and `PATH` are always copied. |
+| `env` | table of strings | `{}` | variables the operator sets for the child, applied after the `env_allow` copy, so they win over it; names `[A-Z_][A-Z0-9_]*` (`HOME` and `PATH` included), values without NUL. `--check` prints them, so secrets belong in `env_allow` instead |
 | `max_concurrent` | integer 1 to 64 | preset, else 1 | dispatched sessions running at once |
 | `timeout_s` | integer 1 to 604800 | preset, else 3600 | the longest a session may run |
 | `match_exe` | array of strings | preset, else the base name of `exe` | process names (or executable base names) that discovery attributes to this adapter |
 | `rlimit_nofile` | integer ≥ 64 | 4096 | the child's open-file limit, on Linux |
 
-A discovery-only adapter needs `match_exe`; `max_concurrent`, `timeout_s`, `workdir_roots` and
-`env_allow` do not apply to it, and it reports `max_concurrent` 0.
+A discovery-only adapter needs `match_exe`; `max_concurrent`, `timeout_s`, `workdir_roots`,
+`env_allow` and `env` do not apply to it, and it reports `max_concurrent` 0.
 
 Presets:
 
@@ -602,21 +619,44 @@ max_concurrent = 2
 match_exe = ["aider"]               # discovery only
 ```
 
+### Running harness ticks on a device
+
+A device that runs the harness's dispatched ticks needs its own harness checkout with its own
+instance. Point the adapter at them with `env`, and give the claude preset a `timeout_s` that
+covers the tick budget:
+
+```toml
+[adapters.claude]
+preset = "claude"
+exe = "/usr/local/bin/claude"
+workdir_roots = ["/srv/work"]
+env_allow = ["ANTHROPIC_API_KEY"]
+timeout_s = 7200                    # at least the tick budget
+
+[adapters.claude.env]
+HARNESS_HOME = "/srv/harness"
+HARNESS_INSTANCE_DIR = "/srv/harness-instance"
+TARGET_REPO = "/srv/work/repo"
+```
+
 ### Lifecycle
 
 - fleetd persists each dispatched session's `session.json` under `state_dir`. After a restart,
   a session recorded as running becomes `failed` with the message `fleetd restarted while the
   session ran`. Its processes are not signalled; any still alive show up through discovery.
-- On SIGTERM or SIGINT, fleetd stops accepting, closes its connections and exits 0. Dispatched
-  sessions keep running.
-- Ended sessions older than `session_retention_s` are deleted, metadata and log together.
+- On SIGTERM or SIGINT, fleetd stops accepting, closes its connections, removes its socket and
+  exits 0. Dispatched sessions are not signalled, but their output pipes close with fleetd, so
+  an agent that writes again gets SIGPIPE or EPIPE.
+- Ended sessions older than `session_retention_s` are deleted, metadata and log together, as are
+  the oldest ended sessions beyond the newest 1024.
 
 ## fleet.toml
 
-fleet reads `--config PATH`, else `$FLEET_CONFIG`, else `$HARNESS_INSTANCE_DIR/fleet.toml`. No
-path, a missing file, a TOML error, an unknown key, a wrong type or a value outside its range is
-an error that names the key, and fleet exits 2. Relative paths resolve against the directory of
-fleet.toml; a leading `~/` expands to `$HOME`.
+fleet reads `--config PATH`, else `$FLEET_CONFIG`, else `$HARNESS_INSTANCE_DIR/fleet.toml`. An
+empty `$FLEET_CONFIG` or `$HARNESS_INSTANCE_DIR` counts as unset, so resolution falls through to
+the next source. No path, a missing file, a TOML error, an unknown key, a wrong type or a value
+outside its range is an error that names the key, and fleet exits 2. Relative paths resolve
+against the directory of fleet.toml; a leading `~/` expands to `$HOME`.
 
 ### Top level
 
@@ -641,7 +681,8 @@ own keys.
 ### `[devices.<name>]`
 
 `<name>` is a `DeviceName` (1 to 63 of `[a-z0-9.-]` starting with a letter or digit), and not `auto`. Devices keep
-their file order, which is the registry order everywhere.
+their file order, which is the registry order everywhere. A key that applies to another transport
+is an error.
 
 | Key | Type | Default | Applies to | Meaning |
 |---|---|---|---|---|
@@ -705,8 +746,8 @@ fleet [--config PATH] <command>
 fleet status   [--json] [--device NAME]...
 fleet sessions [--json] [--device NAME]... [--running]
 fleet dispatch --device NAME|auto --adapter NAME --workdir PATH [--model M] [--timeout S]
-               [--label KEY=VALUE]... [--wait] [--json]          (prompt on stdin)
-fleet logs     <device> <session> [--lines N] [--follow] [--json]
+               [--label KEY=VALUE]... [--wait] [--json | --raw]  (prompt on stdin)
+fleet logs     <device> <session> [--lines N] [--follow] [--json | --raw]
 fleet cancel   <device> <session> [--json]
 fleet pki init         [--dir DIR] [--days N]
 fleet pki issue-server <device> [--dir DIR] [--ip IP]... [--dns NAME]... [--days N]
@@ -714,14 +755,16 @@ fleet pki issue-client <name> --role monitor|dispatch [--dir DIR] [--days N]
 fleet --version | --help
 ```
 
-- `status` asks every device (or each `--device`) concurrently. It prints a table, or with
-  `--json` the [status document](#fleet-status---json). It exits 0 when every device answered and
-  1 when any failed; the output is complete either way.
+- `status` asks every device (or each `--device`) concurrently, at most 16 at a time. It prints
+  a table, or with `--json` the [status document](#fleet-status---json). It exits 0 when every
+  device answered and 1 when any failed; the output is complete either way.
 - `sessions` is the same for sessions. `--running` keeps only sessions in state `running`.
 - `dispatch` reads the prompt from stdin, up to the prompt cap; an empty or oversize prompt is an
-  error before any connection. Without `--wait` it prints the device and session id
-  (`{"device": "dev-a", "session": "d-…"}` with `--json`) and exits 0. With `--wait` it then sends
-  `wait`, writes the session's output to stdout as it arrives, and exits with the agent's status:
+  error before any connection; like any usage or config error it exits 2, even with `--wait`.
+  Without `--wait` it prints the device and session id (`{"device": "dev-a", "session": "d-…"}`
+  with `--json`) and exits 0. With `--wait` it writes `fleet: <device>: session <id>` to stderr,
+  then sends `wait`, writes the session's output to stdout as it arrives, and exits with the
+  agent's status:
 
   | Session end | Exit code |
   |---|---|
@@ -743,14 +786,21 @@ fleet --version | --help
   session ends.
 - With `--json`, `logs` and `dispatch --wait` print one JSON object per line instead of raw
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
-- `cancel` prints the cancelled session and exits 0. Cancelling an ended session succeeds.
+- Without `--json`, when stdout is a terminal, `logs` and `dispatch --wait` replace every control
+  character in the output other than tab, LF and CR (ESC and the rest of C0, DEL, and C1
+  U+0080–U+009F) with U+FFFD, so a remote agent cannot drive the terminal with escape sequences.
+  `--raw` writes the output unchanged. When stdout is not a terminal (a pipe or a file), the
+  output is always written unchanged, so logs keep the agent's exact bytes.
+- `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits
+  0. Cancelling an ended session succeeds.
 - `pki` writes into `--dir`, by default `pki/` beside the resolved fleet.toml. The directory is
   created 0700, key files are written 0600, and no file is overwritten: an existing file is an
   error. Keys are ECDSA P-256 and serials random. `init` makes `ca.pem` and `ca.key` (default
   3650 days). `issue-server` makes `<device>.pem` and `<device>.key` with DNS SAN `<device>`,
   each `--dns` and each `--ip`, and serverAuth usage. `issue-client` makes `<name>.pem` and
-  `<name>.key` with the SAN URI `fleet:role:<role>` and clientAuth usage. Leaves default to 397
-  days. Each prints the files it wrote and the serial in hex.
+  `<name>.key`, `<name>` following the device-name rule, with the SAN URI `fleet:role:<role>`
+  and clientAuth usage. Leaves default to 397 days. Each prints the files it wrote and the
+  serial in hex.
 
 Exit codes, except `dispatch --wait`: 0 success, 1 a device or operation failed, 2 a usage or
 config error. Errors go to stderr as `fleet: <device>: <code>: <message>`. Human tables are not

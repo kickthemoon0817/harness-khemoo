@@ -15,6 +15,10 @@ pub struct Hello {
     pub role: Role,
 }
 
+/// The prefix of the SAN URI that carries a client certificate's role, `fleet:role:<role>`:
+/// `fleet pki` writes it and fleetd's tls listener reads it.
+pub const ROLE_URI_PREFIX: &str = "fleet:role:";
+
 /// What a connection may do. `Monitor` reads; `Dispatch` also starts and cancels sessions.
 /// The order is meaningful: a role permits everything a lesser role does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
