@@ -102,3 +102,24 @@ test map was a 4 m tile it drove straight off.
 
 **Fix:** before diving into a subsystem, verify the scenario itself — position, scale, bounds,
 and preconditions. Cheap environment checks first, expensive theories second.
+
+## The public record drifts toward the host unless a contract holds it
+
+Seven weeks into a run, the issues and PRs read as notes between the operator and one machine.
+Every PR cited its evidence packet by a path under the dev host's home directory, and none of
+those packets had been committed for five weeks, so the claims could not be checked from GitHub.
+Bodies named GPU slots, hosts, IP addresses, PIDs, cubin hashes and merge slots, and used the
+harness's words — "card alone", "parent arm", "(mine)" — without defining them. Every claim
+opened with "harness tick 2026-11-03T09:06:50Z pid 205984 claiming (host khemoo), budget 120 min
+(labels: ai,ai:plan)" in the open, a line only the launcher needs. An audit of the
+last twenty PR bodies found none a newcomer could follow; the last twenty issues, the same. The
+runbook had asked for "real evidence" and had never said who the evidence was for, so each tick
+wrote for the next tick, which shared its machine, and the operator, who shared its context.
+
+**Fix:** a writing contract (`prompts/public-record.md`) that names the reader — someone with the
+repository and nothing else — and fixes the sections of a body, the form of a reading (commit and
+condition, always), and where the harness's own bookkeeping goes (a collapsed block at the end of a
+comment, the claim protocol line included, never a body; the launcher finds that line anywhere in
+the comment). A lint (`bin/public_record_lint.py`) gates every post on the mechanical
+half: host paths, hosts, PIDs, slots, harness files. Audit the record with its `--audit` mode now
+and then; a rising count is the runbook asking for something the contract forbids.
