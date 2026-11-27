@@ -206,8 +206,9 @@ characters in them with U+FFFD and cuts each at 1024 bytes (`MAX_REPORTED_STR`) 
 boundary. Labels and JSON escaping can still make 256 sessions larger than a frame, so fleetd
 also stops adding sessions to a `sessions` reply when the next would take it past 1 MiB
 (`MAX_FRAME_LEN`), and sets `truncated`. The hub still treats them as untrusted: its human
-tables replace control characters again, and the dashboard passes them through its redaction. `fleet logs` and `fleet dispatch --wait` write `event` data raw,
-since it is the agent's own output.
+tables replace control characters again, and the dashboard passes them through its redaction.
+`fleet logs` and `fleet dispatch --wait` write `event` data raw, since it is the agent's own
+output.
 
 - An `AdapterInfo` with `max_concurrent` 0 is discovery-only: it cannot be dispatched to.
   `models[0]` is the model a dispatch without `model` gets.
