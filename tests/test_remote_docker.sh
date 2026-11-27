@@ -244,5 +244,18 @@ echo 2534 > "$G/state/locks/local-card-issues"
 check "a listed issue's tick runs its container with the card, as given" '[ "$rc" = 0 ] && grep -q "^docker DOCKER_HOST=$LD run -d --gpus all img true$" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 rm -f "$G/state/locks/local-card-issues" "$G/state/locks/claim.2534"
 
+
+# The operator's Nucleus aliases ride into every container while state/ov-aliases.toml exists.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$G/bin/tick-pid.sh"
+printf '[aliases]\n"omniverse://a/" = "omniverse://b/"\n' > "$G/state/ov-aliases.toml"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"
+check "with the alias file, a run mounts it as the client config" 'grep -q "run -v $G/state/ov-aliases.toml:/root/.nvidia-omniverse/config/omniverse.toml:ro --rm img true" "$LOG"' "$(calls)"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" ps -q 2> "$T/guard.err"
+check "with the alias file, a command that starts nothing is unchanged" 'grep -q "ps -q$" "$LOG" && ! grep -q ov-aliases "$LOG"' "$(calls)"
+rm -f "$G/state/ov-aliases.toml"
+: > "$LOG"; DOCKER_HOST=unix:///var/run/docker.sock "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"
+check "without the alias file, a run is unchanged" '! grep -q ov-aliases "$LOG"' "$(calls)"
+printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
