@@ -53,7 +53,9 @@ pub(crate) fn own_uid() -> u32 {
 
 /// Creates `dir` with mode 0700 if it is missing, and refuses one that is not a real
 /// directory owned by fleetd's user without group or other permission bits: anyone else who
-/// could enter it could read session logs or reach the socket.
+/// could enter it could read session logs or reach the socket. Only `dir` itself is
+/// checked: whoever can write a parent can replace it, so the parents must be the
+/// operator's.
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     let meta = match std::fs::symlink_metadata(dir) {
         Ok(meta) => meta,

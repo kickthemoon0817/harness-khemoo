@@ -42,7 +42,7 @@ pub struct DeviceReport {
     pub status: Option<StatusReport>,
     /// Empty when `ok` is false.
     pub sessions: Vec<Session>,
-    /// Whether fleetd truncated `sessions` at [`MAX_SESSIONS`](crate::MAX_SESSIONS).
+    /// Whether fleetd truncated `sessions` (see [`MAX_SESSIONS`](crate::MAX_SESSIONS)).
     pub sessions_truncated: bool,
 }
 
@@ -56,7 +56,7 @@ pub struct SessionsOutput {
     pub sessions: Vec<DeviceSession>,
     /// The devices that could not be asked.
     pub errors: Vec<DeviceError>,
-    /// The devices whose list fleetd truncated at [`MAX_SESSIONS`](crate::MAX_SESSIONS).
+    /// The devices whose list fleetd truncated (see [`MAX_SESSIONS`](crate::MAX_SESSIONS)).
     pub truncated: Vec<DeviceName>,
 }
 
