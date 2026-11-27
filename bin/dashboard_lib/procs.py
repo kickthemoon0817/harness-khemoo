@@ -121,7 +121,7 @@ class ProcessScanner:
             candidates: The ticks from find_ticks.
             processes: The process table, to walk each tick's tool shells.
             claims: Every recent claim file.
-            lease_slots: The slots and device lease from `lease.sh status`.
+            lease_slots: The slots and device lease from the resource status.
             github_issue_by_pid: Issues found for a pid in GitHub claim comments.
             now_epoch: The current time.
 
@@ -142,8 +142,8 @@ class ProcessScanner:
             prompt: str = argv[2] if len(argv) > 2 else ""
             if prompt.startswith(self.LANDING_MARK):
                 lane: str = "landing"
-            elif ", the fable lane:" in prompt.split("\n", 1)[0]:
-                lane = "fable"
+            elif ", the model lane:" in prompt.split("\n", 1)[0]:
+                lane = "model"
             else:
                 lane = "standard"
             issue_and_source: tuple[int, str] | None = issue_by_pid.get(candidate.process.pid)
@@ -177,7 +177,7 @@ class ProcessScanner:
             tick_pids: The live ticks' pids.
 
         Returns:
-            `tick`, a redacted summary of the holder's command (`arm_queue.sh --issue 2490 ...`), or `dead`.
+            `tick`, a redacted summary of the holder's command (`run.sh --issue 2490 ...`), or `dead`.
         """
         if pid is None:
             return ""

@@ -4,16 +4,16 @@
   "kept": "ssh://ci@192.0.2.60"
  },
  {
-  "text": "WORV_DEV_BUILD_LOCK=/tmp/worv-dev-build-remote-5090.lock",
-  "kept": "/tmp/worv-dev-build-remote-5090.lock"
+  "text": "DEV_BUILD_LOCK=/tmp/dev-build-remote-gpu-a.lock",
+  "kept": "/tmp/dev-build-remote-gpu-a.lock"
  },
  {
-  "text": "/home/you/tmp_workspace/artifacts/manure-plan/evidence/2026-11-26-2464-unit-rest-rowwatch",
+  "text": "/home/you/work/evidence/2026-11-26-2464-unit-rest-rowwatch",
   "kept": "2026-11-26-2464-unit-rest-rowwatch"
  },
  {
-  "text": "tools/dev/iter.sh build worv.env.manure",
-  "kept": "iter.sh build worv.env.manure"
+  "text": "tools/dev/build.sh app",
+  "kept": "build.sh app"
  },
  {
   "text": "--issue 2490 --queue arms.queue",

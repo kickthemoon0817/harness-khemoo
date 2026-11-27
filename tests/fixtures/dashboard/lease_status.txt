@@ -1,5 +1,5 @@
 remote card: ci@worker-a.local (slots 4-5)
-remote card: ci@192.0.2.6 (slots 6-7)
+remote host: ci@192.0.2.6 (slots 6-7)
 harness ticks: ci@192.0.2.6 ci@worker-a.local only, first preferred (the local card and any other card left to named holders)
 local card: off (every run goes to the remote card)
 local host: off (builds and tests go to the remote host)

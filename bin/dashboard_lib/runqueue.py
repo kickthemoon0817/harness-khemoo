@@ -1,6 +1,7 @@
 """
-Reads bin/arm_queue.sh run folders: whether a queue is alive, waiting for a card, or running an arm, and where.
+Reads the instance's run folders: whether a queue is alive, waiting for a device, or running an arm, and where.
 """
+import glob
 import os
 import re
 from dataclasses import dataclass
@@ -39,12 +40,14 @@ class StatusInfo:
 
 class RunQueueReader:
     """
-    Finds the run folders `<evidence root>/<packet>/runs*/` written lately and reads their state.
+    Finds the run folders RUN_QUEUE_GLOB matches that were written lately and reads their state; a folder's parent
+    is its packet.
 
     `lease.log` gives the holder (its `holder <pid> start` line) and the lease answers, stamped `<UTC> <answer>`;
-    the BUSY streak is the run of stamped BUSY answers at its end, as bin/stall_watch.sh reads it. `status` gives
-    the arm lines (`<arm> start <UTC> ... host=<host>` until `<arm> rc=<n> end`, a void, a skip or a failed
-    bring-up), `granted:` lines, and `RELEASED <queue> <UTC>`, always its last line once the queue ends.
+    the BUSY streak is the run of stamped BUSY answers at its end. `status` gives the arm lines
+    (`<arm> start <UTC> ... host=<host>` until `<arm> rc=<n> end`, a void, a skip, a failed bring-up, or a line
+    starting with one of the stop words), `granted:` lines, and `RELEASED <queue> <UTC>`, always its last line once
+    the queue ends.
     """
 
     STAMP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) (.*)$")
@@ -55,20 +58,26 @@ class RunQueueReader:
         r"^(\S+) start (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\b(.*)$")
     ARM_END_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^(\S+) (?:rc=\d+ end|void\d+:|skipped:|up failed|sidecar failed|no sidecar)")
-    QUEUE_STOP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(?:STOP|YIELD|NO-LEASE|DEADLINE|nucleus not ok)\b")
     RELEASED_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^RELEASED \S+ (\S+)")
     HOST_FIELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bhost=(\S+)")
     DOCKER_HOST_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\bDOCKER_HOST=ssh://(\S+)")
     ISSUE_ARGUMENT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|\s)--issue\s+(\d+)\b")
 
-    def __init__(self, evidence_root: Path, window_s: float) -> None:
+    def __init__(self, folder_glob: str, holder_name: str, stop_words: tuple[str, ...], window_s: float) -> None:
         """
         Args:
-            evidence_root: The folder holding the evidence packets.
+            folder_glob: RUN_QUEUE_GLOB, matching the run folders; `~` is expanded.
+            holder_name: RUN_QUEUE_HOLDER, a word in a live holder's first three arguments; empty takes any live
+                holder pid.
+            stop_words: RUN_QUEUE_STOP_WORDS, the words that end the running arm when a `status` line starts
+                with one.
             window_s: Only run folders written within this many seconds are read.
         """
-        self.evidence_root: Path = evidence_root
+        self.folder_glob: str = folder_glob
+        self.holder_name: str = holder_name
         self.window_s: float = window_s
+        self.stop_pattern: re.Pattern[str] | None = re.compile(
+            "^(?:" + "|".join(re.escape(word) for word in stop_words) + r")(?!\w)") if stop_words else None
 
     def read_queues(self, processes: dict[int, ProcessInfo], now: float) -> tuple[RunQueue, ...]:
         """
@@ -82,21 +91,14 @@ class RunQueueReader:
             One record a run folder, newest first.
         """
         queues: list[RunQueue] = []
-        try:
-            packets: list[os.DirEntry[str]] = [entry for entry in os.scandir(self.evidence_root) if entry.is_dir()]
-        except OSError:
-            return ()
-        for packet in packets:
-            try:
-                runs_folders: list[os.DirEntry[str]] = [entry for entry in os.scandir(packet.path)
-                                                        if entry.name.startswith("runs") and entry.is_dir()]
-            except OSError:
+        for folder in glob.glob(os.path.expanduser(self.folder_glob)):
+            runs_path: Path = Path(folder)
+            if not runs_path.is_dir():
                 continue
-            for runs in runs_folders:
-                updated: float = self._newest_mtime(Path(runs.path))
-                if now - updated > self.window_s:
-                    continue
-                queues.append(self.read_queue(Path(runs.path), processes, updated))
+            updated: float = self._newest_mtime(runs_path)
+            if now - updated > self.window_s:
+                continue
+            queues.append(self.read_queue(runs_path, processes, updated))
         return tuple(sorted(queues, key=lambda queue: queue.updated_epoch, reverse=True))
 
     def read_queue(self, runs_path: Path, processes: dict[int, ProcessInfo], updated: float) -> RunQueue:
@@ -104,17 +106,18 @@ class RunQueueReader:
         Reads one run folder.
 
         Args:
-            runs_path: `<packet>/runs*`.
+            runs_path: A run folder.
             processes: The process table.
             updated: When the folder's logs were last written.
 
         Returns:
-            The queue's state: running, waiting_card, starting, finished or stopped.
+            The queue's state: running, waiting_device, starting, finished or stopped.
         """
         lease: LeaseLogInfo = self.parse_lease_log(self._read_text(runs_path / "lease.log"))
-        status: StatusInfo = self.parse_status(self._read_text(runs_path / "status"))
+        status: StatusInfo = self.parse_status(self._read_text(runs_path / "status"), self.stop_pattern)
         holder: ProcessInfo | None = processes.get(lease.holder_pid) if lease.holder_pid is not None else None
-        alive: bool = holder is not None and any("arm_queue.sh" in argument for argument in holder.argv[:3])
+        alive: bool = holder is not None and (not self.holder_name
+                                              or any(self.holder_name in argument for argument in holder.argv[:3]))
         issue: int | None = StateParsers.issue_from_path(str(runs_path))
         if issue is None and holder is not None:
             issue_match: re.Match[str] | None = self.ISSUE_ARGUMENT_PATTERN.search(" ".join(holder.argv))
@@ -124,7 +127,7 @@ class RunQueueReader:
         elif status.arm is not None:
             state = "running"
         elif lease.busy_since is not None:
-            state = "waiting_card"
+            state = "waiting_device"
         else:
             state = "starting"
         return RunQueue(
@@ -186,12 +189,13 @@ class RunQueueReader:
         return LeaseLogInfo(holder_pid, want, busy_since, busy_reason, last_host)
 
     @staticmethod
-    def parse_status(text: str) -> StatusInfo:
+    def parse_status(text: str, stop_pattern: re.Pattern[str] | None = None) -> StatusInfo:
         """
         Parses `status`.
 
         Args:
             text: The file's text.
+            stop_pattern: Matches a line that ends the running arm, besides its own end line.
 
         Returns:
             The arm running at its end (with its host and start), the last granted host, and when the queue
@@ -221,7 +225,7 @@ class RunQueueReader:
                 finished_at = None
                 continue
             end_match: re.Match[str] | None = RunQueueReader.ARM_END_PATTERN.match(line)
-            if (end_match and end_match.group(1) == arm) or RunQueueReader.QUEUE_STOP_PATTERN.match(line):
+            if (end_match and end_match.group(1) == arm) or (stop_pattern and stop_pattern.match(line)):
                 arm = arm_host = arm_started = None
         return StatusInfo(arm, arm_host, arm_started, granted_host, finished_at)
 

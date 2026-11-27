@@ -14,32 +14,38 @@ from dashboard_lib.parsers import StateParsers
 
 class BuildLockReader:
     """
-    Reads `<lock dir>/worv-dev-build-remote-<name>.lock` for each remote host and `worv-dev-build.lock` for this host.
+    Reads `<lock dir>/<BUILD_LOCK_REMOTE>` for each remote host, `{name}` standing for its lock name, and
+    `<lock dir>/<BUILD_LOCK_LOCAL>` for this host; an empty name leaves that side out.
 
-    The holder is the pid tools/dev/iter.sh writes into the lock file (`pid <n>, <tree>, <extensions>`), while it
-    lives: lslocks cannot name a holder whose descriptor a child inherited. The waiters are lslocks' blocked
+    The holder is the pid the build writes into the lock file (`pid <n>, <tree>, ...`), while it lives: lslocks
+    cannot name a holder whose descriptor a child inherited. The waiters are lslocks' blocked
     entries on the file. A party's issue comes from its worktree (`ai-worktrees/<prefix>-<issue>`), read from
     the lock file for the holder and from the working directory for a waiter, else from the tick above it.
     """
 
     LOCK_FILE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^pid (\d+), ([^,]*)")
 
-    def __init__(self, lock_names: dict[str, str], lock_dir: Path, timeout_s: float) -> None:
+    def __init__(self, lock_names: dict[str, str], lock_dir: Path, local_file: str, remote_file: str,
+                 timeout_s: float) -> None:
         """
         Args:
-            lock_names: Remote host to its lock name (`user@host-a` to `a`), bin/build_host.sh's
-                BUILD_LOCK_NAMES.
+            lock_names: Remote host to its lock name (`user@host-a` to `a`), from BUILD_LOCK_NAMES; a host without
+                one is named from its address.
             lock_dir: Where the locks live.
+            local_file: This host's lock file name.
+            remote_file: A remote host's lock file name, with `{name}` for its lock name.
             timeout_s: lslocks timeout.
         """
         self.lock_names: dict[str, str] = lock_names
         self.lock_dir: Path = lock_dir
+        self.local_file: str = local_file
+        self.remote_file: str = remote_file
         self.timeout_s: float = timeout_s
 
     def read_lanes(self, hosts: list[str], processes: dict[int, ProcessInfo],
                    issue_by_tick_pid: dict[int, int]) -> tuple[BuildLane, ...]:
         """
-        Reads the lane of this host and of each remote host.
+        Reads the lane of this host and of each remote host, as far as their lock names are configured.
 
         Args:
             hosts: The remote hosts, in the harness's order.
@@ -58,10 +64,11 @@ class BuildLockReader:
         )
         waiting_pids_by_path: dict[str, list[int]] = self.parse_lslocks_waiters(completed.stdout)
         lanes: list[BuildLane] = []
-        named_locks: list[tuple[str, str, Path]] = [("local", "local", self.lock_dir / "worv-dev-build.lock")]
-        for host in hosts:
+        named_locks: list[tuple[str, str, Path]] = [("local", "local", self.lock_dir / self.local_file)] \
+            if self.local_file else []
+        for host in hosts if self.remote_file else ():
             name: str = self.lock_names.get(host) or re.sub(r"[^A-Za-z0-9]", "-", host.split("@", 1)[-1])
-            named_locks.append((name, host, self.lock_dir / f"worv-dev-build-remote-{name}.lock"))
+            named_locks.append((name, host, self.lock_dir / self.remote_file.replace("{name}", name)))
         for name, host, path in named_locks:
             holder: LockParty | None = None
             holder_pid, holder_tree = self.parse_lock_file(self._read_text(path))
@@ -107,7 +114,7 @@ class BuildLockReader:
     @staticmethod
     def parse_lock_file(text: str) -> tuple[int | None, str | None]:
         """
-        Parses the holder line iter.sh writes into a build lock: `pid <n>, <tree>, <extensions>`.
+        Parses the holder line a build writes into its lock: `pid <n>, <tree>, ...`.
 
         Args:
             text: The lock file's text.

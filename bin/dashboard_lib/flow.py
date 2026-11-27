@@ -60,18 +60,21 @@ class FlowBuilder:
     Places each issue in one state column and draws a line to each device lane it holds or waits for.
 
     An issue's column is the first that applies: running (a live run queue running or bringing up an arm, or a
-    held lease slot), waiting for a card (a live run queue whose lease answers end in BUSY), compiling (holding or
+    held lease slot), waiting for a device (a live run queue whose lease answers end in BUSY), compiling (holding or
     waiting on a build lock), landing (a landing tick, or a tick on a ready issue), claimed (a live tick or claim),
     waiting (claimable, held back by the first-before-low gate, or waiting on a dependency), held (on the operator,
     waiting for sign-off, or a low issue waiting on a dependency), done (closed within the done window). Positions
-    are computed here, in pixels on a fixed canvas, so the page can animate a card from where it was.
+    are computed here, in pixels on a fixed canvas, so the page can animate a card from where it was. The device
+    columns are left out when the instance reports no resources or run queues, and compiling when it names no
+    build lock.
     """
 
     COLUMNS: ClassVar[tuple[tuple[str, str], ...]] = (
         ("waiting", "Waiting"), ("claimed", "Claimed"), ("compiling", "Compiling"),
-        ("waiting_card", "Waiting for a card"), ("running", "Running on a card"), ("landing", "Landing"),
+        ("waiting_device", "Waiting for a device"), ("running", "Running on a device"), ("landing", "Landing"),
         ("held", "Held"), ("done", "Done"),
     )
+    DEVICE_COLUMNS: ClassVar[frozenset[str]] = frozenset({"waiting_device", "running"})
     CANVAS_WIDTH: ClassVar[int] = 1240
     GAP: ClassVar[int] = 8
     DEVICE_TOP: ClassVar[int] = 8
@@ -81,16 +84,24 @@ class FlowBuilder:
     CARD_HEIGHT: ClassVar[int] = 58
     MAX_CARDS: ClassVar[int] = 7
 
-    def __init__(self, labels: QueueLabels, device_tags: dict[str, str], done_window_s: float) -> None:
+    def __init__(self, labels: QueueLabels, device_tags: dict[str, str], done_window_s: float,
+                 device_lanes: bool, build_lanes: bool) -> None:
         """
         Args:
             labels: The harness's label names.
             device_tags: Remote host to its short tag (`user@host-a` to `a`); `local` is this host.
             done_window_s: How long a closed issue stays in the done column.
+            device_lanes: The instance reports resource slots or run queues.
+            build_lanes: The instance names build locks.
         """
         self.labels: QueueLabels = labels
         self.device_tags: dict[str, str] = device_tags
         self.done_window_s: float = done_window_s
+        self.device_lanes: bool = device_lanes
+        self.build_lanes: bool = build_lanes
+        self.columns: tuple[tuple[str, str], ...] = tuple(
+            (key, title) for key, title in self.COLUMNS
+            if (device_lanes or key not in self.DEVICE_COLUMNS) and (build_lanes or key != "compiling"))
 
     def build(self, inputs: FlowInputs) -> JsonDict:
         """
@@ -100,19 +111,19 @@ class FlowBuilder:
             inputs: The collector's current data.
 
         Returns:
-            Devices, columns, cards (with positions), the cards a full column leaves out (`overflow`), edges and
-            the canvas size, every text redacted.
+            Devices, columns, cards (with positions), the cards a full column leaves out (`overflow`), edges, the
+            lane kinds drawn and the canvas size, every text redacted.
         """
         devices: list[JsonDict] = self._devices(inputs)
         device_positions: dict[str, JsonDict] = {device["key"]: device for device in devices}
         cards: list[FlowCard] = self._cards(inputs)
-        column_width: int = (self.CANVAS_WIDTH - (len(self.COLUMNS) + 1) * self.GAP) // len(self.COLUMNS)
+        column_width: int = (self.CANVAS_WIDTH - (len(self.columns) + 1) * self.GAP) // len(self.columns)
         columns: list[JsonDict] = []
         placed: list[JsonDict] = []
         overflow: list[JsonDict] = []
         edges: list[JsonDict] = []
         lowest: int = self.CARD_TOP
-        for index, (key, title) in enumerate(self.COLUMNS):
+        for index, (key, title) in enumerate(self.columns):
             x: int = self.GAP + index * (column_width + self.GAP)
             members: list[FlowCard] = sorted((card for card in cards if card.column == key),
                                              key=lambda card: card.order)
@@ -132,7 +143,7 @@ class FlowBuilder:
                     device: JsonDict | None = device_positions.get(occupancy.device)
                     if device is None:
                         continue
-                    anchor_x: float = device["x"] + device["w"] * (0.3 if occupancy.lane == "card" else 0.75)
+                    anchor_x: float = device["x"] + device["w"] * (0.3 if occupancy.lane == "device" else 0.75)
                     edges.append({"issue": card.issue, "lane": occupancy.lane, "kind": occupancy.kind,
                                   "device": occupancy.device, "x1": x + column_width / 2, "y1": y,
                                   "x2": anchor_x, "y2": device["y"] + device["h"]})
@@ -140,8 +151,9 @@ class FlowBuilder:
                 lowest = max(lowest, self.CARD_TOP + len(shown) * (self.CARD_HEIGHT + self.GAP) + 20)
                 overflow.extend({"issue": card.issue, "column": key, "label": card.label}
                                 for card in members[len(shown):])
+        lanes: list[str] = (["device"] if self.device_lanes else []) + (["compile"] if self.build_lanes else [])
         return {"width": self.CANVAS_WIDTH, "height": lowest + 16, "devices": devices, "columns": columns,
-                "cards": placed, "overflow": overflow, "edges": edges}
+                "cards": placed, "overflow": overflow, "edges": edges, "lanes": lanes}
 
     def _cards(self, inputs: FlowInputs) -> list[FlowCard]:
         """
@@ -190,7 +202,7 @@ class FlowBuilder:
                 title, url = str(closed.get("title", "")), str(closed.get("url", ""))
             chips: list[str] = [label.removeprefix(labels.all_issues + ":") for label in
                                 (queue_issue.labels if queue_issue else ())
-                                if label in (labels.first, labels.fable, labels.low, labels.ready)]
+                                if label in (labels.first, labels.lane, labels.low, labels.ready)]
             card: FlowCard = FlowCard(issue=number, title=CommandRedactor.redact(title), url=url, column="",
                                       label="", detail="", order=(0, "", float(number)), chips=chips)
             tick: TickProcess | None = tick_by_issue.get(number)
@@ -222,16 +234,16 @@ class FlowBuilder:
         """
         labels: QueueLabels = self.labels
         running: list[RunQueue] = [queue for queue in run_queues if queue.state in ("running", "starting")]
-        waiting: list[RunQueue] = [queue for queue in run_queues if queue.state == "waiting_card"]
+        waiting: list[RunQueue] = [queue for queue in run_queues if queue.state == "waiting_device"]
         for queue in running:
             host: str = queue.arm_host or queue.granted_host or "local"
-            card.occupancies.append(Occupancy(host, "card", "holds"))
+            card.occupancies.append(Occupancy(host, "device", "holds"))
         for slot in slots:
             if not any(occupancy.device == slot.host for occupancy in card.occupancies):
-                card.occupancies.append(Occupancy(slot.host, "card", "holds"))
+                card.occupancies.append(Occupancy(slot.host, "device", "holds"))
         for queue in waiting:
             if queue.want and queue.want not in ("any", "local"):
-                card.occupancies.append(Occupancy(queue.want, "card", "waits"))
+                card.occupancies.append(Occupancy(queue.want, "device", "waits"))
         for lane, position in lane_parties:
             card.occupancies.append(Occupancy(lane.host, "compile", "holds" if position == 0 else "waits"))
         reason: str = queue_issue.reason if queue_issue else ""
@@ -250,8 +262,8 @@ class FlowBuilder:
             card.detail = f"{card.label}, slot {', '.join(str(slot.slot) for slot in slots)} {tags}".strip()
         elif waiting:
             queue = waiting[0]
-            card.column = "waiting_card"
-            card.label = "waiting for a card"
+            card.column = "waiting_device"
+            card.label = "waiting for a device"
             minutes: int = max(0, int((now - self._epoch(queue.busy_since)) // 60))
             card.detail = f"BUSY {minutes} min: {queue.busy_reason or 'no reason given'}"
         elif lane_parties:
@@ -307,7 +319,8 @@ class FlowBuilder:
 
     def _devices(self, inputs: FlowInputs) -> list[JsonDict]:
         """
-        Builds one node a machine: its metrics, lease holders, compile lane, and an idle-card flag.
+        Builds one node a machine: its metrics, lease holders and compile lane when the instance has them, and
+        an idle-device flag.
 
         Args:
             inputs: The collector's current data.
@@ -335,12 +348,12 @@ class FlowBuilder:
                 for (owner, tags, state), numbers in slots_by_hold.items()
             ]
             lane: BuildLane | None = lanes_by_host.get(key)
-            compile_text: str = "no compile lane"
+            compile_text: str | None = "no compile lane" if self.build_lanes else None
             if lane is not None:
                 holder_text: str = (f"#{lane.holder.issue}" if lane.holder and lane.holder.issue is not None
                                     else (lane.holder.tree or f"pid {lane.holder.pid}") if lane.holder else "free")
                 compile_text = f"compile: {holder_text}" + (f", {len(lane.waiters)} waiting" if lane.waiters else "")
-            queue_waiting: bool = any(queue.alive and queue.state == "waiting_card" and queue.want in (key, "any")
+            queue_waiting: bool = any(queue.alive and queue.state == "waiting_device" and queue.want in (key, "any")
                                       for queue in inputs.queues)
             idle_with_queue: bool = gpu.get("util_pct") == 0 and queue_waiting and key != "local"
             devices.append({
@@ -354,11 +367,11 @@ class FlowBuilder:
                 "gpu_mem_total_mb": gpu.get("mem_total_mb"),
                 "load1": machine.get("load1"),
                 "nproc": machine.get("nproc"),
-                "holders": [CommandRedactor.redact(text) for text in holders],
-                "compile": CommandRedactor.redact(compile_text),
+                "holders": [CommandRedactor.redact(text) for text in holders] if self.device_lanes else None,
+                "compile": CommandRedactor.redact(compile_text) if compile_text is not None else None,
                 "compile_waiters": len(lane.waiters) if lane else 0,
                 "idle_with_queue": idle_with_queue,
-                "idle_flag": ("0 % while held, queue waiting" if holders else "card idle, queue waiting")
+                "idle_flag": ("0 % while held, queue waiting" if holders else "device idle, queue waiting")
                 if idle_with_queue else "",
                 "x": self.GAP + index * (width + self.GAP),
                 "y": self.DEVICE_TOP,
@@ -386,7 +399,7 @@ class FlowBuilder:
             host: `local` or a remote host.
 
         Returns:
-            The host's short tag: `local`, its lock name (`5090`), an IP address whole, or a host name's first
+            The host's short tag: `local`, its lock name (`gpu-a`), an IP address whole, or a host name's first
             label.
         """
         if host == "local":

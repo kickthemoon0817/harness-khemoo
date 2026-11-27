@@ -120,7 +120,7 @@ margin-right:3px;white-space:nowrap}
 .flow-canvas{position:relative;font-size:11px;line-height:1.3}
 .flow-edges{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
 .fedge{fill:none;stroke-width:1.5;opacity:.75}
-.fedge.card{stroke:var(--series)}.fedge.compile{stroke:var(--serious)}
+.fedge.device{stroke:var(--series)}.fedge.compile{stroke:var(--serious)}
 .fedge.waits{stroke-dasharray:5 4;opacity:.7}
 .fdev{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 9px;
 overflow:hidden;display:flex;flex-direction:column;gap:3px}
@@ -144,7 +144,7 @@ border-radius:6px;padding:4px 6px;overflow:hidden}
 .fcard .l2,.fcard .l3{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fcard .l3{color:var(--ink2)}
 .fcard.claimed{border-left-color:var(--info)}.fcard.compiling{border-left-color:var(--serious)}
-.fcard.waiting_card{border-left-color:var(--warning)}.fcard.running{border-left-color:var(--good)}
+.fcard.waiting_device{border-left-color:var(--warning)}.fcard.running{border-left-color:var(--good)}
 .fcard.landing{border-left-color:var(--info)}.fcard.done{border-left-color:var(--good);opacity:.8}
 .fcard.moved{animation:flow-move 1.1s cubic-bezier(.2,.7,.2,1) both}
 .fcard.fresh{animation:flow-in .9s ease-out both}
@@ -176,7 +176,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             The HTML document.
         """
         sections = self.sections(snapshot, access_token)
-        return self.document(sections, {}, refresh_s, access_token)
+        return self.document(sections, {}, refresh_s, access_token, snapshot.get("title") or "")
 
     def sections(self, snapshot: JsonDict, access_token: str) -> dict[str, str]:
         """
@@ -202,15 +202,18 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             "sources": self._sources_footer(snapshot, query),
         }
 
-    def document(self, sections: dict[str, str], versions: dict[str, str], refresh_s: int, access_token: str) -> str:
+    def document(self, sections: dict[str, str], versions: dict[str, str], refresh_s: int, access_token: str,
+                 title: str) -> str:
         """
-        Wraps the prepared sections in the initial document.
+        Wraps the prepared sections in the initial document. The ticks take the whole row when the instance has
+        no resource panel.
 
         Args:
             sections: Rendered fragments.
             versions: Content hashes for the poller's first comparison.
             refresh_s: Seconds between visible polls or scriptless reloads.
             access_token: Token for same-origin requests.
+            title: The page title.
 
         Returns:
             The HTML document.
@@ -223,11 +226,13 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             '<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<noscript><meta http-equiv="refresh" content="{refresh_s};url=/{query}"></noscript>'
-            '<meta name="referrer" content="no-referrer"><link rel="icon" href="data:,"><title>Harness status</title>'
+            '<meta name="referrer" content="no-referrer"><link rel="icon" href="data:,">'
+            f'<title>{self._e(title or "Harness status")}</title>'
             f'<style>{self.STYLE}</style><script defer src="/dashboard.js{query}"></script></head>'
             f'<body data-refresh="{refresh_s}">{slots["header"]}<main>'
             f'<section class="grid machines">{machines}</section>'
-            f'<section class="grid split">{slots["ticks"]}{slots["leases"]}</section>{slots["queue"]}'
+            f'<section class="grid{" split" if sections["leases"] else ""}">{slots["ticks"]}{slots["leases"]}'
+            f'</section>{slots["queue"]}'
             f'<section class="grid thirds">{slots["landings"]}{slots["stalls"]}{slots["allocator"]}</section>'
             f'{slots["flow"]}{slots["sources"]}</main></body></html>'
         )
@@ -262,14 +267,19 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             self._pill("warning", f"{self._e(model['label'])} cooling {self._duration(model['remaining_s'])}")
             for model in harness.get("cooling_models", [])
         )
+        lane: str = ""
+        lane_label: str = harness.get("labels", {}).get("lane", "")
+        if harness.get("lane_model") and lane_label:
+            lane = (f'<span class="flag sub">lane: {self._e(StateParsers.model_label(harness["lane_model"]))} '
+                    f'for {self._e(lane_label)}</span>')
         return (
             "<header>"
-            "<h1>Harness status</h1>"
+            f'<h1>{self._e(snapshot.get("title") or "Harness status")}</h1>'
             f'<span class="sub">{self._e(snapshot.get("repo") or "no repo")} &middot; '
             f'{self._e(snapshot.get("harness_home", ""))}</span>'
             f'<span class="flag">{state_pill}{waiting_pill}<span class="sub num">{width_text}</span></span>'
             f"{self._usage_block(usage)}"
-            f'<span class="flag sub">models: {self._e(" > ".join(models) or "default")}{cooling}</span>'
+            f'<span class="flag sub">models: {self._e(" > ".join(models) or "default")}{cooling}</span>{lane}'
             f'<span class="sub num" style="margin-left:auto">updated {self._clock(snapshot.get("generated_at"), seconds=True)}'
             "</span></header>"
         )
@@ -311,7 +321,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
 
     def _machine_card(self, machine: JsonDict, snapshot: JsonDict) -> str:
         """
-        Renders one machine: status, meters, sparklines, slots, card processes and containers.
+        Renders one machine: status, meters, sparklines, slots, device processes and containers; the device
+        rows only when the machine reports a device, and the slots only when the instance reports resources.
 
         Args:
             machine: The machine view.
@@ -325,6 +336,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         for signal in machine.get("signals", []):
             pills.append(self._pill(signal["level"], signal["text"]))
         gpu: JsonDict = machine.get("gpu") or {}
+        history: JsonDict = machine.get("history", {})
+        has_device: bool = bool(gpu) or bool(history.get("gpu_util"))
         facts: list[str] = []
         if gpu.get("name"):
             facts.append(self._e(gpu["name"]))
@@ -342,18 +355,20 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             self._meter_row("CPU", load1, nproc, f"{self._number(load1)} / {nproc or '?'} cores", (0.85, 1.0, 1.5)),
             self._meter_row("Mem", mem_used, mem_total, f"{self._gb(mem_used)} / {self._gb(mem_total)} GB",
                             (0.85, 0.92, 0.97)),
-            self._meter_row("GPU", gpu.get("util_pct"), 100.0, self._percent(gpu.get("util_pct")), (2.0, 2.0, 2.0)),
-            self._meter_row("VRAM", gpu.get("mem_used_mb"), gpu.get("mem_total_mb"),
-                            f"{self._gb(gpu.get('mem_used_mb'))} / {self._gb(gpu.get('mem_total_mb'))} GB",
-                            (0.85, 0.93, 0.98)),
         ))
+        if has_device:
+            meters += (
+                self._meter_row("Device", gpu.get("util_pct"), 100.0, self._percent(gpu.get("util_pct")),
+                                (2.0, 2.0, 2.0))
+                + self._meter_row("Dev mem", gpu.get("mem_used_mb"), gpu.get("mem_total_mb"),
+                                  f"{self._gb(gpu.get('mem_used_mb'))} / {self._gb(gpu.get('mem_total_mb'))} GB",
+                                  (0.85, 0.93, 0.98)))
         link: str = ""
         if machine.get("kind") == "remote":
             upload: str = "timeout" if machine.get("upload_timed_out") else f"{self._number(machine.get('upload_mb_s'))} MB/s"
             link = (f'<div class="kv"><span>upload <b>{upload}</b></span>'
                     f'<span>connect <b>{self._number(machine.get("connect_s"), 2)} s</b></span>'
                     f'<span>probed {self._sample_time(machine.get("probed_at"))}</span></div>')
-        history: JsonDict = machine.get("history", {})
         now: float = float(snapshot.get("generated_epoch") or 0)
         hours: float = self._window_hours(snapshot)
         # Time passing by less than one chart pixel need not shift every SVG coordinate.
@@ -365,8 +380,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         if history.get("down"):
             right_edge = max(right_edge, history["down"][-1])
         sparks: str = (
-            self._spark_row("GPU util", f"{hours:g} h", history.get("gpu_util", []), right_edge, hours,
-                            100.0, None, "%", history.get("down", []))
+            (self._spark_row("Device util", f"{hours:g} h", history.get("gpu_util", []), right_edge, hours,
+                             100.0, None, "%", history.get("down", [])) if has_device else "")
             + self._spark_row("Load / core", f"{hours:g} h", history.get("load_per_core", []), right_edge, hours,
                               None, 1.0, "", history.get("down", []))
         )
@@ -376,6 +391,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             f'{" ORPHAN" if slot.get("state") == "orphan" else ""}</span>'
             for slot in machine.get("slots", [])
         ) or '<span class="note">no slot held</span>'
+        if snapshot.get("leases") is None:
+            slot_chips = ""
         processes: list[str] = [
             f'{self._e(process.get("container") or process.get("name", ""))} pid {process.get("pid")} '
             f'{self._gb(process.get("used_mb"))} GB'
@@ -388,7 +405,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         ]
         details: str = ""
         if processes:
-            details += f'<li title="compute processes on the card">card: {"; ".join(processes)}</li>'
+            details += f'<li title="processes on the device">device: {"; ".join(processes)}</li>'
         if containers:
             details += ('<li class="fold" data-key="containers"><details><summary>containers '
                         f'<span class="sub">{len(containers)}</span>'
@@ -403,7 +420,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             f'</b><span class="pills">{"".join(pills)}</span></div>'
             f'<div class="note">{" &middot; ".join(facts) or "&nbsp;"}</div>'
             f'<div class="meters">{meters}</div>{link}{sparks}'
-            f'<div style="margin-top:6px">{slot_chips}</div>'
+            + (f'<div style="margin-top:6px">{slot_chips}</div>' if slot_chips else "") +
             f'<ul class="list">{details}</ul>{error}{sampled}</article>'
         )
 
@@ -560,6 +577,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             The panel HTML.
         """
         ticks: list[JsonDict] = snapshot.get("ticks", [])
+        with_leases: bool = snapshot.get("leases") is not None
         rows: list[str] = []
         for tick in ticks:
             if tick.get("issue") is not None:
@@ -569,23 +587,26 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
                 issue_cell = '<span class="note">choosing an issue</span>'
             else:
                 issue_cell = '<span class="err">issue unknown</span>'
-            lane_level: str = {"fable": "serious", "landing": "info"}.get(tick.get("lane", ""), "good")
+            lane_level: str = {"model": "serious", "landing": "info"}.get(tick.get("lane", ""), "good")
             model_text: str = tick.get("model_label", "?") + (" landing" if tick.get("lane") == "landing" else "")
             doing: str = tick.get("doing") or ""
             doing_cell: str = (f'<span title="{self._e(doing)}">{self._duration(tick.get("doing_age_s"))} '
                                f'{self._e(doing)}</span>') if doing \
                 else '<span class="note">thinking</span>'
-            leases: str = " ".join(f"#{slot}" for slot in tick.get("lease_slots", [])) or "-"
+            leases: str = (f'<td>{" ".join(f"#{slot}" for slot in tick.get("lease_slots", [])) or "-"}</td>'
+                           if with_leases else "")
             rows.append(
                 f"<tr><td>{issue_cell}</td><td>{self._pill(lane_level, model_text)}</td>"
                 f"<td>{tick.get('slot') or '-'}</td><td>{self._duration(tick.get('age_s'))}</td>"
-                f"<td>{leases}</td><td>{doing_cell}</td>"
+                f"{leases}<td>{doing_cell}</td>"
                 f'<td class="sub">{tick.get("pid")} <span class="chip">{self._e(tick.get("issue_source") or "-")}</span></td></tr>'
             )
         table: str = (
             '<table><colgroup><col style="width:34%"><col style="width:96px"><col style="width:40px">'
-            '<col style="width:56px"><col style="width:56px"><col><col style="width:118px"></colgroup>'
-            "<tr><th>Issue</th><th>Model</th><th>Slot</th><th>Age</th><th>Leases</th><th>Now</th><th>PID / from</th></tr>"
+            f'<col style="width:56px">{'<col style="width:56px">' if with_leases else ""}<col>'
+            '<col style="width:118px"></colgroup>'
+            "<tr><th>Issue</th><th>Model</th><th>Slot</th><th>Age</th>"
+            f'{"<th>Leases</th>" if with_leases else ""}<th>Now</th><th>PID / from</th></tr>'
             f'{"".join(rows)}</table>'
         ) if rows else '<div class="empty">no tick running</div>'
         return (f'<article class="panel"><h2>Running ticks <span class="sub">{len(ticks)} live</span></h2>'
@@ -593,18 +614,20 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
 
     def _leases_panel(self, snapshot: JsonDict) -> str:
         """
-        Renders the GPU slots, whole-card holds, device lease, operator priority and waits.
+        Renders the resource slots, whole-device holds, device lease, operator priority and waits.
 
         Args:
             snapshot: The snapshot.
 
         Returns:
-            The panel HTML.
+            The panel HTML, or an empty string when the instance reports no resources.
         """
-        leases: JsonDict = snapshot.get("leases", {})
+        leases: JsonDict | None = snapshot.get("leases")
+        if leases is None:
+            return ""
         if not leases.get("available"):
-            return ('<article class="panel"><h2>GPU slots and leases</h2>'
-                    f'<div class="err">{self._e(leases.get("error") or "lease.sh status not read")}</div></article>')
+            return ('<article class="panel"><h2>Resource slots and leases</h2>'
+                    f'<div class="err">{self._e(leases.get("error") or "resource status not read")}</div></article>')
         rows: list[str] = []
         for slot in leases.get("slots", []):
             state: str = slot.get("state", "")
@@ -628,7 +651,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         notes: list[str] = []
         for hold in leases.get("whole_card_holds", []):
             verb: str = "reserving" if hold.get("reserving") else "holds"
-            notes.append(f'<li>{self._pill("info", "whole card")} {self._issue_ref(hold.get("issue"), hold.get("holder"))} '
+            notes.append(f'<li>{self._pill("info", "whole device")} '
+                         f'{self._issue_ref(hold.get("issue"), hold.get("holder"))} '
                          f'{verb} {self._e(self._short_host(hold.get("host", "")))} '
                          f'(slots {", ".join(str(slot) for slot in hold.get("slots", []))}) for '
                          f'{self._duration(hold.get("held_s"))}, holder {self._e(hold.get("holder_kind", ""))}</li>')
@@ -647,12 +671,12 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         if leases.get("harness_only_hosts"):
             notes.append(f'<li>harness hosts, preferred first: {self._e(" > ".join(leases["harness_only_hosts"]))}</li>')
         if leases.get("local_card_off"):
-            notes.append("<li>local card off: every run goes to a remote card</li>")
+            notes.append("<li>local device off: every run goes to a remote device</li>")
         for line in leases.get("unparsed", []):
             notes.append(f'<li class="note">{self._e(line)}</li>')
         error: str = f'<div class="err">last read failed: {self._e(leases["error"])}</div>' if leases.get("error") else ""
         held: int = sum(1 for slot in leases.get("slots", []) if slot.get("state") != "free")
-        return (f'<article class="panel"><h2>GPU slots and leases <span class="sub">{held} of '
+        return (f'<article class="panel"><h2>Resource slots and leases <span class="sub">{held} of '
                 f'{len(leases.get("slots", []))} held</span></h2><div class="hscroll">{table}</div>'
                 f'<ul class="list">{"".join(notes)}</ul>{error}</article>')
 
@@ -740,7 +764,7 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
         all_label: str = labels.get("all_issues", "ai")
         structural: frozenset[str] = frozenset(labels.get(key, "") for key in
                                                ("all_issues", "queue", "wip", "operator", "signoff"))
-        strong: frozenset[str] = frozenset(labels.get(key, "") for key in ("first", "fable"))
+        strong: frozenset[str] = frozenset(labels[key] for key in ("first", "lane") if labels.get(key))
         flags: str = "".join(f'<span class="chip{" strong" if label in strong else ""}">'
                              f'{self._e(label.removeprefix(all_label + ":"))}</span>'
                              for label in issue.get("labels", []) if label not in structural)
@@ -776,19 +800,22 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
 
     def _stalls_panel(self, snapshot: JsonDict) -> str:
         """
-        Renders the stall watch's newest lines.
+        Renders the newest lines of state/stalls.log.
 
         Args:
             snapshot: The snapshot.
 
         Returns:
-            The panel HTML.
+            The panel HTML, or an empty string when the file does not exist.
         """
-        stalls: list[JsonDict] = list(reversed(snapshot.get("health", {}).get("stalls", [])))
-        level_by_kind: dict[str, str] = {"lock_wait": "warning", "gpu_idle": "warning", "host_degraded": "serious"}
+        logged: list[JsonDict] | None = snapshot.get("health", {}).get("stalls")
+        if logged is None:
+            return ""
+        stalls: list[JsonDict] = list(reversed(logged))
         rows: str = "".join(
             f'<tr><td class="sub">{self._sample_time(stall.get("time"))}</td>'
-            f'<td>{self._pill(level_by_kind.get(stall.get("kind", ""), "info"), stall.get("kind", ""))}</td>'
+            f'<td>{self._pill("serious" if stall.get("kind") == "host_degraded" else "warning", stall.get("kind", ""))}'
+            '</td>'
             f'<td title="{self._e(stall.get("detail", ""))}"><div class="clamp"><b>{self._e(self._short_host(stall.get("key", "")))}</b> '
             f'{self._e(self._clip(stall.get("detail", ""), 220))}</div></td></tr>'
             for stall in stalls
@@ -874,17 +901,13 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
                              f'+{column["hidden"]} more</div>')
         for card in flow["cards"]:
             parts.append(self._flow_card(card))
+        lane_names: dict[str, str] = {"device": "a device", "compile": "a compile lane"}
         legend: str = (
             '<div class="flow-legend">'
-            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge card holds"/></svg> '
-            'holds a card</span>'
-            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge card waits"/></svg> '
-            'waits for a card</span>'
-            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge compile holds"/></svg>'
-            ' holds a compile lane</span>'
-            '<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge compile waits"/></svg>'
-            ' waits for a compile lane</span>'
-            '<span>cards slide to their new state on each refresh</span></div>'
+            + "".join(f'<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" '
+                      f'class="fedge {lane} {kind}"/></svg> {kind.replace("waits", "waits for")} {lane_names[lane]}'
+                      '</span>' for lane in flow.get("lanes", []) for kind in ("holds", "waits"))
+            + '<span>cards slide to their new state on each refresh</span></div>'
         )
         trail: str = "".join(
             f'<li title="{self._e(transition["from"])} → {self._e(transition["to"])}">'
@@ -901,7 +924,8 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
 
     def _flow_device(self, device: JsonDict) -> str:
         """
-        Renders one device node: card use, load, card memory, lease holders, compile lane and the idle flag.
+        Renders one device node: device use and memory when probed, load, lease holders and compile lane when
+        the instance has them, and the idle flag.
 
         Args:
             device: A device from the snapshot's flow.
@@ -910,31 +934,40 @@ footer table td,footer table th{font-size:11px;padding:2px 6px}
             The node HTML.
         """
         util: float | None = device.get("gpu_util_pct")
-        flag: str = self._pill("warning", device.get("idle_flag") or "card idle, queue waiting") \
+        flag: str = self._pill("warning", device.get("idle_flag") or "device idle, queue waiting") \
             if device.get("idle_with_queue") else ""
         status: str = self._pill(self.STATUS_LEVELS.get(device.get("status") or "", "idle"),
                                  device.get("status") or "unknown")
-        holders: str = ", ".join(self._e(holder) for holder in device.get("holders", [])) or "no lease held"
-        memory: str = f'{self._gb(device.get("gpu_mem_used_mb"))} / {self._gb(device.get("gpu_mem_total_mb"))} GB'
         load: str = f'{self._number(device.get("load1"))} / {device.get("nproc") or "?"} cores'
-        width: float = min(100.0, max(0.0, float(util or 0)))
-        card_anchor: float = device["w"] * 0.3
-        compile_anchor: float = device["w"] * 0.75
+        probed: bool = util is not None or bool(device.get("gpu_name"))
+        usage: str = ""
+        if probed:
+            width: float = min(100.0, max(0.0, float(util or 0)))
+            usage = (f'<div class="sub">{self._e(device.get("gpu_name") or "device")}</div>'
+                     '<div style="display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center">'
+                     f'<span class="sub">Device</span><span class="meter"><b style="width:{width:.0f}%"></b></span>'
+                     f'<span class="num">{self._percent(util)}</span></div>')
+            if device.get("gpu_mem_total_mb") is not None:
+                load += (f' &middot; device memory {self._gb(device.get("gpu_mem_used_mb"))} / '
+                         f'{self._gb(device.get("gpu_mem_total_mb"))} GB')
+        holders: str = ""
+        anchors: list[str] = []
+        if device.get("holders") is not None:
+            held: str = ", ".join(self._e(holder) for holder in device["holders"]) or "no lease held"
+            holders = f'<div class="holders" title="{held}">lease: {held}</div>'
+            anchors.append(f'<span style="left:{device["w"] * 0.3:.0f}px">▾ device</span>')
+        compile_line: str = ""
+        if device.get("compile") is not None:
+            compile_line = f'<div class="sub">{self._e(device["compile"])}</div>'
+            anchors.append(f'<span style="left:{device["w"] * 0.75:.0f}px">▾ compile</span>')
         return (
             f'<div class="fdev{" flagged" if device.get("idle_with_queue") else ""}" '
             f'data-key="device-{self._e(device["key"])}" '
             f'style="left:{device["x"]}px;top:{device["y"]}px;width:{device["w"]}px;height:{device["h"]}px">'
             f'<div class="top"><span><b>{self._e(device["tag"])}</b> <span class="sub">{self._e(device["name"])}'
             f'</span></span><span class="pills">{flag}{status}</span></div>'
-            f'<div class="sub">{self._e(device.get("gpu_name") or "card unknown")}</div>'
-            f'<div style="display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center">'
-            f'<span class="sub">GPU</span><span class="meter"><b style="width:{width:.0f}%"></b></span>'
-            f'<span class="num">{self._percent(util)}</span></div>'
-            f'<div class="sub num">load {load} &middot; card memory {memory}</div>'
-            f'<div class="holders" title="{holders}">lease: {holders}</div>'
-            f'<div class="sub">{self._e(device.get("compile", ""))}</div>'
-            f'<div class="anchors"><span style="left:{card_anchor:.0f}px">▾ card</span>'
-            f'<span style="left:{compile_anchor:.0f}px">▾ compile</span></div></div>'
+            f'{usage}<div class="sub num">load {load}</div>{holders}{compile_line}'
+            f'<div class="anchors">{"".join(anchors)}</div></div>'
         )
 
     def _flow_card(self, card: JsonDict) -> str:

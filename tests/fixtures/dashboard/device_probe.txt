@@ -1,0 +1,2 @@
+Example Device, 12, 1024, 16384
+4242, 512, python3
