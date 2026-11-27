@@ -175,8 +175,9 @@ if caller_tick=$("$harness_home/bin/tick-pid.sh" "$$" 2>/dev/null); then
       /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
       /^slot [0-9]+ HELD / && / remote-all / && !/ no-cost / && /\(alive\)$/ { held[$2] = $4 " " $5 }
       END { for (s in held) if ((h in lo) && s + 0 >= lo[h] && s + 0 <= hi[h]) { print held[s]; exit } }')
+  own=""
   if [ -n "$holder" ]; then
-    holder_issue=${holder%% *}; holder_pid=${holder##* }; own=""
+    holder_issue=${holder%% *}; holder_pid=${holder##* }
     [ "$caller_tick" = "$holder_pid" ] && own=1
     p=$$
     while [ -z "$own" ] && [ "$p" -gt 1 ]; do
@@ -188,8 +189,10 @@ if caller_tick=$("$harness_home/bin/tick-pid.sh" "$$" 2>/dev/null); then
       exit 75
     fi
   fi
+  # A waiting cost read keeps other ticks' card-less containers off the host, but not those of the
+  # tick that holds the host's card whole: its runs (a kit's sidecar among them) are the card's own.
   gpus=""; for a in "$@"; do case "$a" in --gpus|--gpus=*) gpus=1 ;; esac; done
-  if [ -z "$gpus" ]; then
+  if [ -z "$gpus" ] && [ -z "$own" ]; then
     caller_issue=$(grep -lE "^[0-9]+ $caller_tick( |$)" "$harness_home"/state/locks/claim.* 2>/dev/null | head -1)
     caller_issue=${caller_issue##*.}
     waiter=$("$harness_home/bin/cost_wait_hosts.sh" ${caller_issue:+--except-issue "$caller_issue"} | awk -v h="$target" '$1 == h { print $2; exit }')

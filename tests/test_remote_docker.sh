@@ -113,7 +113,7 @@ printf '#!/usr/bin/env bash\necho 999999\n' > "$G/bin/tick-pid.sh"
 cat > "$G/bin/lease.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "remote card: fake@host (slots 4-5)"
-[ -n "${GUARD_NOHOLD:-}" ] || echo "slot 4 HELD 2490 1 2026-11-26T00:00:00Z domain=80 remote-all${GUARD_MARK:-} render (alive)"
+[ -n "${GUARD_NOHOLD:-}" ] || echo "slot 4 HELD 2490 ${GUARD_HOLDER_PID:-1} 2026-11-26T00:00:00Z domain=80 remote-all${GUARD_MARK:-} render (alive)"
 EOF
 chmod +x "$G/bin/"*.sh "$G/bin/remote-docker/docker"
 : > "$LOG"; DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
@@ -148,6 +148,8 @@ echo "fake@host $(date +%s)" > "$G/state/locks/cost-wait.2504"
 check "a card-less container is refused on a host another issue's cost read waits for" '[ "$rc" = 75 ] && grep -q "#2504.s cost read waits for fake@host" "$T/guard.err" && ! grep -q " run " "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 : > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm --gpus all img true 2> "$T/guard.err"; rc=$?
 check "a container with a card answers to its lease, not to the wait" '[ "$rc" = 0 ] && grep -q "run --rm --gpus all img true" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
+: > "$LOG"; GUARD_HOLDER_PID=999999 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run -d --name worv-iter-4-ros2cli -e NVIDIA_VISIBLE_DEVICES=void img sleep 1 2> "$T/guard.err"; rc=$?
+check "the tick holding the card whole runs its card-less sidecar past another issue's wait" '[ "$rc" = 0 ] && grep -q "run -d --name worv-iter-4-ros2cli" "$LOG"' "rc=$rc $(cat "$T/guard.err") $(calls)"
 mv "$G/state/locks/claim.2495" "$G/state/locks/claim.2504"; sed -i 's/^2495 /2504 /' "$G/state/locks/claim.2504"
 : > "$LOG"; GUARD_NOHOLD=1 DOCKER_HOST=ssh://fake@host "$G/bin/remote-docker/docker" run --rm img true 2> "$T/guard.err"; rc=$?
 check "the waiting issue's own tick still runs its containers there" '[ "$rc" = 0 ]' "rc=$rc $(cat "$T/guard.err")"
