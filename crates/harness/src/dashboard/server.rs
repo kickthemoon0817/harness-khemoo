@@ -41,6 +41,12 @@ const SECURITY_HEADERS: [(&str, &str); 7] = [
     ("Vary", "Accept-Encoding"),
 ];
 const HTML: &str = "text/html; charset=utf-8";
+/// The most connections served at once; a tab polls one at a time.
+pub const MAX_CONNECTIONS: usize = 64;
+/// How long a client may take to send a request's headers.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one connection may stay open, idle keep-alive included.
+const CONNECTION_LIFETIME: Duration = Duration::from_secs(120);
 const JSON: &str = "application/json; charset=utf-8";
 
 /// Ready-to-send representations, each validated against its exact wire bytes.
@@ -335,7 +341,14 @@ impl Server {
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
+        let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         loop {
+            // A connection is accepted only with a free place, so no client can hold them all.
+            let permit = tokio::select! {
+                () = &mut shutdown => return,
+                permit = Arc::clone(&connections).acquire_owned() => permit,
+            };
+            let Ok(permit) = permit else { return };
             let accepted = tokio::select! {
                 () = &mut shutdown => return,
                 accepted = listener.accept() => accepted,
@@ -355,12 +368,14 @@ impl Server {
                         Ok::<_, Infallible>(response)
                     }
                 });
-                hyper::server::conn::http1::Builder::new()
+                let connection = hyper::server::conn::http1::Builder::new()
                     .timer(TokioTimer::new())
-                    .header_read_timeout(Duration::from_secs(30))
-                    .serve_connection(TokioIo::new(stream), service)
+                    .header_read_timeout(HEADER_READ_TIMEOUT)
+                    .serve_connection(TokioIo::new(stream), service);
+                tokio::time::timeout(CONNECTION_LIFETIME, connection)
                     .await
                     .ok();
+                drop(permit);
             });
         }
     }
