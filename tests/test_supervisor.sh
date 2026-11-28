@@ -450,7 +450,7 @@ check "a pid that is no tick is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"not 
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $foreign, \"reason\": \"x\"}]}"
 check "another installation's tick is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"not a live tick of this installation"* ]]' "rc=$rc $out"
 # A runner's own tick, held open. A stopped tick of a few seconds chains only under a
-# CHAIN_MIN_TICK_S below that.
+# CHAIN_MIN_TICK_S below that, and a slow host may chain the short tick after it too.
 write_env 1 CHAIN_MIN_TICK_S=1
 apply "{\"version\": 1, \"reason\": \"one\", \"expires_at\": \"$(at 3600)\", \"width\": 1}"
 : > "$FAKE_LANES"; : > "$LOG"; touch "$FAKE_LONG"
@@ -470,7 +470,7 @@ check "after its grace the tick's own process group gets TERM, and the stop is l
 check "the runner survives the stop: it writes the tick's trailer" \
     'grep -q "^\[tick.sh\] exit=143 " "$S"/logs/tick-*-slot1.log' "$(tail -n 2 "$S"/logs/tick-*-slot1.log)"
 check "and it chains the next tick" \
-    'grep -q "slot1 chains tick 2" "$LOG" && [ "$(ticks_run)" = 2 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+    'grep -q "slot1 chains tick 2" "$LOG" && [ "$(ticks_run)" -ge 2 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
 check "a tick outside a process group of its own is refused, not signalled" \
     'kill -0 "$shared" && grep -q "stop: pid $shared skipped: its process group ([0-9]*) is not its own" "$DLOG"' "$(grep "stop:" "$DLOG")"
 check "nothing else was stopped" 'kill -0 "$plain" && kill -0 "$foreign"' "plain or foreign gone"
