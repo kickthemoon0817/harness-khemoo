@@ -1,0 +1,30 @@
+name: deny
+
+# Dependencies change only with the manifests; new advisories against unchanged ones arrive any day,
+# which the weekly run catches.
+on:
+  push:
+    branches: [main]
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", ".github/workflows/deny.yml"]
+  pull_request:
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", ".github/workflows/deny.yml"]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deny-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --locked check advisories bans licenses sources
