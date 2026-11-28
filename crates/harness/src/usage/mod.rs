@@ -8,6 +8,10 @@
 //! window's; with no fresh reading it is 0, since the ceiling cannot be kept blind. The pool's cap is
 //! the sum of the agents' caps, at most the width.
 //!
+//! An entry may name an account, `agent@account:model` (`crate::accounts`): each account then has
+//! its own reading, cap, running count and cooldowns, and counts toward the pool as an agent of its
+//! own would. An account found signed out has a cap of 0.
+//!
 //! Settings come from the environment, as `bin/tick.sh` and `libexec/usage-ok.sh` export them from
 //! harness.env.
 
@@ -23,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::accounts::{Account, SignIn, SignState};
 use crate::home::harness_home;
 pub use sources::{Reading, Source, Window};
 
@@ -40,9 +45,9 @@ pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 #[command(
     args_conflicts_with_subcommands = true,
     after_help = "\
-With no subcommand, prints each agent of TICK_MODELS (and LANE_MODEL) with its windows and cap, and
-the pool's cap. Reads TICK_MODELS, TICK_AGENT, LANE_MODEL, MAX_SLOTS, TICK_WIDTH and the USAGE_*
-keys docs/INSTANCE.md gives from the environment."
+With no subcommand, prints each agent and account of TICK_MODELS (and LANE_MODEL) with its windows
+and cap, and the pool's cap. Reads TICK_MODELS, TICK_AGENT, LANE_MODEL, MAX_SLOTS, TICK_WIDTH,
+AGENT_ACCOUNTS_DIR and the USAGE_* keys docs/INSTANCE.md gives from the environment."
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -57,13 +62,14 @@ enum Sub {
     /// Exit 0 while every window of the agent is under its stand-down point, 1 at or past one, and
     /// 2 without a fresh reading.
     Check {
+        /// The agent, or `agent@account`.
         #[arg(long)]
         agent: String,
     },
-    /// Print the best entry of the model list that is not cooling down and whose agent runs fewer ticks
-    /// than its cap; exit 1 when there is none.
+    /// Print the best entry of the model list that is not cooling down and whose agent (or account)
+    /// runs fewer ticks than its cap; exit 1 when there is none.
     Pick {
-        /// Consider only this agent's entries.
+        /// Consider only this agent's entries, or with `agent@account` only that account's.
         #[arg(long)]
         agent: Option<String>,
         /// Entries already tried by this tick, space-separated.
@@ -202,17 +208,52 @@ pub fn room(width: u32, agents: impl IntoIterator<Item = (u32, u32)>) -> u32 {
     )
 }
 
-/// One entry of the model list: an agent and the model it runs.
+/// One entry of the model list: an agent, the account it runs on when it names one, and the model.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entry {
     pub agent: String,
+    pub account: Option<String>,
     pub model: String,
 }
 
 impl fmt::Display for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.agent, self.model)
+        write!(f, "{}:{}", self.key(), self.model)
     }
+}
+
+/// What a cap, a reading, a running count and a cooldown belong to: `agent`, or `agent@account`.
+pub fn key_of(agent: &str, account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("{agent}@{account}"),
+        None => agent.to_owned(),
+    }
+}
+
+/// Splits `agent` or `agent@account`, each part checked.
+pub fn split_key(text: &str) -> Result<(String, Option<String>), String> {
+    let (agent, account) = match text.split_once('@') {
+        Some((agent, account)) => (agent, Some(account)),
+        None => (text, None),
+    };
+    if !valid_agent(agent) {
+        return Err(format!(
+            "'{text}': agent '{agent}' is not 1 to 32 of a-z, 0-9 and _"
+        ));
+    }
+    if let Some(account) = account {
+        if crate::accounts::variable(agent).is_none() {
+            return Err(format!(
+                "'{text}': only claude, codex and gemini have accounts"
+            ));
+        }
+        if !crate::accounts::valid_name(account) {
+            return Err(format!(
+                "'{text}': account '{account}' is not 1 to 32 of a-z, 0-9 and -, not starting with -"
+            ));
+        }
+    }
+    Ok((agent.to_owned(), account.map(str::to_owned)))
 }
 
 /// An agent name, as it appears in setting names: 1 to 32 of a-z, 0-9 and _.
@@ -225,15 +266,12 @@ pub fn valid_agent(name: &str) -> bool {
 }
 
 impl Entry {
-    /// Parses `agent:model`, or a bare `model` run by `default_agent`. The entry names its cooldown
-    /// file, so the model holds no `/` and no control character.
+    /// Parses `agent:model`, `agent@account:model`, or a bare `model` run by `default_agent`. The
+    /// entry names its cooldown file, so the model holds no `/` and no control character.
     pub fn parse(text: &str, default_agent: &str) -> Result<Self, String> {
-        let (agent, model) = text.split_once(':').unwrap_or((default_agent, text));
-        if !valid_agent(agent) {
-            return Err(format!(
-                "'{text}': agent '{agent}' is not 1 to 32 of a-z, 0-9 and _"
-            ));
-        }
+        let (key, model) = text.split_once(':').unwrap_or((default_agent, text));
+        let (agent, account) = split_key(key)
+            .map_err(|message| message.replacen(&format!("'{key}'"), &format!("'{text}'"), 1))?;
         if model.is_empty()
             || model.len() > 128
             || model.contains('/')
@@ -242,9 +280,14 @@ impl Entry {
             return Err(format!("'{text}': '{model}' is not a model name"));
         }
         Ok(Self {
-            agent: agent.to_owned(),
+            agent,
+            account,
             model: model.to_owned(),
         })
+    }
+
+    pub fn key(&self) -> String {
+        key_of(&self.agent, self.account.as_deref())
     }
 
     pub fn list(text: &str, default_agent: &str) -> Result<Vec<Self>, String> {
@@ -273,10 +316,11 @@ fn model_entries(env: Lookup) -> Result<(Vec<Entry>, Option<Entry>), String> {
     Ok((entries, lane))
 }
 
-/// Where one agent's reading comes from, and what refreshes it.
+/// Where one agent's or account's reading comes from, and what refreshes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSource {
     pub agent: String,
+    pub account: Option<Account>,
     pub source: Source,
     pub fetch: Option<PathBuf>,
 }
@@ -309,18 +353,85 @@ impl AgentSource {
             }),
             (None, _) => Source::Unset,
         };
-        let fetch = match (env(&format!("USAGE_FETCH_{agent}")), agent) {
-            (Some(path), _) => Some(PathBuf::from(path)),
-            (None, "claude") => env("USAGE_FETCH")
-                .map(PathBuf::from)
-                .or_else(|| home().map(|home| home.join(".claude/scripts/usage-fetch.sh"))),
-            (None, _) => None,
-        };
         Ok(Self {
             agent: agent.to_owned(),
+            account: None,
+            source,
+            fetch: agent_fetch(env, agent),
+        })
+    }
+
+    /// An account's: `USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>`, a `-` of
+    /// the name read as `_`. Without its own source claude reads `<folder>/usage-cache.json` and codex
+    /// `<folder>/sessions`, and any other agent takes `USAGE_SOURCE_<agent>`; without its own fetch
+    /// command the agent's runs, with the account's folder ([`AgentSource::fetch_env`]).
+    pub fn for_account(env: Lookup, account: Account) -> Result<Self, String> {
+        let agent = account.agent.clone();
+        let own = format!("{agent}_{}", crate::accounts::key_name(&account.name));
+        let sessions = account.dir.join("sessions");
+        let parse = |key: &str, text: &str| {
+            Source::parse(text, || Some(sessions.clone()))
+                .map_err(|message| format!("{key}: {message}"))
+        };
+        let own_key = format!("USAGE_SOURCE_{own}");
+        let agent_key = format!("USAGE_SOURCE_{agent}");
+        let source = match (env(&own_key), agent.as_str()) {
+            (Some(text), _) => parse(&own_key, &text)?,
+            (None, "claude") => Source::ClaudeCache(account.dir.join("usage-cache.json")),
+            (None, "codex") => Source::CodexSessions(sessions.clone()),
+            (None, _) => match env(&agent_key) {
+                Some(text) => parse(&agent_key, &text)?,
+                None => Source::Unset,
+            },
+        };
+        let fetch = env(&format!("USAGE_FETCH_{own}"))
+            .map(PathBuf::from)
+            .or_else(|| agent_fetch(env, &agent));
+        Ok(Self {
+            agent,
+            account: Some(account),
             source,
             fetch,
         })
+    }
+
+    /// What the fetch command runs with for an account: the agent's variable set to its folder, and
+    /// for a Claude cache `USAGE_CACHE` naming it and `USAGE_CREDENTIALS_FILE` the folder's
+    /// `.credentials.json` when there is one. The default account's credentials file, which the
+    /// environment may name, never reaches another account's fetch.
+    pub fn fetch_env(&self) -> (Vec<(String, String)>, Vec<&'static str>) {
+        let Some(account) = &self.account else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut set = vec![(
+            account.variable().to_owned(),
+            account.dir.display().to_string(),
+        )];
+        let mut remove = Vec::new();
+        if let Source::ClaudeCache(path) = &self.source {
+            set.push(("USAGE_CACHE".to_owned(), path.display().to_string()));
+        }
+        let credentials = account.dir.join(".credentials.json");
+        if credentials.is_file() {
+            set.push((
+                "USAGE_CREDENTIALS_FILE".to_owned(),
+                credentials.display().to_string(),
+            ));
+        } else {
+            remove.push("USAGE_CREDENTIALS_FILE");
+        }
+        (set, remove)
+    }
+}
+
+/// `USAGE_FETCH_<agent>`; for claude, else `USAGE_FETCH`, else the usual fetch script.
+fn agent_fetch(env: Lookup, agent: &str) -> Option<PathBuf> {
+    match (env(&format!("USAGE_FETCH_{agent}")), agent) {
+        (Some(path), _) => Some(PathBuf::from(path)),
+        (None, "claude") => env("USAGE_FETCH").map(PathBuf::from).or_else(|| {
+            env("HOME").map(|home| PathBuf::from(home).join(".claude/scripts/usage-fetch.sh"))
+        }),
+        (None, _) => None,
     }
 }
 
@@ -348,10 +459,15 @@ pub struct WindowCap {
     pub cap: u32,
 }
 
-/// One agent's windows and the ticks they allow.
+/// One agent's or account's windows and the ticks they allow.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AgentUsage {
     pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The account's last sign-in check, when it has been checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignIn>,
     pub source: String,
     pub reading: Freshness,
     pub taken_ms: Option<u64>,
@@ -359,6 +475,18 @@ pub struct AgentUsage {
     pub cap: u32,
     /// Its live ticks, which [`pool`] counts; 0 elsewhere.
     pub running: u32,
+}
+
+impl AgentUsage {
+    pub fn key(&self) -> String {
+        key_of(&self.agent, self.account.as_deref())
+    }
+
+    fn signed_out(&self) -> bool {
+        self.sign_in
+            .as_ref()
+            .is_some_and(|sign_in| sign_in.state == SignState::SignedOut)
+    }
 }
 
 /// The steps of window `name`: `USAGE_STEPS_<agent>_<name>`, else by its length. The agent is part
@@ -391,6 +519,8 @@ pub fn assess(
 ) -> Result<AgentUsage, String> {
     let mut usage = AgentUsage {
         agent: source.agent.clone(),
+        account: source.account.as_ref().map(|account| account.name.clone()),
+        sign_in: None,
         source: source.source.describe(),
         reading: Freshness::Unmetered,
         taken_ms: None,
@@ -481,7 +611,7 @@ fn read_refreshed(settings: &Settings, source: &AgentSource) -> Result<Reading, 
     });
     match &source.fetch {
         Some(fetch) if old && executable(fetch) => {
-            run_fetch(fetch);
+            run_fetch(fetch, source);
             sources::read(&source.source)
         }
         _ => reading,
@@ -495,8 +625,14 @@ fn executable(path: &Path) -> bool {
 
 /// Runs the fetch command with no input or output, killing it past [`FETCH_TIMEOUT`]. Its failure
 /// shows as the reading it failed to refresh.
-fn run_fetch(fetch: &Path) {
-    let Ok(mut child) = Command::new(fetch)
+fn run_fetch(fetch: &Path, source: &AgentSource) {
+    let (set, remove) = source.fetch_env();
+    let mut command = Command::new(fetch);
+    for name in remove {
+        command.env_remove(name);
+    }
+    let Ok(mut child) = command
+        .envs(set)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -515,38 +651,69 @@ fn run_fetch(fetch: &Path) {
     }
 }
 
-/// One agent's windows now, refreshed first through its fetch command when `refresh` is set.
+/// One agent's or account's windows now, refreshed first through its fetch command when `refresh`
+/// is set. An account whose folder is refused allows nothing, and neither does one its last check
+/// found signed out.
 pub fn agent_usage(
     env: Lookup,
     settings: &Settings,
     agent: &str,
+    account: Option<&str>,
     refresh: bool,
 ) -> Result<AgentUsage, String> {
-    let source = AgentSource::from_env(env, agent)?;
-    let reading = match source.source {
-        Source::None => Err(String::new()),
-        Source::Unset => Err(format!(
+    let source = match account {
+        None => AgentSource::from_env(env, agent)?,
+        Some(name) => match Account::resolve(env, agent, name) {
+            Ok(account) => AgentSource::for_account(env, account)?,
+            Err(message) => {
+                let source = AgentSource {
+                    agent: agent.to_owned(),
+                    account: None,
+                    source: Source::Unset,
+                    fetch: None,
+                };
+                let mut usage = assess(env, settings, &source, Err(message), now_ms())?;
+                usage.account = Some(name.to_owned());
+                return Ok(usage);
+            }
+        },
+    };
+    let reading = match (&source.source, account) {
+        (Source::None, _) => Err(String::new()),
+        (Source::Unset, Some(name)) => Err(format!(
+            "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent} is set: name its source, or none",
+            crate::accounts::key_name(name)
+        )),
+        (Source::Unset, None) => Err(format!(
             "USAGE_SOURCE_{agent} is not set: name its source, or none"
         )),
         _ if refresh => read_refreshed(settings, &source),
         _ => sources::read(&source.source),
     };
-    assess(env, settings, &source, reading, now_ms())
-}
-
-/// The distinct agents of the entries, in order of first appearance.
-fn agents_of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<String> {
-    let mut agents: Vec<String> = Vec::new();
-    for entry in entries {
-        if !agents.contains(&entry.agent) {
-            agents.push(entry.agent.clone());
+    let mut usage = assess(env, settings, &source, reading, now_ms())?;
+    if let (Some(account), Some(state)) = (&source.account, state_dir(env)) {
+        usage.sign_in = crate::accounts::cached(&state, &account.key());
+        if usage.signed_out() {
+            usage.cap = 0;
         }
     }
-    agents
+    Ok(usage)
 }
 
-/// Every agent of the model list and the lane, with its windows, its live ticks and the ticks its
-/// caps allow.
+/// The distinct agents and accounts of the entries, in order of first appearance.
+fn seats_of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<(String, Option<String>)> {
+    let mut seats: Vec<(String, Option<String>)> = Vec::new();
+    for entry in entries {
+        let seat = (entry.agent.clone(), entry.account.clone());
+        if !seats.contains(&seat) {
+            seats.push(seat);
+        }
+    }
+    seats
+}
+
+/// Every agent and account of the model list and the lane, with its windows, its live ticks and the
+/// ticks its caps allow.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pool {
     pub width: u32,
@@ -556,7 +723,8 @@ pub struct Pool {
     /// width. Another agent's ticks past its own cap take none of it.
     pub room: u32,
     pub agents: Vec<AgentUsage>,
-    /// The agents each of whose entries cools down on its usage limit.
+    /// The agents and accounts, `agent` or `agent@account`, each of whose entries cools down on its
+    /// usage limit.
     pub cooling: Vec<String>,
 }
 
@@ -569,25 +737,25 @@ pub fn pool(env: Lookup) -> Result<Pool, String> {
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     let state = state_dir(env);
     let running = match &state {
-        Some(state) => running_by_agent(state)?,
+        Some(state) => running_by_key(state)?,
         None => HashMap::new(),
     };
-    let agents = agents_of(&entries)
+    let agents = seats_of(&entries)
         .iter()
-        .map(|agent| {
-            let mut usage = agent_usage(env, &settings, agent, false)?;
-            usage.running = running.get(agent).copied().unwrap_or(0);
+        .map(|(agent, account)| {
+            let mut usage = agent_usage(env, &settings, agent, account.as_deref(), false)?;
+            usage.running = running.get(&usage.key()).copied().unwrap_or(0);
             Ok(usage)
         })
         .collect::<Result<Vec<_>, String>>()?;
     let cooling: Vec<String> = agents
         .iter()
-        .map(|usage| usage.agent.clone())
-        .filter(|agent| {
+        .map(AgentUsage::key)
+        .filter(|key| {
             state.as_ref().is_some_and(|state| {
                 entries
                     .iter()
-                    .filter(|entry| &entry.agent == agent)
+                    .filter(|entry| &entry.key() == key)
                     .all(|entry| cooling(state, entry, cooldown))
             })
         })
@@ -595,7 +763,7 @@ pub fn pool(env: Lookup) -> Result<Pool, String> {
     let can_run = || {
         agents
             .iter()
-            .filter(|usage| !cooling.contains(&usage.agent))
+            .filter(|usage| !cooling.contains(&usage.key()))
     };
     Ok(Pool {
         width: settings.width,
@@ -609,31 +777,61 @@ pub fn pool(env: Lookup) -> Result<Pool, String> {
     })
 }
 
-/// How many live ticks of each agent the state directory records.
-fn running_by_agent(state: &Path) -> Result<HashMap<String, u32>, String> {
+/// How many live ticks of each agent and account the state directory records.
+fn running_by_key(state: &Path) -> Result<HashMap<String, u32>, String> {
     let mut running: HashMap<String, u32> = HashMap::new();
     for tick in crate::ticks::scan(&state.to_string_lossy())
         .map_err(|error| format!("cannot count the running ticks: {error}"))?
     {
-        *running.entry(tick.agent).or_default() += 1;
+        *running.entry(tick.key()).or_default() += 1;
     }
     Ok(running)
 }
 
 /// `HARNESS_STATE`, else the checkout's `state/`.
-fn state_dir(env: Lookup) -> Option<PathBuf> {
+pub fn state_dir(env: Lookup) -> Option<PathBuf> {
     env("HARNESS_STATE")
         .map(PathBuf::from)
         .or_else(|| harness_home().map(|home| home.join("state")))
 }
 
+/// Also checks again each account of the lists, and the supervisor's with `SUPERVISOR=1`, whose
+/// sign-in check is old, printing a line for each signed out, or signed in again, since the launcher
+/// last logged it: the launcher logs them.
 fn refresh(env: Lookup) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
-    for agent in agents_of(entries.iter().chain(lane.iter())) {
-        let source = AgentSource::from_env(env, &agent)?;
+    let mut accounts = Vec::new();
+    if env("SUPERVISOR").as_deref() == Some("1")
+        && let Some(text) = env("SUPERVISOR_MODEL")
+    {
+        let agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
+        let entry = Entry::parse(text.trim(), &agent)
+            .map_err(|message| format!("SUPERVISOR_MODEL: {message}"))?;
+        if let Some(name) = &entry.account
+            && let Ok(account) = Account::resolve(env, &entry.agent, name)
+        {
+            accounts.push(account);
+        }
+    }
+    for (agent, account) in seats_of(entries.iter().chain(lane.iter())) {
+        let source = match account {
+            None => AgentSource::from_env(env, &agent)?,
+            Some(name) => match Account::resolve(env, &agent, &name) {
+                Ok(account) => {
+                    accounts.push(account.clone());
+                    AgentSource::for_account(env, account)?
+                }
+                Err(_) => continue,
+            },
+        };
         if !matches!(source.source, Source::None | Source::Unset) {
             let _ = read_refreshed(&settings, &source);
+        }
+    }
+    if let Some(state) = state_dir(env) {
+        for line in crate::accounts::refresh(env, &state, &accounts, now_ms() / 1000, true) {
+            println!("{line}");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -656,14 +854,23 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
             Freshness::Unreadable(message) => format!(": no reading ({message})"),
             Freshness::Unmetered => ": no windows".to_owned(),
         };
-        let cooling = if report.cooling.contains(&agent.agent) {
+        let cooling = if report.cooling.contains(&agent.key()) {
             ", every entry cooling down"
         } else {
             ""
         };
+        let signed_out = if agent.signed_out() {
+            ", signed out"
+        } else {
+            ""
+        };
         println!(
-            "{}: cap {} of {}, {} running{cooling}, {}{state}",
-            agent.agent, agent.cap, report.width, agent.running, agent.source
+            "{}: cap {} of {}, {} running{cooling}{signed_out}, {}{state}",
+            agent.key(),
+            agent.cap,
+            report.width,
+            agent.running,
+            agent.source
         );
         for window in &agent.windows {
             let [half, one, none] = window.steps.0;
@@ -708,14 +915,13 @@ pub fn verdict(settings: &Settings, usage: &AgentUsage) -> Verdict {
     }
 }
 
-fn check(env: Lookup, agent: &str) -> Result<ExitCode, String> {
-    if !valid_agent(agent) {
-        return Err(format!(
-            "--agent: '{agent}' is not 1 to 32 of a-z, 0-9 and _"
-        ));
+fn check(env: Lookup, key: &str) -> Result<ExitCode, String> {
+    if !key.contains('@') && !valid_agent(key) {
+        return Err(format!("--agent: '{key}' is not 1 to 32 of a-z, 0-9 and _"));
     }
+    let (agent, account) = split_key(key).map_err(|message| format!("--agent: {message}"))?;
     let settings = Settings::from_env(env)?;
-    let usage = agent_usage(env, &settings, agent, true)?;
+    let usage = agent_usage(env, &settings, &agent, account.as_deref(), true)?;
     let windows: Vec<String> = usage
         .windows
         .iter()
@@ -727,9 +933,9 @@ fn check(env: Lookup, agent: &str) -> Result<ExitCode, String> {
     );
     let verdict = verdict(&settings, &usage);
     let head = if windows.is_empty() {
-        format!("{agent}: no windows")
+        format!("{key}: no windows")
     } else {
-        format!("{agent}: {}", windows.join(" "))
+        format!("{key}: {}", windows.join(" "))
     };
     match verdict {
         Verdict::Go => println!("{head} {stops}: go on"),
@@ -740,7 +946,7 @@ fn check(env: Lookup, agent: &str) -> Result<ExitCode, String> {
                 _ => "the reading is stale".to_owned(),
             };
             println!(
-                "usage unknown: no fresh reading for {agent} from {} ({why}); start nothing",
+                "usage unknown: no fresh reading for {key} from {} ({why}); start nothing",
                 usage.source
             );
         }
@@ -761,8 +967,8 @@ pub struct Candidate {
     pub running: u32,
 }
 
-/// The first candidate not tried and not cooling down whose agent may run one more tick: under its
-/// cap, or, for a landing tick, which may start past the width, with a cap above 0.
+/// The first candidate not tried and not cooling down whose agent (or account) may run one more
+/// tick: under its cap, or, for a landing tick, which may start past the width, with a cap above 0.
 pub fn pick<'a>(candidates: &'a [Candidate], tried: &[Entry], landing: bool) -> Option<&'a Entry> {
     candidates
         .iter()
@@ -779,7 +985,7 @@ pub fn pick<'a>(candidates: &'a [Candidate], tried: &[Entry], landing: bool) -> 
 }
 
 /// Whether `entry` hit its usage limit less than `MODEL_COOLDOWN_S` ago: the runner touches
-/// `<state>/model-cooldown/<agent>:<model>` when it does.
+/// `<state>/model-cooldown/<entry>` when it does, `<agent>:<model>` or `<agent>@<account>:<model>`.
 pub fn cooling(state: &Path, entry: &Entry, cooldown: Duration) -> bool {
     std::fs::metadata(state.join("model-cooldown").join(entry.to_string()))
         .and_then(|meta| meta.modified())
@@ -801,27 +1007,27 @@ fn pick_command(env: Lookup, args: &PickArgs) -> Result<ExitCode, String> {
         Some(text) => vec![Entry::parse(text, &default_agent)?],
         None => entries,
     };
-    if let Some(agent) = args.agent {
-        entries.retain(|entry| entry.agent == agent);
+    if let Some(key) = args.agent {
+        entries.retain(|entry| entry.key() == key);
     }
     let tried =
         Entry::list(args.tried, &default_agent).map_err(|message| format!("--tried: {message}"))?;
     let state = state_dir(env).ok_or("no state directory: set HARNESS_STATE")?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
-    let running = running_by_agent(&state)?;
+    let running = running_by_key(&state)?;
     let mut caps = BTreeMap::new();
-    for agent in agents_of(&entries) {
+    for (agent, account) in seats_of(&entries) {
         caps.insert(
-            agent.clone(),
-            agent_usage(env, &settings, &agent, false)?.cap,
+            key_of(&agent, account.as_deref()),
+            agent_usage(env, &settings, &agent, account.as_deref(), false)?.cap,
         );
     }
     let candidates: Vec<Candidate> = entries
         .into_iter()
         .map(|entry| Candidate {
             cooling: cooling(&state, &entry, cooldown),
-            cap: caps.get(&entry.agent).copied().unwrap_or(0),
-            running: running.get(&entry.agent).copied().unwrap_or(0),
+            cap: caps.get(&entry.key()).copied().unwrap_or(0),
+            running: running.get(&entry.key()).copied().unwrap_or(0),
             entry,
         })
         .collect();
@@ -871,6 +1077,7 @@ mod tests {
     fn json_source(agent: &str) -> AgentSource {
         AgentSource {
             agent: agent.to_owned(),
+            account: None,
             source: Source::Json("/u.json".into()),
             fetch: None,
         }
@@ -1075,7 +1282,7 @@ mod tests {
     #[test]
     fn an_agent_without_a_source_allows_nothing() {
         let s = settings(&[]);
-        let usage = agent_usage(&env_of(&[]), &s, "gemini", false).unwrap();
+        let usage = agent_usage(&env_of(&[]), &s, "gemini", None, false).unwrap();
         assert_eq!(usage.cap, 0);
         assert_eq!(
             usage.reading,
@@ -1087,6 +1294,7 @@ mod tests {
             &env_of(&[("USAGE_SOURCE_gemini", "none")]),
             &s,
             "gemini",
+            None,
             false,
         )
         .unwrap();
@@ -1098,6 +1306,7 @@ mod tests {
         let s = settings(&[("MAX_SLOTS", "3")]);
         let source = AgentSource {
             agent: "gemini".to_owned(),
+            account: None,
             source: Source::None,
             fetch: None,
         };
@@ -1112,6 +1321,7 @@ mod tests {
         let env = env_of(&[]);
         let source = AgentSource {
             agent: "codex".to_owned(),
+            account: None,
             source: Source::CodexSessions("/s".into()),
             fetch: None,
         };
@@ -1217,14 +1427,17 @@ mod tests {
             [
                 Entry {
                     agent: "claude".into(),
+                    account: None,
                     model: "opus".into()
                 },
                 Entry {
                     agent: "codex".into(),
+                    account: None,
                     model: "gpt-5.5".into()
                 },
                 Entry {
                     agent: "claude".into(),
+                    account: None,
                     model: "gemini-3-pro".into()
                 },
             ]
@@ -1375,13 +1588,266 @@ mod tests {
         ]);
         let (entries, lane) = model_entries(&env).unwrap();
         assert_eq!(
-            agents_of(entries.iter().chain(lane.iter())),
-            ["claude", "codex", "gemini"]
+            seats_of(entries.iter().chain(lane.iter())),
+            [
+                ("claude".to_owned(), None),
+                ("codex".to_owned(), None),
+                ("gemini".to_owned(), None)
+            ]
         );
         let bare = env_of(&[("TICK_AGENT", "codex"), ("TICK_MODELS", "gpt-5.5")]);
         assert_eq!(
             model_entries(&bare).unwrap().0[0].to_string(),
             "codex:gpt-5.5"
         );
+    }
+
+    #[test]
+    fn an_entry_may_name_an_account() {
+        let entry = Entry::parse("claude@work:opus", "claude").unwrap();
+        assert_eq!(
+            (
+                entry.agent.as_str(),
+                entry.account.as_deref(),
+                entry.model.as_str()
+            ),
+            ("claude", Some("work"), "opus")
+        );
+        assert_eq!(entry.key(), "claude@work");
+        assert_eq!(entry.to_string(), "claude@work:opus");
+        assert_eq!(Entry::parse("codex:gpt", "claude").unwrap().account, None);
+        assert_eq!(
+            Entry::parse("codex@client-2:gpt", "claude").unwrap().key(),
+            "codex@client-2"
+        );
+        for bad in [
+            "claude@:opus",
+            "claude@Work:opus",
+            "claude@-a:opus",
+            "claude@a_b:opus",
+            "claude@a@b:opus",
+            "aider@work:m",
+            "@work:opus",
+        ] {
+            let error = Entry::parse(bad, "claude").unwrap_err();
+            assert!(error.starts_with(&format!("'{bad}'")), "{bad}: {error}");
+        }
+        assert_eq!(
+            split_key("gemini@lab").unwrap(),
+            ("gemini".to_owned(), Some("lab".to_owned()))
+        );
+        assert!(split_key("gemini@").is_err());
+    }
+
+    fn account_dir(root: &Path, agent: &str, name: &str) -> Account {
+        std::fs::create_dir_all(root.join(agent).join(format!("{agent}-{name}"))).unwrap();
+        Account {
+            agent: agent.to_owned(),
+            name: name.to_owned(),
+            dir: root.join(agent).join(format!("{agent}-{name}")),
+        }
+    }
+
+    #[test]
+    fn an_account_reads_its_own_folder_unless_its_keys_say_otherwise() {
+        let root = std::env::temp_dir().join(format!("usage-accounts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude = account_dir(&root, "claude", "work");
+        let codex = account_dir(&root, "codex", "client-2");
+        let gemini = account_dir(&root, "gemini", "lab");
+        let env = env_of(&[
+            ("HOME", "/home/dev-a"),
+            ("USAGE_CACHE", "/default-cache.json"),
+            ("USAGE_FETCH", "/f.sh"),
+            ("CODEX_HOME", "/default-codex"),
+            ("USAGE_SOURCE_gemini", "none"),
+        ]);
+        let of = |account: &Account| AgentSource::for_account(&env, account.clone()).unwrap();
+        assert_eq!(
+            of(&claude).source,
+            Source::ClaudeCache(claude.dir.join("usage-cache.json"))
+        );
+        assert_eq!(of(&claude).fetch, Some("/f.sh".into()));
+        assert_eq!(
+            of(&codex).source,
+            Source::CodexSessions(codex.dir.join("sessions"))
+        );
+        assert_eq!(of(&gemini).source, Source::None);
+        let own = env_of(&[
+            ("USAGE_SOURCE_codex_client_2", "codex-sessions"),
+            ("USAGE_SOURCE_claude_work", "json:/w.json"),
+            ("USAGE_FETCH_claude_work", "/w.sh"),
+        ]);
+        let of = |account: &Account| AgentSource::for_account(&own, account.clone()).unwrap();
+        assert_eq!(of(&claude).source, Source::Json("/w.json".into()));
+        assert_eq!(of(&claude).fetch, Some("/w.sh".into()));
+        assert_eq!(
+            of(&codex).source,
+            Source::CodexSessions(codex.dir.join("sessions")),
+            "a bare codex-sessions names the account's own"
+        );
+        assert_eq!(of(&gemini).source, Source::Unset);
+        let bad = env_of(&[("USAGE_SOURCE_claude_work", "s3://x")]);
+        assert!(
+            AgentSource::for_account(&bad, claude.clone())
+                .unwrap_err()
+                .starts_with("USAGE_SOURCE_claude_work")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_accounts_fetch_runs_with_its_folder_and_its_own_credentials() {
+        let root = std::env::temp_dir().join(format!("usage-fetch-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude = account_dir(&root, "claude", "work");
+        let codex = account_dir(&root, "codex", "home");
+        let env = env_of(&[]);
+        let source = AgentSource::for_account(&env, claude.clone()).unwrap();
+        let cache = claude.dir.join("usage-cache.json").display().to_string();
+        let dir = claude.dir.display().to_string();
+        assert_eq!(
+            source.fetch_env(),
+            (
+                vec![
+                    ("CLAUDE_CONFIG_DIR".to_owned(), dir.clone()),
+                    ("USAGE_CACHE".to_owned(), cache.clone())
+                ],
+                vec!["USAGE_CREDENTIALS_FILE"]
+            )
+        );
+        std::fs::write(claude.dir.join(".credentials.json"), "{}").unwrap();
+        let credentials = claude.dir.join(".credentials.json").display().to_string();
+        assert_eq!(
+            source.fetch_env().0,
+            [
+                ("CLAUDE_CONFIG_DIR".to_owned(), dir),
+                ("USAGE_CACHE".to_owned(), cache),
+                ("USAGE_CREDENTIALS_FILE".to_owned(), credentials)
+            ]
+        );
+        let codex = AgentSource::for_account(&env, codex.clone()).unwrap();
+        assert_eq!(codex.fetch_env().0[0].0, "CODEX_HOME");
+        assert_eq!(
+            AgentSource::from_env(&env_of(&[("HOME", "/h")]), "claude")
+                .unwrap()
+                .fetch_env(),
+            (Vec::new(), Vec::new())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn caps_cooldowns_and_the_pool_count_per_account() {
+        let dir = std::env::temp_dir().join(format!("usage-pool-accounts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("accounts");
+        let work = account_dir(&root, "claude", "work");
+        let home = account_dir(&root, "claude", "home");
+        account_dir(&root, "codex", "gone");
+        std::fs::remove_dir(root.join("codex/codex-gone")).unwrap();
+        let cache = |account: &Account, five: u32| {
+            std::fs::write(
+                account.dir.join("usage-cache.json"),
+                format!(
+                    r#"{{"timestamp": {}, "data": {{"fiveHourPercent": {five}, "weeklyPercent": 10}}}}"#,
+                    now_ms()
+                ),
+            )
+            .unwrap();
+        };
+        cache(&work, 65);
+        cache(&home, 75);
+        std::fs::create_dir_all(dir.join("state/model-cooldown")).unwrap();
+        let state = dir.join("state").display().to_string();
+        let root_text = root.display().to_string();
+        let env = env_of(&[
+            (
+                "TICK_MODELS",
+                "claude@work:opus claude@home:opus claude@home:sonnet codex@gone:gpt",
+            ),
+            ("AGENT_ACCOUNTS_DIR", &root_text),
+            ("HARNESS_STATE", &state),
+            ("MAX_SLOTS", "8"),
+        ]);
+        let both = pool(&env).unwrap();
+        let caps: Vec<(String, u32)> = both
+            .agents
+            .iter()
+            .map(|usage| (usage.key(), usage.cap))
+            .collect();
+        assert_eq!(
+            caps,
+            [
+                ("claude@work".to_owned(), 4),
+                ("claude@home".to_owned(), 1),
+                ("codex@gone".to_owned(), 0)
+            ]
+        );
+        assert_eq!(
+            both.pool_cap, 5,
+            "each account's cap counts toward the pool"
+        );
+        assert!(
+            matches!(&both.agents[2].reading, Freshness::Unreadable(why) if why.contains("codex-gone")),
+            "{:?}",
+            both.agents[2].reading
+        );
+        std::fs::write(dir.join("state/model-cooldown/claude@home:opus"), "").unwrap();
+        assert_eq!(
+            pool(&env).unwrap().pool_cap,
+            5,
+            "claude@home:sonnet still runs"
+        );
+        std::fs::write(dir.join("state/model-cooldown/claude@home:sonnet"), "").unwrap();
+        let cooled = pool(&env).unwrap();
+        assert_eq!(
+            (cooled.pool_cap, cooled.cooling),
+            (4, vec!["claude@home".to_owned()])
+        );
+        std::fs::remove_dir_all(dir.join("state/model-cooldown")).unwrap();
+        std::fs::create_dir_all(dir.join("state/accounts")).unwrap();
+        std::fs::write(
+            dir.join("state/accounts/claude@work.json"),
+            r#"{"state": "signed_out", "method": null, "expires_at": null, "checked_at": 1}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("state/accounts/claude@home.json"),
+            r#"{"state": "unknown", "method": null, "expires_at": null, "checked_at": 1}"#,
+        )
+        .unwrap();
+        let signed_out = pool(&env).unwrap();
+        assert_eq!(
+            (signed_out.agents[0].cap, signed_out.agents[1].cap),
+            (0, 1),
+            "signed out allows nothing; unknown blocks nothing"
+        );
+        assert_eq!(signed_out.pool_cap, 1);
+        let state_path = dir.join("state");
+        let candidates = [
+            Candidate {
+                entry: Entry::parse("claude@work:opus", "claude").unwrap(),
+                cooling: cooling(
+                    &state_path,
+                    &Entry::parse("claude@work:opus", "claude").unwrap(),
+                    Duration::from_secs(60),
+                ),
+                cap: signed_out.agents[0].cap,
+                running: 0,
+            },
+            Candidate {
+                entry: Entry::parse("claude@home:opus", "claude").unwrap(),
+                cooling: false,
+                cap: signed_out.agents[1].cap,
+                running: 0,
+            },
+        ];
+        assert_eq!(
+            pick(&candidates, &[], false).map(ToString::to_string),
+            Some("claude@home:opus".to_owned()),
+            "a signed-out account is passed over for the next"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

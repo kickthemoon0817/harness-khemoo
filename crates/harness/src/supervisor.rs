@@ -792,14 +792,25 @@ pub fn room(env: Lookup, paths: &Paths, entry: &Entry) -> Result<(), String> {
     if usage::cooling(&paths.state, entry, cooldown) {
         return Err(format!("{entry} is cooling down on its usage limit"));
     }
-    let agent = usage::agent_usage(env, &settings, &entry.agent, false)?;
+    let agent = usage::agent_usage(
+        env,
+        &settings,
+        &entry.agent,
+        entry.account.as_deref(),
+        false,
+    )?;
+    let key = entry.key();
+    if agent
+        .sign_in
+        .as_ref()
+        .is_some_and(|sign_in| sign_in.state == crate::accounts::SignState::SignedOut)
+    {
+        return Err(format!("{key} is signed out"));
+    }
     match usage::verdict(&settings, &agent) {
         usage::Verdict::Go => Ok(()),
-        usage::Verdict::Stop => Err(format!(
-            "{}'s windows are at their stand-down point",
-            entry.agent
-        )),
-        usage::Verdict::Unknown => Err(format!("{} has no fresh usage reading", entry.agent)),
+        usage::Verdict::Stop => Err(format!("{key}'s windows are at their stand-down point")),
+        usage::Verdict::Unknown => Err(format!("{key} has no fresh usage reading")),
     }
 }
 

@@ -3,8 +3,8 @@
 //! The runner starts each tick, a local agent CLI or `fleet dispatch`, as its own child and records
 //! it in `<state>/locks/slot<n>.tick` as `pid starttime bootid agent model kind` until it ends, so a
 //! slot holds one tick at most; the supervisor records its own in `<state>/locks/supervisor.tick`,
-//! read as slot 0. A tick is live while this boot's `/proc/<pid>/stat` gives the same start time,
-//! which a reused pid does not. Only `stat` is read, never the process's environment or
+//! read as slot 0. A tick on an account records its agent as `agent@account`. A tick is live while
+//! this boot's `/proc/<pid>/stat` gives the same start time, which a reused pid does not. Only `stat` is read, never the process's environment or
 //! descriptors: an agent CLI that marks itself non-dumpable, as the release Codex CLI does, keeps
 //! both private.
 
@@ -26,8 +26,8 @@ const LOCKS_LIMIT: usize = 4096;
 
 #[derive(clap::Args)]
 #[command(after_help = "\
-Prints one tick a line, oldest first: pid, age in seconds, slot, agent, model and kind (work, lane,
-landing or supervisor). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
+Prints one tick a line, oldest first: pid, age in seconds, slot, agent (agent@account for a tick on
+an account), model and kind (work, lane, landing or supervisor). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
 pub struct Args {
     /// Print a JSON document instead of lines.
     #[arg(long)]
@@ -74,8 +74,17 @@ pub struct Tick {
     pub age_s: u64,
     pub slot: u32,
     pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub model: String,
     pub kind: Kind,
+}
+
+impl Tick {
+    /// `agent`, or `agent@account`: what its usage cap counts it toward.
+    pub fn key(&self) -> String {
+        crate::usage::key_of(&self.agent, self.account.as_deref())
+    }
 }
 
 #[derive(Serialize)]
@@ -115,7 +124,7 @@ pub fn run(args: &Args) -> ExitCode {
                 tick.pid,
                 tick.age_s,
                 tick.slot,
-                tick.agent,
+                tick.key(),
                 tick.model,
                 tick.kind.as_str()
             );
@@ -136,6 +145,7 @@ struct Record {
     start_ticks: u64,
     boot_id: String,
     agent: String,
+    account: Option<String>,
     model: String,
     kind: Kind,
 }
@@ -143,11 +153,20 @@ struct Record {
 impl Record {
     fn parse(text: &str) -> Option<Self> {
         let mut fields = text.split_whitespace();
+        let pid = fields.next()?.parse().ok().filter(|pid| *pid > 1)?;
+        let start_ticks = fields.next()?.parse().ok()?;
+        let boot_id = fields.next()?.to_owned();
+        let key = fields.next()?;
+        let (agent, account) = match key.split_once('@') {
+            Some((agent, account)) => (agent, Some(account.to_owned())),
+            None => (key, None),
+        };
         let record = Self {
-            pid: fields.next()?.parse().ok().filter(|pid| *pid > 1)?,
-            start_ticks: fields.next()?.parse().ok()?,
-            boot_id: fields.next()?.to_owned(),
-            agent: fields.next()?.to_owned(),
+            pid,
+            start_ticks,
+            boot_id,
+            agent: agent.to_owned(),
+            account,
             model: fields.next()?.to_owned(),
             kind: Kind::parse(fields.next()?)?,
         };
@@ -220,6 +239,7 @@ fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
                 age_s,
                 slot,
                 agent: record.agent,
+                account: record.account,
                 model: record.model,
                 kind: record.kind,
             }
@@ -293,9 +313,15 @@ mod tests {
                 start_ticks: 123_456,
                 boot_id: "b00t".to_owned(),
                 agent: "codex".to_owned(),
+                account: None,
                 model: "gpt-5.5".to_owned(),
                 kind: Kind::Lane,
             })
+        );
+        let on_account = Record::parse("4242 123456 b00t claude@work opus work").unwrap();
+        assert_eq!(
+            (on_account.agent.as_str(), on_account.account.as_deref()),
+            ("claude", Some("work"))
         );
     }
 
