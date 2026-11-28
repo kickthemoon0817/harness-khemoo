@@ -78,6 +78,25 @@ pub struct GitHubClient {
     gh_binary: String,
     timeout: Duration,
     token: Option<String>,
+    secrets: Vec<String>,
+}
+
+/// The GitHub tokens of the dashboard's own environment, which an error can echo too.
+pub fn environment_secrets() -> Vec<String> {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+/// The text with each secret value replaced, then every secret-looking value masked.
+pub fn scrub(secrets: &[String], text: &str) -> String {
+    let mut text = text.to_owned();
+    for secret in secrets {
+        text = text.replace(secret.as_str(), "[redacted]");
+    }
+    super::redact::redact(&text)
 }
 
 impl std::fmt::Debug for GitHubClient {
@@ -107,15 +126,19 @@ impl GitHubClient {
             gh_binary: gh_binary.to_owned(),
             timeout: Duration::from_secs(30),
             token: token.filter(|token| !token.is_empty()).map(str::to_owned),
+            secrets: token
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .chain(environment_secrets())
+                .collect(),
         })
     }
 
-    /// The text with every occurrence of the token replaced.
+    /// The text with the token, the environment's GitHub tokens and every secret-looking value
+    /// masked.
     pub fn redact(&self, text: &str) -> String {
-        match &self.token {
-            Some(token) => text.replace(token.as_str(), "[redacted]"),
-            None => text.to_owned(),
-        }
+        scrub(&self.secrets, text)
     }
 
     /// The variables set on top of the dashboard's environment for a `gh` (or gh-calling) child:
@@ -303,10 +326,12 @@ impl GitHubClient {
                     None => String::new(),
                 })
                 .collect();
-            return Err(GitHubError(self.redact(&format!(
+            // Masked before it is cut, so a cut cannot leave part of a secret behind.
+            let messages = self.redact(&messages.join("; "));
+            return Err(GitHubError(format!(
                 "GraphQL errors: {}",
-                head_chars(&messages.join("; "), 300)
-            ))));
+                head_chars(&messages, 300)
+            )));
         }
         Ok(document
             .get("data")
@@ -347,11 +372,9 @@ impl GitHubClient {
             let lines = split_lines(detail.trim());
             let message = lines.last().map_or_else(
                 || format!("exit {}", output.status),
-                |line| head_chars(line, 300).to_owned(),
+                |line| head_chars(&self.redact(line), 300).to_owned(),
             );
-            return Err(GitHubError(
-                self.redact(&format!("gh exit {}: {message}", output.status)),
-            ));
+            return Err(GitHubError(format!("gh exit {}: {message}", output.status)));
         }
         Ok(output.stdout)
     }

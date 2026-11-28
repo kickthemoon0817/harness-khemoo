@@ -453,7 +453,9 @@ fn publisher_keeps_its_own_cadence_whatever_the_source_intervals() {
     let collector = Arc::new(harness.collector_with(config, pinned()));
     let published = Arc::new(Mutex::new(0));
     let counter = Arc::clone(&published);
-    collector.start(Some(Box::new(move || *lock(&counter) += 1)), 1.0);
+    collector
+        .start(Some(Box::new(move || *lock(&counter) += 1)), 1.0)
+        .expect("starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     while *lock(&published) < 3 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -479,6 +481,14 @@ fn a_refresh_that_panics_is_stored_as_the_failure_and_the_loop_goes_on() {
     assert_eq!(*lock(&calls), 3);
     let github = &collector.snapshot()["sources"]["github"];
     assert_eq!(github["error"], "panic: boom");
+    let logged = lock(&collector.logged).clone();
+    assert_eq!(logged.len(), 3);
+    assert!(
+        logged
+            .iter()
+            .all(|line| line == "Dashboard refresh of github failed: boom"),
+        "{logged:?}"
+    );
     assert!(!github["fetched_at"].is_null());
 }
 
@@ -526,7 +536,79 @@ fn every_panel_has_data() {
         "harness off (left to its owner)"
     );
     assert_eq!(snapshot["machines"][0]["gpu"]["name"], "Example Device");
-    assert_eq!(snapshot["machines"][0]["gpu_processes"][0]["pid"], 4242);
+    assert_eq!(
+        snapshot["machines"][0]["gpu_processes"],
+        json!([{"pid": 4242, "used_mb": 512.0, "name": "python3", "container": null}])
+    );
+    let mut local_keys: Vec<&String> = snapshot["machines"][0]
+        .as_object()
+        .map(|map| map.keys().collect())
+        .unwrap_or_default();
+    local_keys.sort();
+    assert_eq!(
+        local_keys,
+        [
+            "age_s",
+            "card_note",
+            "connect_s",
+            "containers",
+            "gpu",
+            "gpu_processes",
+            "history",
+            "key",
+            "kind",
+            "load1",
+            "mem_total_mb",
+            "mem_used_mb",
+            "name",
+            "nproc",
+            "probe_error",
+            "sampled_at",
+            "signals",
+            "slot_count",
+            "slots",
+            "status",
+            "streak",
+            "upload_mb_s",
+        ]
+    );
+    let mut remote_keys: Vec<&String> = snapshot["machines"][1]
+        .as_object()
+        .map(|map| map.keys().collect())
+        .unwrap_or_default();
+    remote_keys.sort();
+    assert_eq!(
+        remote_keys,
+        [
+            "age_s",
+            "card_note",
+            "connect_s",
+            "containers",
+            "gpu",
+            "gpu_processes",
+            "history",
+            "key",
+            "kind",
+            "load1",
+            "mem_total_mb",
+            "mem_used_mb",
+            "name",
+            "nproc",
+            "preferred_rank",
+            "probe_age_s",
+            "probe_error",
+            "probe_stale",
+            "probed_at",
+            "sampled_at",
+            "signals",
+            "slot_count",
+            "slots",
+            "status",
+            "streak",
+            "upload_mb_s",
+            "upload_timed_out",
+        ]
+    );
 
     let leases = &snapshot["leases"];
     assert_eq!(leases["available"], true);
@@ -626,7 +708,20 @@ fn every_panel_has_data() {
         harness["tick_models"],
         json!(["claude-opus-5-5", "claude-sonnet-5-2"])
     );
-    assert_eq!(harness["cooling_models"][0]["model"], "claude-sonnet-5-2");
+    let cooling = harness["cooling_models"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(cooling.len(), 1);
+    assert_eq!(
+        (&cooling[0]["model"], &cooling[0]["label"]),
+        (&json!("claude-sonnet-5-2"), &json!("Sonnet 5.2"))
+    );
+    assert!(
+        cooling[0]["remaining_s"]
+            .as_i64()
+            .is_some_and(|remaining| remaining > 0)
+    );
     assert_eq!(harness["work_waiting"], true);
 }
 
@@ -875,6 +970,9 @@ fn restart_serves_the_saved_github_read() {
         snapshot["queue"]["counts"]["claimable"],
         loaded.snapshot["queue"]["counts"]["claimable"]
     );
+    if cfg!(target_os = "linux") {
+        assert_eq!(snapshot["queue"]["counts"]["claimable"], 3);
+    }
     assert_eq!(
         snapshot["queue"]["age_s"], 0,
         "{}",
@@ -1012,7 +1110,7 @@ fn reads_a_live_holder_and_waiter() {
     use super::buildlocks::BuildLockReader;
     use super::procs::ProcessScanner;
     if !has_lslocks() {
-        eprintln!("skipped: needs lslocks");
+        eprintln!("SKIP: lslocks cannot see this namespace's locks");
         return;
     }
     let mut harness = FixtureHarness::new();
@@ -1060,7 +1158,7 @@ fn reads_a_live_holder_and_waiter() {
 fn the_collector_builds_a_live_flow_and_the_page_draws_it() {
     let mut harness = FixtureHarness::new();
     if !has_lslocks() {
-        eprintln!("skipped: needs lslocks");
+        eprintln!("SKIP: lslocks cannot see this namespace's locks");
         return;
     }
     let tick_pid = harness.start_fake_tick(2464, 3, "sleep 30");
@@ -1424,17 +1522,13 @@ fn the_collector_reads_no_optional_source_and_the_page_leaves_their_panels_out()
     config.usage_cache = home.join("usage-cache.json");
     config.crontab_command = strings(&["true"]);
     let collector = Collector::new(config, None, pinned());
-    super::command::RECORDED.with(|recorded| recorded.borrow_mut().clear());
     collector.refresh_local_sample_in_place();
     collector.refresh_remote_probes_in_place();
     let snapshot = collector.snapshot();
-    let commands: Vec<String> = super::command::RECORDED.with(|recorded| {
-        recorded
-            .borrow()
-            .iter()
-            .map(|argv| argv[0].clone())
-            .collect()
-    });
+    let commands: Vec<String> = lock(&collector.recorded)
+        .iter()
+        .map(|argv| argv[0].clone())
+        .collect();
     assert!(snapshot["leases"].is_null());
     assert!(snapshot["health"]["stalls"].is_null());
     let mut sources: Vec<&String> = snapshot["sources"]
@@ -1651,6 +1745,14 @@ fn labels_come_from_the_env_file_and_the_flag_overrides_the_queue_label() {
 
 #[test]
 fn an_empty_gh_repo_is_derived_through_instance_lib() {
+    if !super::checkout_of_binary()
+        .is_some_and(|checkout| checkout.join("lib/instance.sh").is_file())
+    {
+        eprintln!(
+            "SKIP an_empty_gh_repo_is_derived_through_instance_lib: the test binary is outside its checkout (CARGO_TARGET_DIR)"
+        );
+        return;
+    }
     let directory = TempDir::new();
     let root = directory.path();
     let target = root.join("target-repo");
@@ -2050,7 +2152,7 @@ fn numbers_outside_fleets_range_are_a_source_error() {
     let fleet = FleetFixture::new();
     fleet.read(None, 0);
     let huge = "1".to_owned() + &"0".repeat(400);
-    let cases: [(&[&str], String, &str); 5] = [
+    let cases: [(&[&str], String, &str); 7] = [
         (
             &["status", "metrics", "load"],
             format!("[{huge}, 0, 0]"),
@@ -2072,6 +2174,16 @@ fn numbers_outside_fleets_range_are_a_source_error() {
             "cpu_percent",
         ),
         (&["status", "device", "cpus"], huge.clone(), "out of range"),
+        (
+            &["status", "metrics", "cpu_percent"],
+            "100000000000000000000".to_owned(),
+            "cpu_percent",
+        ),
+        (
+            &["status", "metrics", "cpu_percent"],
+            "1e20".to_owned(),
+            "cpu_percent",
+        ),
     ];
     for (keys, value, expected) in cases {
         let mut document = status_document();
@@ -2183,7 +2295,7 @@ fn a_partial_result_shows_each_device_error() {
 /// The dashboard's server on a free port for one test, published once, with a known access
 /// token.
 struct Served {
-    _harness: FixtureHarness,
+    harness: FixtureHarness,
     server: Arc<Server>,
     port: u16,
 }
@@ -2237,7 +2349,7 @@ fn serve(harness: FixtureHarness) -> Served {
         });
     });
     Served {
-        _harness: harness,
+        harness,
         server,
         port,
     }
@@ -2345,6 +2457,15 @@ fn serves_page_json_and_health_on_loopback_without_the_github_token() {
     assert!(page.contains(&format!("href=\"/api/state?t={ACCESS_TOKEN}\"")));
     assert!(!state.body.contains(ACCESS_TOKEN));
     assert_eq!(snapshot["repo"], "example/repo");
+    // The JSON's object keys come sorted: the map serde_json keeps is ordered by key.
+    let top: Vec<&String> = snapshot
+        .as_object()
+        .map(|map| map.keys().collect())
+        .unwrap_or_default();
+    assert!(state.body.starts_with(&format!("{{\"{}\":", top[0])));
+    let mut sorted = top.clone();
+    sorted.sort();
+    assert_eq!(top, sorted);
     let counts = &snapshot["queue"]["counts"];
     if cfg!(target_os = "linux") {
         assert_eq!(
@@ -2442,6 +2563,11 @@ fn conditional_get_and_gzip_variants() {
     let port = served.port;
     let host = format!("127.0.0.1:{port}");
     let query = format!("?t={ACCESS_TOKEN}");
+    let published = request(port, &format!("/api/state{query}"), Some(&host), &[]).body;
+    // Every source fails from here on: a GET that collected would show it.
+    std::fs::write(served.harness.home.join("gh-fail"), "").ok();
+    std::fs::remove_file(served.harness.home.join("bin/resource-status")).ok();
+    std::fs::remove_file(served.harness.home.join("usage-cache.json")).ok();
     for path in ["/", "/api/state", "/api/sections", "/dashboard.js"] {
         let plain = request(port, &format!("{path}{query}"), Some(&host), &[]);
         assert_eq!(plain.status, 200);
@@ -2509,6 +2635,10 @@ fn conditional_get_and_gzip_variants() {
             "{accepted}"
         );
     }
+    assert_eq!(
+        request(port, &format!("/api/state{query}"), Some(&host), &[]).body,
+        published
+    );
 }
 
 #[test]
@@ -2569,13 +2699,31 @@ fn sections_track_content_and_require_the_token() {
         super::text::sha256_hex(body.body.as_bytes()),
         before["ticks"].as_str().unwrap_or_default()
     );
-    let names: Vec<&String> = before.keys().collect();
-    let machine_positions: Vec<usize> = index
-        .body
-        .match_indices("\"machine-")
-        .map(|(position, _)| position)
+    // The index lists the machines in the page's order, which a sorted map would lose.
+    let state: Value =
+        serde_json::from_str(&request(port, &format!("/api/state{query}"), Some(&host), &[]).body)
+            .expect("state JSON");
+    let expected: Vec<String> = state["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|machine| {
+            format!(
+                "machine-{}",
+                super::text::sha256_hex(machine["key"].as_str().unwrap_or_default().as_bytes())
+            )
+        })
         .collect();
-    assert!(machine_positions.windows(2).all(|pair| pair[0] < pair[1]) && !names.is_empty());
+    let mut listed: Vec<(usize, String)> = expected
+        .iter()
+        .filter_map(|name| Some((index.body.find(&format!("\"{name}\""))?, name.clone())))
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(expected.len() >= 2);
 
     let mut snapshot: Value =
         serde_json::from_str(&request(port, &format!("/api/state{query}"), Some(&host), &[]).body)
@@ -2608,4 +2756,115 @@ fn sections_track_content_and_require_the_token() {
     .body;
     assert!(header.contains("different/repo [redacted]"));
     assert!(!header.contains(FAKE_TOKEN));
+}
+
+#[test]
+fn a_token_cut_by_an_error_message_leaves_no_part_behind() {
+    let harness = FixtureHarness::new();
+    let gh = harness.home.join("bin/gh-straddle");
+    let padding = "x".repeat(290);
+    write_script(
+        &gh,
+        &format!("#!/usr/bin/env bash\necho \"{padding} $GH_TOKEN\" >&2\nexit 1\n"),
+    );
+    let counter = harness.home.join("bin/count-straddle");
+    write_script(
+        &counter,
+        &format!(
+            "#!/usr/bin/env bash\necho \"$GH_TOKEN {}\" >&2\nexit 3\n",
+            "y".repeat(190)
+        ),
+    );
+    let mut config = harness.config();
+    config.queue_depth_command = vec![counter.display().to_string()];
+    let github =
+        GitHubClient::new("example/repo", Some(FAKE_TOKEN), &gh.display().to_string()).ok();
+    let collector = Collector::new(config, github, pinned());
+    collector.refresh_github_in_place();
+    collector.refresh_claimable_in_place();
+    let snapshot = collector.snapshot();
+    for error in [
+        &snapshot["queue"]["error"],
+        &snapshot["queue"]["claimable_sh"]["error"],
+    ] {
+        let error = error.as_str().unwrap_or_default();
+        assert!(!error.is_empty());
+        for fragment in ["ghp_", "FAKEtoken", "0123456789"] {
+            assert!(!error.contains(fragment), "{fragment} in {error}");
+        }
+    }
+}
+
+#[test]
+fn a_symlinked_state_directory_reads_as_its_target() {
+    let directory = TempDir::new();
+    let home = directory.path().join("home");
+    let real = directory.path().join("real-state");
+    std::fs::create_dir_all(&home).ok();
+    std::fs::create_dir_all(&real).ok();
+    std::os::unix::fs::symlink(&real, home.join("state")).ok();
+    let config = config_of(&home, &[]);
+    assert_eq!(config.state_dir(), real);
+    assert_eq!(config.data_dir, real.join("dashboard"));
+}
+
+#[test]
+fn harness_bin_from_the_env_file_expands_home_and_a_tilde() {
+    let harness = FixtureHarness::new();
+    let env_file = harness.home.join("instance/harness.env");
+    let original = std::fs::read_to_string(&env_file).unwrap_or_default();
+    for (line, expected) in [
+        ("HARNESS_BIN=$HOME/bin/harness", "/home/someone/bin/harness"),
+        ("HARNESS_BIN=~/bin/harness", "/home/someone/bin/harness"),
+    ] {
+        std::fs::write(
+            &env_file,
+            format!("{original}{line}\nQUEUE_DEPTH_CMD=\"$HARNESS_BIN claimable\"\n"),
+        )
+        .ok();
+        let config = config_of(&harness.home, &[("HOME", "/home/someone".to_owned())]);
+        assert_eq!(config.harness_bin, expected, "{line}");
+        assert_eq!(
+            config.queue_depth_command,
+            [expected, "claimable"],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn the_last_of_a_repeated_option_wins() {
+    let parsed = args(&[
+        "--port",
+        "1",
+        "--port",
+        "2",
+        "--refresh",
+        "5",
+        "--refresh",
+        "7",
+    ]);
+    assert_eq!((parsed.port, parsed.refresh), (Some(2), 7));
+}
+
+#[test]
+fn a_host_that_reads_as_an_ssh_option_is_refused() {
+    let harness = FixtureHarness::new();
+    let collector = harness.collector();
+    let error = collector
+        .probe_host("-oProxyCommand=touch /tmp/x", "true")
+        .err()
+        .unwrap_or_default();
+    assert!(error.contains("refusing host"), "{error}");
+}
+
+#[test]
+fn the_server_listens_on_loopback_only() {
+    let listener = super::bind_loopback(0).expect("binds");
+    let address = listener.local_addr().expect("an address");
+    assert!(address.ip().is_loopback());
+    assert_eq!(
+        address.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
 }

@@ -23,7 +23,6 @@ const STATE_VERSION: i64 = 1;
 #[derive(Default)]
 struct Memory {
     cards: BTreeMap<String, Value>,
-    order: Vec<String>,
     edges: BTreeSet<String>,
     transitions: Vec<Value>,
     has_baseline: bool,
@@ -31,9 +30,6 @@ struct Memory {
 
 impl Memory {
     fn set_card(&mut self, key: &str, record: Value) {
-        if !self.cards.contains_key(key) {
-            self.order.push(key.to_owned());
-        }
         self.cards.insert(key.to_owned(), record);
     }
 }
@@ -186,12 +182,14 @@ impl FlowTracker {
             }
             memory.set_card(&key, record);
         }
-        let gone: Vec<String> = memory
-            .order
-            .iter()
+        // In issue order, so the trail reads the same before and after a restart.
+        let mut gone: Vec<String> = memory
+            .cards
+            .keys()
             .filter(|key| !seen.contains(*key))
             .cloned()
             .collect();
+        gone.sort_by_key(|key| (key.parse::<i64>().unwrap_or(i64::MAX), key.clone()));
         for key in gone {
             let label = memory.cards.get(&key).map(label_of).unwrap_or_default();
             let issue = key
@@ -200,7 +198,6 @@ impl FlowTracker {
             let entry = transition(&issue, label, Value::String("off the board".to_owned()));
             memory.transitions.insert(0, entry);
             memory.cards.remove(&key);
-            memory.order.retain(|kept| *kept != key);
             changed = true;
         }
         let mut edge_keys = BTreeSet::new();

@@ -59,8 +59,10 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 if p=$(running_pid); then echo "already running (pid $p): $(running_url)"; exit 0; fi
-mkdir -p "$DATA"
-chmod 700 "$DATA"
+mkdir -p "$DATA" || exit 1
+# The pid and URL files hold the access token: never write them where another user could.
+[ -d "$DATA" ] && [ -O "$DATA" ] || { echo "dashboard.sh: $DATA is not a directory of this user's" >&2; exit 1; }
+chmod 700 "$DATA" || exit 1
 rm -f "$URLFILE"
 setsid nohup "$HARNESS_BIN" dashboard --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
   >> "$LOG" 2>&1 < /dev/null &

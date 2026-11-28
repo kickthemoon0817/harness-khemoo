@@ -208,7 +208,7 @@ impl IssueQueue {
             }
         }
         let candidates = groups.remove("claimable").unwrap_or_default();
-        let (mut claimable, mut held) =
+        let (mut claimable, held) =
             self.apply_first_gate(candidates, first_claimable_outside_queue);
         claimable.sort_by_key(|issue| {
             (
@@ -218,7 +218,6 @@ impl IssueQueue {
             )
         });
         groups.insert("claimable".to_owned(), claimable);
-        held.extend(groups.remove("held").unwrap_or_default());
         groups.insert("held".to_owned(), held);
         for name in ["running", "held", "operator", "signoff", "other"] {
             if let Some(group) = groups.get_mut(name) {
