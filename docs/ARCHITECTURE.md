@@ -29,7 +29,7 @@ Ordered cheapest-first because it runs every couple of minutes:
 3. Count held slot locks. If none are free, exit — no API calls at all.
 4. Refresh usage telemetry only if the cache is older than `USAGE_REFRESH_AFTER`.
 5. Map utilization to a slot cap.
-6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `libexec/claimable.sh`).
+6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `$HARNESS_BIN claimable`).
 7. `spawn = clamp(allowed − busy, 0, unclaimed)`, plus a rate-limited heartbeat when the queue
    is empty.
 

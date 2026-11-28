@@ -2,4 +2,6 @@
 
 pub mod claimable;
 pub mod dashboard;
+mod gh;
+mod home;
 pub mod lint;

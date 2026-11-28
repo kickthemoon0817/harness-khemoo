@@ -40,7 +40,7 @@ only the keys it uses. It expands no `$` text except these names, as `$NAME` or 
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
 `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
 `WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
-empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `libexec/claimable.sh`, for its queue count,
+empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `$HARNESS_BIN claimable`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
@@ -181,7 +181,7 @@ to count lane issues. The launcher and the dashboard recognise a landing tick by
 
 ## Lint rules
 
-`libexec/public-record-lint.py` always applies the core rules: `harness-path` (any path under
+`"$HARNESS_BIN" lint` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
 `harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
 the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these
@@ -205,7 +205,10 @@ The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else 
 - `version_words`: words after which a dotted quad reads as a version rather than an address. They
   are added to `v` and `version`.
 - `labels`: more labels to warn on in prose.
-- `rules`: each entry needs a non-empty `id`, `pattern` (a Python regex) and `hint`. `blocking`
+- `rules`: each entry needs a non-empty `id`, `pattern` and `hint`. A pattern is a regex in the syntax of
+  Rust's `regex` crate, which runs in linear time. Each of its top-level alternatives may open with
+  look-behinds of a fixed width (`(?<![\w./-])`) and close with look-aheads (`(?!kit\.log\b)`);
+  look-around anywhere else and backreferences do not compile. `blocking`
   defaults to true, and false makes the rule a warning. `prose` defaults to false. A prose rule is
   skipped inside a closed fenced code block, and every other rule applies there too. A rule with a
   core rule's `id` replaces that core rule.
