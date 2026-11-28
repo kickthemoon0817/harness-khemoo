@@ -93,13 +93,13 @@ usage windows allow (below); when an entry's agent prints its usage-limit messag
 An agent name is 1 to 32 of `a-z`, `0-9` and `_`.
 
 Three agents run locally, each with the composed prompt on stdin, never in argv. `agy` is the
-Antigravity CLI, which replaced Gemini CLI for Google-account users.
+Antigravity CLI, Google's agent CLI for Google-account sign-ins; Gemini CLI is not supported.
 
 | Agent | Command line | `AGENT_FLAGS_<agent>` default | `AGENT_LIMIT_RE_<agent>` default |
 |---|---|---|---|
 | `claude` | `$AGENT_BIN_claude -p --model <model> <flags>` | `--dangerously-skip-permissions` | `You've (reached\|hit) your [^.]{0,40}limit` |
 | `codex` | `$AGENT_BIN_codex exec --model <model> <flags> -` | `--dangerously-bypass-approvals-and-sandbox` | `You've hit your usage limit\|rate_limit_reached` |
-| `agy` | `$AGENT_BIN_agy --model <model> --input-format stream-json --output-format stream-json <flags>`, the prompt as one stream-json line | `--dangerously-skip-permissions` | `quota\|RESOURCE_EXHAUSTED\|rate.?limit\|429\|exhausted\|credits`, against its ERROR result's error |
+| `agy` | `$AGENT_BIN_agy --model <model> --input-format stream-json --output-format stream-json <flags>`, the prompt as one stream-json line | `--dangerously-skip-permissions` | `RESOURCE_EXHAUSTED\|quota\|rate.?limit\|\b429\b`, against its ERROR result's error |
 
 `AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
 is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
@@ -256,12 +256,17 @@ another agent as a sub-agent, and either would otherwise sign in as the default 
 |---|---|
 | `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `AWS_BEARER_TOKEN_BEDROCK` |
 | `codex` | `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE` |
-| `agy` | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and Google's application-default `GOOGLE_APPLICATION_CREDENTIALS` |
+| `agy` | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_LOCATION` |
+| Google SDKs | `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `CLOUDSDK_CONFIG`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` |
 | the harness | `USAGE_CREDENTIALS_FILE`, which may name the default account's credentials file; an account's fetch gets its folder's own instead, when there is one |
 
-The list was read from Claude Code 2.1.332 and Codex 0.155.1, and from the documentation of agy
-1.5.19; a variable a later release adds is not on it. The supervisor on an account takes none of them into its cut-down
-environment either. An account signed in with an API key keeps that key in its folder.
+The list was read from Claude Code 2.1.332 and Codex 0.155.1, from the documentation of agy 1.5.19,
+and from what Google's SDKs and gcloud read; a variable a later release adds is not on it. Unsetting
+them is defence in depth, not a boundary. An account's tick shares the user's session and home
+folder: an agy it starts still signs in through the OS keyring, and a Google SDK still finds
+`~/.config/gcloud/application_default_credentials.json`. The supervisor on an account takes none of
+them into its cut-down environment either. An account signed in with an API key keeps that key in
+its folder.
 
 **Entries.** `agent@account:model` names an account in `TICK_MODELS`, `LANE_MODEL`,
 `SUPERVISOR_MODEL` and `state/tick-model`, as in

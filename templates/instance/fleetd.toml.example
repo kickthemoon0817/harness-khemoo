@@ -50,8 +50,11 @@ TARGET_REPO = "/srv/checkout"
 [adapters.agy]
 preset = "agy"
 exe = "/home/dev/.local/bin/agy"
-args = ["--model", "{model}", "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions"]
-models = ["model-flash"]
+args = [
+    "--model", "{model}", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+]
+models = ["gemini-3.8-flash-low"]
 workdir_roots = ["/srv/checkout"]
 max_concurrent = 2
 timeout_s = 9000

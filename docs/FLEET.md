@@ -649,9 +649,18 @@ A preset grants the agent no permissions of its own. An unattended agent usually
 permission flag, and the operator adds it to `args` knowingly (agy's is
 `--dangerously-skip-permissions`). Every preset reads the prompt from stdin, which fleetd writes as
 the dispatch sent it. agy reads it only as stream-json, one NDJSON message a line, so a dispatch to
-the `agy` preset must send that line, `{"event":"user","message":{"content":"<prompt>"}}`; the
-harness's runner does. fleetd stays out of what an agent's stdin means: a transform there would be
-one more parser of untrusted text, and a wrapper script one more file the device must trust.
+the `agy` preset must send that line, `{"event":"user","message":{"content":"<prompt>"}}`. fleetd
+stays out of what an agent's stdin means: a transform there would be one more parser of untrusted
+text, and a wrapper script one more file the device must trust.
+
+**Name an agy adapter `agy`.** The harness knows an adapter only by its name, which fleet status
+reports, not by its preset, which only the device's config holds. It sends the stream-json line and
+reads agy's result for the adapter named `agy` and no other: an adapter of another name that runs
+agy gets a plain prompt, and every tick on it ends in agy's error.
+
+An adapter named after any agent but claude, codex or agy gets claude's and codex's limit messages
+by default. One that runs Gemini CLI, which the harness has no profile for, needs its own
+`AGENT_LIMIT_RE_<adapter>` in harness.env, or its usage limits fail its ticks without cooling them.
 
 Example:
 

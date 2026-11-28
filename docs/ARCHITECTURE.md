@@ -38,11 +38,10 @@ Ordered cheapest-first because it runs every couple of minutes:
 
 ### Runner (`tick.sh runner <max> <delay>`)
 
-Sleeps for its stagger, takes the first free slot via `flock`, and runs an agent CLI (Claude
-Code, Codex or agy, the Antigravity CLI) with the composed prompt on stdin, as one stream-json line
-for agy: the lane line, `prompts/tick-core.md`,
-then the instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is
-a normal outcome, not an error.
+Sleeps for its stagger, takes the first free slot via `flock`, and runs an agent CLI (Claude Code,
+Codex or agy, the Antigravity CLI) with the composed prompt on stdin, as one stream-json line for
+agy: the lane line, `prompts/tick-core.md`, then the instance's `prompts/tick.md`. If no slot is
+free it exits silently — losing the race is a normal outcome, not an error.
 
 The runner starts every tick as its own child and records it in its slot's
 `state/locks/slot<n>.tick`: pid, start time, agent (with its account, when it runs on one), model
