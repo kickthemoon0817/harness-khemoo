@@ -33,7 +33,7 @@ printf '%s\n' "$*" >> "$FAKE_ARGS"
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
-case "$ISSUE_LABEL" in ai) echo 5 ;; *) echo 0 ;; esac
+case "$ISSUE_LABEL" in ai) echo 5 ;; ai:ready) cat "$FAKE_READY" 2>/dev/null || echo 0 ;; *) echo 0 ;; esac
 EOF
 cat > "$H/fakebin/crontab" <<'EOF'
 #!/usr/bin/env bash
@@ -68,7 +68,7 @@ write_env 1
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" \
     FAKE_LANES="$H/lanes.txt" FAKE_ARGS="$H/args.txt" FAKE_SUP_PROMPT="$H/sup-prompt.txt" FAKE_SUP_ENV="$H/sup-env.txt" \
-    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json" FAKE_SUP_TICKS="$H/sup-ticks.txt" FAKE_SUP_CLAIM="$H/sup-claim.txt"
+    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json" FAKE_SUP_TICKS="$H/sup-ticks.txt" FAKE_READY="$H/ready.txt" FAKE_SUP_CLAIM="$H/sup-claim.txt"
 S="$H/state"; L="$S/locks"; LOG="$S/logs/allocator.log"; DLOG="$S/logs/directive.log"; SUP="$S/supervisor"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -123,6 +123,24 @@ usage 65
 launch
 check "width is clamped to the usage cap" '[ "$(ticks_run)" = 2 ] && grep -q "room=2 .*spawning 2$" "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
 usage 10
+
+# A full pool starts one landing tick past the width for an issue waiting for the merge slot; a
+# width of 0 starts nothing new, that landing tick included.
+echo 1 > "$FAKE_READY"
+flock -o "$L/slot1.lock" sleep 60 >/dev/null 2>&1 & holders+=("$!")
+until_ok bash -c "! flock -n '$L/slot1.lock' true"
+apply "{\"version\": 1, \"reason\": \"one at a time\", \"expires_at\": \"$(at 3600)\", \"width\": 1}"
+launch
+check "width 1 with its slot held: the landing tick still starts" \
+    'grep -q "landing tick: claim only" "$FAKE_LANES" && [ "$(ticks_run)" = 1 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+apply "{\"version\": 1, \"reason\": \"nothing new\", \"expires_at\": \"$(at 3600)\", \"width\": 0}"
+launch
+check "width 0: nothing starts, not even a landing tick" '[ "$(ticks_run)" = 0 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+kill "${holders[-1]}" 2>/dev/null; wait "${holders[-1]}" 2>/dev/null
+until_ok flock -n "$L/slot1.lock" true
+launch
+check "width 0 with every slot free: nothing starts" '[ "$(ticks_run)" = 0 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+echo 0 > "$FAKE_READY"
 
 # --- pause, wake_at and the human's pause --------------------------------------------------------
 apply "{\"version\": 1, \"reason\": \"hold off\", \"expires_at\": \"$(at 3600)\", \"pause\": {\"until\": \"$(at 1800)\", \"reason\": \"the base branch is red\"}}"

@@ -925,7 +925,8 @@ spawn=$(( width - busy ))
 # which can outlast the merge slot. With the pool full (no slot inside the width, or no agent with
 # room) and no young tick about to claim, one landing tick starts past the width for an issue
 # waiting for the slot.
-if [ "$spawn" -eq 0 ] && [ "$pool_cap" -gt 0 ] && { [ "$busy" -ge "$width" ] || [ "$room" -eq 0 ]; } && [ "$free" -gt 0 ] \
+# A directive's width 0 starts nothing new, a landing tick included.
+if [ "$spawn" -eq 0 ] && [ "$pool_cap" -gt 0 ] && [ "$d_width" != 0 ] && { [ "$busy" -ge "$width" ] || [ "$room" -eq 0 ]; } && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
     && ! awk '$6 == "landing" { found = 1 } END { exit !found }' <<<"$ticks"; then
     ready=0

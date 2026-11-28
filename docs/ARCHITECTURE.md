@@ -103,7 +103,7 @@ linted. A directive narrows or reorders what the configuration allows, never wid
 |---|---|---|
 | `pause` | no tick starts and no runner chains until `until` | ends at the directive's expiry |
 | `wake_at` | the launcher starts nothing until then | a wake event ends it early: a window reset, an operator's comment, the expiry nearing, the human lifting a pause |
-| `width` | at most this many ticks | clamped to the configured width, then to what the usage windows allow |
+| `width` | at most this many ticks; 0 starts nothing new, a landing tick included | clamped to the configured width, then to what the usage windows allow |
 | `models` | the entries to try, in this order | a subset or reordering of the configured list; any other entry is refused |
 | `focus`, `avoid` | a sentence on each tick's lane line | changes what a tick prefers, never what it may claim |
 | `notes` | one line to the tick working an issue, through `libexec/usage-ok.sh` | shown once per tick |
