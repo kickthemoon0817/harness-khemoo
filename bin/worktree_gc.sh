@@ -38,6 +38,17 @@ busy=$( { for p in /proc/[0-9]*; do readlink "$p/cwd" 2>/dev/null; done
             for c in $(rdocker "$r" ps -q 2>/dev/null); do rdocker "$r" inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$c" 2>/dev/null; done
           done
         } | grep "^$WT/" | sed "s|^$WT/||; s|/.*||" | sort -u)
+# A run queue mounts each arm's tree only while that arm runs, so between arms nothing above holds a tree a
+# later arm needs: a tree named by a live queue's command line or queue file is busy too.
+queued=$( for p in $(pgrep -f 'bin/arm_queue.sh' 2>/dev/null); do
+            args=$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null) || continue
+            q=$(sed -n 's/.*--queue \([^ ]*\).*/\1/p' <<<"$args")
+            pk=$(sed -n 's/.*--packet \([^ ]*\).*/\1/p' <<<"$args")
+            case "$q" in /*) ;; ?*) q="$pk/$q" ;; esac
+            q=${q//\$PK/$pk}; q=${q//\$P/$pk}
+            { echo "$args"; [ -r "$q" ] && cat "$q"; }
+          done | grep -oE "$WT/[^/ \"']+|(parent|base)-[0-9a-f]{7,}" | sed "s|^$WT/||" | sort -u)
+busy=$(printf '%s\n%s\n' "$busy" "$queued" | grep -v '^$' | sort -u)
 removed=()
 for path in "$WT"/*; do
   d=$(basename "$path"); [ -d "$path" ] && [ -e "$path/.git" ] || continue
