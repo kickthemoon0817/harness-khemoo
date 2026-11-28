@@ -31,6 +31,7 @@ infrastructure live in an instance directory that you own.
 
 ```bash
 git clone <this repo> ~/harness && cd ~/harness
+cargo build --release                   # target/release/harness, and fleet and fleetd
 cp -r templates/instance instance       # gitignored; this is your installation
 mv instance/harness.env.example instance/harness.env
 $EDITOR instance/harness.env            # TARGET_REPO and WORKTREE_ROOT at least
@@ -96,13 +97,12 @@ Devices and an Agent sessions panel. Unset, the harness runs on one host as abov
 tests/run.sh
 ```
 
-It runs every `tests/test_*.sh` and `tests/test_*.py`, plus any suites under `instance/tests/`.
-The shell suites need Linux: bash 4+, `flock`, `setsid` and `lslocks` (util-linux), `pgrep`
-(procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git` and `python3`. On another OS,
-run them in a container started with `--init`, so killed processes are reaped.
-`tests/test_fleet_e2e.sh` also needs `cargo`, to build the Rust workspace, and is skipped without it.
-The dashboard's tests are Rust tests (`cargo test -p harness`); they run anywhere and leave out the
-cases that need `/proc` and `lslocks` where those are missing.
+It builds the `harness` binary (unless `HARNESS_BIN` names one) and runs every `tests/test_*.sh`,
+plus any suites under `instance/tests/`. The shell suites need Linux: bash 4+, `flock`, `setsid` and
+`lslocks` (util-linux), `pgrep` (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git`
+and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
+reaped. The Rust tests (`cargo test`) cover the lint, the queue count, the dashboard and fleet; they
+run anywhere and leave out the cases that need `/proc` and `lslocks` where those are missing.
 
 ## Safety posture
 
