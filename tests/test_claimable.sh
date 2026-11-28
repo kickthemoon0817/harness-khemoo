@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Exercises bin/claimable.sh's priority gate with a fake gh that answers from fixture files.
+# Exercises `harness claimable`'s priority gate with a fake gh that answers from fixture files.
 set -u
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
-mkdir -p "$H/bin" "$H/state/locks" "$H/fake" "$H/fx"
-cp "$here/bin/claimable.sh" "$H/bin/claimable.sh"
+mkdir -p "$H/state/locks" "$H/fake" "$H/fx"
+: "${HARNESS_BIN:?run through tests/run.sh, which builds the harness binary}"
 # gh issue list --label L ... prints $H/fx/<L>.json (empty list when absent);
 # gh issue view N --json state prints OPEN unless $H/fx/closed.<N> exists; comments print nothing.
 cat > "$H/fake/gh" <<'EOF'
@@ -40,7 +39,7 @@ issue() {  # number, comma-separated labels, optional body
 plan() { local IFS=,; echo "[$*]" > "$FX/ai_plan.json"; }
 firsts() { local IFS=,; echo "[$*]" > "$FX/ai_first.json"; }
 lanes() { local IFS=,; echo "[$*]" > "$FX/ai_lane.json"; }
-count() { "$H/bin/claimable.sh"; }
+count() { "$HARNESS_BIN" claimable; }
 reset() { rm -f "$FX"/*; }
 
 reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan,ai:low)"
@@ -83,6 +82,18 @@ out=$(LANE_LABEL= count); check "with the lane off, a lane-labelled issue counts
 reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan)"
 mkdir -p "$H/st/locks"; echo "2 $$ 2026-09-28T00:00:00Z" > "$H/st/locks/claim.2"
 out=$(HARNESS_STATE="$H/st" count); check "a live local claim under HARNESS_STATE is left out" '[ "$out" = 1 ]' "$out"
+
+# The open queue issues, for the supervisor's queue event: a claim and its label leave the number
+# as it was, though the claimable count falls.
+reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan)" "$(issue 3 ai,ai:plan)"
+before=$(QUEUE_TOTAL_FILE="$H/total" count); total_before=$(cat "$H/total")
+plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan,ai:wip)" "$(issue 3 ai,ai:plan)"
+echo "2 $$ 2026-09-28T00:00:00Z" > "$H/st/locks/claim.2"
+after=$(HARNESS_STATE="$H/st" QUEUE_TOTAL_FILE="$H/total" count); total_after=$(cat "$H/total")
+check "QUEUE_TOTAL_FILE counts the open issues, a claimed and labelled one included" \
+    '[ "$before $total_before" = "3 3" ] && [ "$after $total_after" = "2 3" ]' "before=$before/$total_before after=$after/$total_after"
+rm -f "$H/st/locks/claim.2" "$H/total"
+out=$(count); check "without QUEUE_TOTAL_FILE nothing else is written" '[ ! -e "$H/total" ]' "$(ls "$H")"
 
 reset; touch "$FX/fail"
 out=$(count 2>/dev/null); rc=$?

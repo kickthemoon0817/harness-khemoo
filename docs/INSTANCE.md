@@ -2,7 +2,7 @@
 
 The core (`bin/`, `prompts/`) holds no project, host or device. Everything specific to one
 installation lives in its instance directory. The core reads that directory only through
-`bin/instance-lib.sh` (`harness_load` and `harness_hook`), and the dashboard and the lint read it
+`lib/instance.sh` (`harness_load` and `harness_hook`), and the dashboard and the lint read it
 the same way. `templates/instance/` is a working starting point, and `tests/fixtures/instance/`
 is the smallest complete one.
 
@@ -10,7 +10,7 @@ is the smallest complete one.
 
 | Name | Set by | Default |
 |---|---|---|
-| `HARNESS_HOME` | environment | the checkout that holds `bin/instance-lib.sh` |
+| `HARNESS_HOME` | environment | the checkout that holds `lib/instance.sh` |
 | `HARNESS_INSTANCE_DIR` | environment only | `$HARNESS_HOME/instance` (gitignored) |
 | `HARNESS_ENV` | environment only | `$HARNESS_INSTANCE_DIR/harness.env` |
 | `HARNESS_STATE` | environment or `harness.env` | `$HARNESS_HOME/state` |
@@ -29,17 +29,21 @@ skipped.
 `tick.sh` also exports `TARGET_REPO`, `WORKTREE_ROOT`, the lint's `PUBLIC_RECORD_RULES`,
 `PUBLIC_RECORD_PR_SECTIONS` and `PUBLIC_RECORD_ISSUE_SECTIONS`, and the label keys (`ISSUE_LABEL`,
 `WIP_LABEL`, `READY_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`, `LONG_LABEL`, `FIRST_LABEL`, `LOW_LABEL`,
-`LANE_LABEL`). None of them is secret. No other config key reaches a tick's environment unless
-`TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
-`TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
-`worktree_gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
+`LANE_LABEL`), and the agent and fleet keys (`TICK_AGENT`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
+`FLEET_CONFIG`). None of them is secret. No other config key reaches a tick's environment unless
+`TICK_EXPORTS` lists it. `GH_TOKEN` and `GITHUB_TOKEN` never do: `tick.sh` unexports both, whether
+the environment, `TICK_EXPORTS` or `hooks/env.sh` exported them, and passes `GH_TOKEN` only to the
+queue count. `pr-sweep.sh` and
+`worktree-gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
-command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`), split shell-style first,
-`$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`), those two and `$HOME`. A path key from the environment wins over the file's. An
-empty `GH_REPO` is derived through `bin/instance-lib.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
+command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
+`$HARNESS_HOME`, `$HARNESS_INSTANCE_DIR` and `$HARNESS_BIN`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
+`WORKTREE_ROOT`, `FLEET_CONFIG`), those three and `$HOME`. `$HARNESS_BIN` resolves as `lib/instance.sh`
+resolves it: the file's `HARNESS_BIN`, else the environment's, else `<home>/target/release/harness` when
+it is executable, else `harness` from `PATH`. A path key from the environment wins over the file's. An
+empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `$HARNESS_BIN claimable`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
@@ -49,6 +53,7 @@ and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 | `harness.env` | required, with `TARGET_REPO` and `WORKTREE_ROOT` set | the config; `templates/instance/harness.env.example` lists every key |
 | `prompts/tick.md` | required | the installation's section of every tick prompt |
 | `prompts/runbook.md`, `prompts/glossary.md`, `prompts/public-record.md` | optional | read by the tick when `tick.md` or the core prompt tells it to |
+| `prompts/supervisor.md` | optional | the installation's section of the supervisor's prompt (below) |
 | `lint_rules.json` | optional | the project's lint rules (below) |
 | `hooks/env.sh`, `hooks/hold`, `hooks/worktree-busy`, `hooks/worktree-remove` | optional | the hooks (below) |
 | `bin/` | optional | the instance's scripts, first on PATH |
@@ -56,15 +61,256 @@ and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 The instance is usable when the required files are readable, `TARGET_REPO` is a git checkout,
 `WORKTREE_ROOT` exists or its nearest existing parent is a writable directory, `GH_REPO` is set or
-derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is set, and `CLAUDE_BIN`
-resolves on the PATH. Until then the launcher starts nothing. It logs
-`instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log` at most once an
-hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, `CLAUDE_BIN`, models,
-lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
+derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is set, and each agent
+of the model list and the lane has a local profile whose `AGENT_BIN_<agent>` resolves on the PATH
+(with `FLEET_DISPATCH=1`, `FLEET_BIN` instead, and any agent), and the config sets none of the keys
+an older `harness.env` holds that the harness does not read (`CLAUDE_BIN`, `CLAUDE_FLAGS`,
+`TICK_AGENT_EXES`, `FIVE_*_AT`, `WEEK_*_AT`, `USAGE_TICK_STOP_WEEK_PCT`; `check` names the key to set
+instead). Until then the launcher starts nothing. It logs `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log`
+at most once an hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, the
+default agent, where ticks run, each agent's command line, models, lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
 `present but not readable (ignored)`), the hold state,
-and whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
-`bin/tick.sh`). It prints `missing: <item>` for each gap and exits 1, or prints `instance complete`
-and exits 0.
+whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
+`bin/tick.sh`), and `harness usage`'s report of each agent's windows and the pool's cap. With
+`FLEET_DISPATCH=1` it also runs `fleet status --json` under `FLEET_CHECK_TIMEOUT_S` (default 60 s)
+and prints each device, reachable with each agent's capacity or unreachable with fleet's error. It
+prints `missing: <item>` for each gap, including usage settings `harness usage` refuses and an agent
+that no reachable device offers (`FLEET_DEVICE`, when it names one), and exits 1, or prints
+`instance complete` and exits 0.
+
+## Agents
+
+`TICK_MODELS` is one priority list across agents, best first. Each entry is `agent:model`, or a bare
+model that `TICK_AGENT` (default `claude`) runs; a model whose name holds a colon needs its agent.
+`LANE_MODEL` takes the same form. A non-empty `$HARNESS_STATE/tick-model` replaces the list. Each
+tick runs on the first entry that is not cooling down and whose agent runs fewer ticks than its
+usage windows allow (below); when an entry's agent prints its usage-limit message within
+`CHAIN_MIN_TICK_S`, the entry cools down for `MODEL_COOLDOWN_S` (stamped
+`$HARNESS_STATE/model-cooldown/<agent>:<model>`) and the tick re-runs at once on the next entry.
+An agent name is 1 to 32 of `a-z`, `0-9` and `_`.
+
+Three agents run locally, each with the composed prompt on stdin, never in argv:
+
+| Agent | Command line | `AGENT_FLAGS_<agent>` default | `AGENT_LIMIT_RE_<agent>` default |
+|---|---|---|---|
+| `claude` | `$AGENT_BIN_claude -p --model <model> <flags>` | `--dangerously-skip-permissions` | `You've (reached\|hit) your [^.]{0,40}limit` |
+| `codex` | `$AGENT_BIN_codex exec --model <model> <flags> -` | `--dangerously-bypass-approvals-and-sandbox` | `You've hit your usage limit\|rate_limit_reached` |
+| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `TerminalQuotaError\|RESOURCE_EXHAUSTED\|exhausted your daily quota\|exhausted your capacity\|Quota exceeded\|status 429` |
+
+`AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
+is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
+the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. `AGENT_LIMIT_RE_<agent>`
+is an extended regex. For claude and codex it must match at the start of one of the last 5
+non-empty lines of the attempt's output, after spaces and an optional error prefix (`Error:`,
+`ERROR:`), so a sentence a tick quotes from an issue body and then writes past is no limit. For
+gemini, which ends a quota error with a stack trace or wraps it in `[API Error: ...]`, it may match
+anywhere in the attempt's last 40 lines. Set but empty, `check` refuses it. A gemini attempt counts as a usage limit only
+when it also exited non-zero, as gemini does on every error it ends on, so a tick that quoted the
+message and went on does not cool its entry; claude's and codex's exit status on a limit is not
+documented, so for them the message alone decides. Any other agent runs only through fleet, where
+its limit regex defaults to the three above joined.
+
+### Tick identity
+
+The runner starts each tick, a local agent or `fleet dispatch`, as its own child, its prompt on a
+pipe, and records it in `$HARNESS_STATE/locks/slot<n>.tick` (mode 0600, written by rename) as
+`pid starttime bootid agent model kind`, where `starttime` is field 22 of `/proc/<pid>/stat`,
+`bootid` is `/proc/sys/kernel/random/boot_id` (a file a crash left behind matches nothing after a
+reboot) and `kind` is `work`, `lane` or `landing`. It removes the file when the tick ends, so a slot records one tick at
+most. A tick is live while `/proc/<pid>/stat` gives the same start time, which a reused pid does
+not. Only `stat` is read, never a process's environment or descriptors, which an agent CLI that
+marks itself non-dumpable (the release Codex CLI does) keeps private. `harness ticks [--json]` lists
+the live ticks of `$HARNESS_STATE` as pid, age in seconds, slot, agent, model and kind; the launcher
+counts young, lane and landing ticks and each agent's running ticks with it. A tool child that
+outlives its tick, `nohup`'d or backgrounded, is no tick: no slot file records it.
+The supervisor's tick is recorded the same way in `$HARNESS_STATE/locks/supervisor.tick`, with
+`kind` `supervisor`, and listed as slot 0.
+
+`libexec/tick-pid.sh` gives a claim and the merge lock to the first ancestor of the calling shell
+whose pid and start time a tick file records: a slot file of this state directory, or, on a fleet
+device, the session's `tick` file that fleetd writes for the agent it starts and names in
+`FLEET_SESSION_TICK`. A tick file counts only when it is a regular file of this user, not a
+symlink. An operator's own agent CLI is recorded nowhere, so it never
+takes a claim or the merge lock. Neither does the supervisor: no slot file records it. The tick
+also carries `HARNESS_TICK="state=<HARNESS_STATE>
+slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool shells, and
+`libexec/usage-ok.sh` among them, which agent they run under; nothing counts or identifies ticks by it.
+The runner starts the agent, or `fleet dispatch`, in a session and process group of its own, so
+`kill -TERM -<pid>` stops the tick and its tools but never the runner, which writes the exit
+trailer as usual. It starts it with SIGINT and SIGQUIT at their defaults (`env --default-signal`,
+GNU coreutils 8.31 or later; `check` names an `env` without it as missing), which a background job of a non-interactive shell would otherwise
+ignore, so `kill -INT` and `timeout -s INT` reach every tool it runs.
+
+## Usage windows
+
+`harness usage [--json]` prints each agent of the model list and the lane with its windows, cap and
+live ticks, and the pool's cap and room; `harness usage pick` names the entry the next tick runs on;
+`harness usage refresh` runs the fetch command (below) of each agent whose reading is old, which the
+launcher does once per firing and a runner once per tick it starts, and nothing else does but
+`check`; `harness usage check --agent <agent>` is the stand-down test
+`libexec/usage-ok.sh` runs for the agent its tick's `HARNESS_TICK` names (else `FLEET_ADAPTER`, set
+by fleetd, else `TICK_AGENT`): exit 0 while every window is under its stand-down point, 1 at or
+past one, 2 without a fresh reading. Both read the keys below from the environment, which
+`tick.sh` and `usage-ok.sh` export from `harness.env`.
+
+`USAGE_SOURCE_<agent>` says where an agent's windows come from:
+
+| Source | Reading | Default for |
+|---|---|---|
+| `json:<path>` | `{"timestamp": <ms>, "windows": [{"name": "<name>", "used_pct": <n>, "window_minutes": <n>, "resets_at": ...}]}`, any number of windows; a name is 1 to 32 of `A-Z`, `a-z`, `0-9` and `_` | |
+| `claude-cache:<path>` | Claude Code's `{"timestamp": <ms>, "data": {"fiveHourPercent": <n>, "weeklyPercent": <n>}}`, as windows `five_hour` (300 min) and `weekly` (10080 min) | `claude`, at `USAGE_CACHE` (default `~/.claude/usage-cache.json`) |
+| `codex-sessions[:<dir>]` | the last `rate_limits` of the newest `rollout-*.jsonl` that has one under `<dir>/YYYY/MM/DD/` (default `${CODEX_HOME:-~/.codex}/sessions`), walked newest first by name and given up after 16 rollouts or a directory of more than 10000 entries, as windows `primary` and `secondary` from `used_percent`, `window_minutes` and `resets_at`; a null window is absent | `codex` |
+| `none` | no windows: only the usage-limit cooldown gates the agent | |
+
+Only claude and codex have a default. Every other agent, gemini and any fleet adapter included,
+must set `USAGE_SOURCE_<agent>`, to `none` when only the cooldown is to gate it: without one its cap
+is 0 and `check` names the key.
+
+`USAGE_FETCH_<agent>` is an executable that `harness usage refresh` runs when the reading is missing
+or older than `USAGE_REFRESH_AFTER` (default 120 s); it runs with no input or output and is killed
+after 60 s.
+Claude's defaults to `USAGE_FETCH` (default `~/.claude/scripts/usage-fetch.sh`). A reading older
+than `USAGE_MAX_AGE` (default 1800 s) is stale, and one that names no window, one dated more than
+300 s ahead of this host's clock, or one with a numeric `resets_at` under 1000000000 (not Unix
+seconds) is unreadable: each allows nothing. A codex reading is as new as the newest codex
+session on the host. Past its age, while every window gives `resets_at`, it allows one codex tick
+rather than none: that tick's own run writes a fresh reading, which then sizes the pool. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. The
+rollouts hold only this host's codex use: an instance whose codex ticks run on fleet devices, or
+whose codex account works on other hosts too, reads codex from `json:` with a fetch that covers the
+account.
+
+A window under a day long steps by `USAGE_STEPS_SHORT` (default `60 70 80`), a longer one by
+`USAGE_STEPS_LONG` (default `80 85 88`), and `USAGE_STEPS_<agent>_<name>` sets one window's steps:
+under the first point the window allows `TICK_WIDTH` (default `MAX_SLOTS`) ticks, under the second
+half of it, under the third one, and from there none. No window may reach `USAGE_CEILING_PCT`
+(default 90). An agent's cap is its tightest window's, `TICK_WIDTH` with the source `none`, and 0
+with no fresh reading. The pool's cap is the agents' caps summed, at most `TICK_WIDTH`, leaving out
+an agent each of whose entries cools down, and an agent only the lane names while no lane tick is
+wanted. Its room is each such agent's cap less its live ticks, never below 0, summed and at most
+`TICK_WIDTH`, so one agent's ticks past its cap, its windows having filled while they ran, take
+none of another's. The launcher starts `min(TICK_WIDTH − held slots, room, queued issues)` runners,
+and a runner chains its next tick only while the agent it ran can still run. Slots past
+`TICK_WIDTH` and up to `MAX_SLOTS` are left for the landing tick, which starts when the pool is
+full. A running tick
+stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
+`USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
+
+## Supervisor
+
+Off unless `SUPERVISOR=1`. While it is off, the launcher, the runners, `claim.sh`, `usage-ok.sh`
+and the dashboard behave as if none of it existed, and a `state/directive.json` is not read.
+`docs/ARCHITECTURE.md` says when it runs, how it is confined and what a directive may do.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
+| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
+| `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; held to an allowlist (below) |
+| `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log's last 64 KiB; a park past it, or one when the log cannot be read, is refused |
+| `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
+| `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while its agent's windows allow it |
+| `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
+| `SUPERVISOR_MAX_DIRECTIVE_S` | 21600 | the latest a directive's `expires_at` may be; a later one is clamped |
+| `SUPERVISOR_STOP_GRACE_S` | 1200 | how long a tick named in `stop` has to wind down before TERM: a tick reads its notice when it next runs `usage-ok.sh`, at least every 15 minutes |
+| `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments bind a tick (`libexec/usage-ok.sh`) and wake the supervisor; empty, the repository's owner, members and collaborators |
+
+`harness directive`, `harness supervisor` and `harness health` read these keys, the model list and
+widths (`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH`), the budgets and the label keys
+from `harness.env` only: a process of this user that sets one in its environment cannot loosen a
+rail. `HARNESS_STATE`, `GH_REPO` and `WORKTREE_ROOT` come from the environment first, as the
+scripts read them.
+
+The supervisor's agent runs in an empty temporary directory, its environment cut down to `HOME`,
+`PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM` and what its CLI signs in with
+(`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `CODEX_HOME`, `XDG_CONFIG_HOME`)
+when they are set. GitHub's token never reaches it. Its flags by default, checked against each CLI's
+`--help`:
+
+| Agent | Flags | What they guarantee |
+|---|---|---|
+| `claude` | `-p --tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence`, no `--dangerously-skip-permissions` | no built-in tool at all (`--tools ""`), no MCP server, no user, project or local settings and so no hooks or plugins (`--restricted`), no skills, nothing saved |
+| `codex` | `exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled -` | no shell or exec tool, no apps, plugins, browser or web search, no MCP servers from `config.toml`; whatever else it runs is sandboxed read-only and offline |
+| `gemini` | refused | its headless mode keeps file reading and web fetching whatever `--approval-mode` says, so it cannot run without tools |
+
+`SUPERVISOR_FLAGS_<agent>` is held to an allowlist, not weighed: every flag in it must be one of
+the defaults above, given once, and the confining ones must all be there. For claude that is
+`--tools` with an empty value (written `--tools=`, since the value is split on whitespace),
+`--restricted` and `--strict-mcp-config`; `--disable-slash-commands` and
+`--no-session-persistence` may be left out. For codex it is `--sandbox read-only`, every
+`--disable` of the defaults and `-c web_search=disabled`, the only `-c` taken; `--skip-git-repo-check`,
+`--ephemeral` and `--ignore-user-config` may be left out. So an override can only drop
+an optional flag: anything else, such as tools named to `--tools`, `--mcp-config`, `--settings`,
+`--permission-mode`, `--enable`, `--full-auto` or another sandbox, is refused, and the supervisor
+does not run, which the allocator log says once. `tick.sh check` prints the supervisor's command
+line, or why it cannot run.
+
+The supervisor's comments and parked questions are held to more than the lint. Each body is parsed
+as GitHub parses Markdown, extensions included, and refused if it yields a link, an autolink, an
+image or HTML, however it is written: a link whose reference is defined in a block quote or a list
+item, at any depth, or whose URL is escaped, is found where it is used. The text itself is then
+refused, wherever these stand (GitHub finds them in emphasis, a table cell or a task item too), if
+it holds any `@` (a mention, an address, a ref at a commit), `www.` in any case, `://`, a `//`
+starting a word, a cross-reference (`owner/repo#N`, `owner/repo@...`, `owner/repo/issues/N` and
+its `pull`, `discussions` and `commit` forms, or `/` and 7 to 40 hex digits, a commit), `]:` (a link reference's definition), a backslash before `/` or `:`, an HTML
+character reference (`&#...;`, `&name;`, which GitHub renders as the character), or a closing
+keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
+`owner/repo#N`). Each would reach past the issue: notify someone, send readers or their browsers
+elsewhere, hide text, or close an issue when a PR merges. Plain `#N` references and code spans
+pass. A refused action is logged and the rest go on; a refused directive refuses every action of
+its answer.
+
+Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
+`$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the
+output of `harness health --json`, all on stdin. The same `{{KEY}}` substitution applies, with
+`FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S`,
+`SUPERVISOR_STOP_GRACE_S` and `SUPERVISOR_MAX_PARKS_PER_DAY` added. The token reaches `harness health` and `harness supervisor answer`
+as it reaches the queue count, never the agent; `hooks/hold`, which health runs, gets no token
+either.
+
+What it keeps, all plain files:
+
+| Path | What |
+|---|---|
+| `state/directive.json` | the directive in force, owner-only, written by `harness directive apply` |
+| `state/logs/directive.log` | every apply (the reason, each changed field, each clamp), refusal, clear, expiry, invalid directive, stop and GitHub action |
+| `state/supervisor/` | `last_start`, `last_end`, `last_exit`, `failures`, `last_reason`, `runs.log`, the event stamps, `woken.json` (the wake events that ended a directive's quiet), `loops.json` (each looping candidate's progress as GitHub gave it), and the marks of notes shown and stops sent, pruned after two days |
+| `state/logs/supervisor-<UTC>.log` | each run's output, its answer and exit trailer; the newest 20 are kept |
+| `state/claims.log` | `<issue> <pid> <UTC>` for every claim `libexec/claim.sh` takes while the supervisor is on, for the loop signal; cut to its newest 2000 lines past a MiB |
+
+## Fleet
+
+[`docs/FLEET.md`](FLEET.md) describes fleet. With `FLEET_DISPATCH=1` the runner runs each tick as
+
+```
+$FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto} --adapter <agent> --workdir $TARGET_REPO \
+    --model <model> --wait --timeout <(LONG_TICK_BUDGET_MIN + 30) * 60> [--label tick=landing]
+```
+
+as an argv, with the composed prompt on stdin, instead of the agent's local command line. The
+entry's agent is the adapter. fleet writes the agent's output to the tick log and exits with its
+status, so the model order, the usage-limit cooldown, the exit trailer and chaining work as they do
+locally. The device's `fleetd.toml` fixes the agent's command line, so `AGENT_BIN_<agent>` and
+`AGENT_FLAGS_<agent>` do not apply. `templates/instance/fleetd.toml.example` lists
+what a device needs to take ticks: a harness checkout and its own instance, which reads the agent's
+usage windows on the device, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and `TARGET_REPO` set in the
+adapter's `env` table, since fleetd gives a dispatched agent no environment of the hub's (see
+[`docs/FLEET.md`](FLEET.md)). The adapter's `timeout_s` caps the tick: a device whose `timeout_s` is
+under the `--timeout` above ends a tick before its budget does. The launcher counts
+a live tick by its `fleet dispatch` process, which the slot file records.
+
+An adapter's `exe` may be a wrapper script, but it must stay inside the adapter's `workdir_roots`:
+on Linux, fleetd checks the child's working directory right after the spawn and kills its process
+group when it is outside the roots, so a wrapper that changes directory elsewhere before it execs
+the agent (to the harness checkout, say) has its tick killed. Pass such paths to the agent as
+environment or arguments instead of `cd`-ing to them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
+| `TICK_AGENT` | `claude` | the agent of a model listed without one; an agent without a local profile needs `FLEET_DISPATCH=1`, or `check` fails and the launcher logs the instance as incomplete |
+| `FLEET_DEVICE` | `auto` | a device name from `fleet.toml`, or `auto` |
+| `FLEET_BIN` | `fleet` | the fleet CLI |
+| `FLEET_CONFIG` | `$HARNESS_INSTANCE_DIR/fleet.toml` | the device registry (`templates/instance/fleet.toml.example`) |
 
 ## Queue count
 
@@ -74,6 +320,10 @@ It runs with `GH_REPO`, `ISSUE_LABEL` (the label being counted), `WIP_LABEL`, `S
 its environment. The value is a command line that `tick.sh` splits on whitespace, without quoting, so
 no path in it may contain a space. Unset, the launcher counts the open `ISSUE_LABEL` issues without
 `WIP_LABEL` with `gh issue list`, run in `TARGET_REPO`, and the model lane and landing ticks stay off.
+With the supervisor on, the count of `ISSUE_LABEL` also gets `QUEUE_TOTAL_FILE`, a path where it may
+write how many open `ISSUE_LABEL` issues it listed, claimed ones included, as one integer; the
+supervisor's queue event compares that number, which a claim never moves. `$HARNESS_BIN claimable`
+and the `gh issue list` fallback write it; a count that does not leaves the event off.
 
 A count that fails or prints anything but an integer is an error, logged to `allocator.log` as
 `ERROR queue count failed (label <l>: exit <n>, output '...', stderr '...')`. The launcher then counts
@@ -83,7 +333,7 @@ it finds nothing. A failed lane or landing count starts no lane or landing tick.
 ## Worktrees
 
 A tick's worktree is the directory `$WORKTREE_ROOT/<name>-<issue>` (a name, a hyphen, the issue
-number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree_gc.sh` reads a
+number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree-gc.sh` reads a
 worktree's issue from its branch, else from the trailing number of its directory name, and never removes one that names no
 issue. The dashboard reads the issue from the directory name the same way.
 
@@ -97,8 +347,8 @@ executable. It runs under `timeout HOOK_TIMEOUT_S` when the caller sets that var
 |---|---|---|
 | `hooks/env.sh` | sourced by `tick.sh` after the config, in launcher and runner mode (not in `check`) | what it exports reaches every tick; a non-zero status is logged once as `hooks/env.sh failed (exit N); ticks run without it` |
 | `hooks/hold` | executed with no arguments, under `HOLD_TIMEOUT_S` (default 5 s), when the launcher starts, when a runner starts, and before each chained tick | exit 0 means held: the launcher starts nothing and runners chain nothing. The first line of stdout is the reason, logged as `held: <reason>` once until the state changes. Any other exit, or a timeout, means not held |
-| `hooks/worktree-busy` | executed by `worktree_gc.sh` with no arguments, under `WORKTREE_BUSY_TIMEOUT_S` (default 30 s) | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept. A non-zero exit or a timeout removes nothing |
-| `hooks/worktree-remove` | executed by `worktree_gc.sh --apply` with every removed worktree's path | removes what `git worktree remove --force` could not, such as root-owned files or copies elsewhere; its output and status are ignored |
+| `hooks/worktree-busy` | executed by `worktree-gc.sh` with no arguments, under `WORKTREE_BUSY_TIMEOUT_S` (default 30 s) | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept. A non-zero exit or a timeout removes nothing |
+| `hooks/worktree-remove` | executed by `worktree-gc.sh --apply` with every removed worktree's path | removes what `git worktree remove --force` could not, such as root-owned files or copies elsewhere; its output and status are ignored |
 
 The templates ship `hooks/env.sh.example` and `hooks/hold.example`. Copy them without the
 `.example` suffix to turn them on, and keep `hold` executable.
@@ -131,16 +381,19 @@ The prompt's first line tells the tick which issues it may claim:
 | `This tick runs on <model>.` | the model lane is off |
 | `This tick runs on <model>: never claim an issue labelled <LANE_LABEL>; those are worked on the model lane.` | the lane is on and this tick is not a lane tick |
 | `This tick runs on <LANE_MODEL>, the model lane: claim only an issue labelled <LANE_LABEL>. ...` | claimable lane issues outnumber the young lane ticks |
-| `This tick runs on <model>. <LANE_MODEL> is cooling down on its usage limit, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down |
+| `This tick runs on <model>. <LANE_MODEL> cannot run now, on its usage limit or windows, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down, or its agent's windows allow no tick |
 | `This tick is the merge slot's landing tick: claim only an issue labelled <READY_LABEL>. ...` | a landing tick started past the usage width while every allowed slot is held |
 
-The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, and it needs `QUEUE_DEPTH_CMD`
-to count lane issues. The launcher and the dashboard recognise a landing tick by a prompt that starts with
-`This tick is the merge slot's landing tick`.
+A directive's `focus` and `avoid` append `The supervisor asks: among the issues you may claim,
+prefer #<n>, ...` and `The supervisor asks: do not claim #<n>, ...` to whichever line applies.
+
+The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, it needs `QUEUE_DEPTH_CMD`
+to count lane issues, and the lane's agent needs room under its usage windows. The launcher
+recognises a lane or landing tick by its slot file's `kind`.
 
 ## Lint rules
 
-`bin/public_record_lint.py` always applies the core rules: `harness-path` (any path under
+`"$HARNESS_BIN" lint` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
 `harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
 the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these
@@ -164,7 +417,11 @@ The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else 
 - `version_words`: words after which a dotted quad reads as a version rather than an address. They
   are added to `v` and `version`.
 - `labels`: more labels to warn on in prose.
-- `rules`: each entry needs a non-empty `id`, `pattern` (a Python regex) and `hint`. `blocking`
+- `rules`: each entry needs a non-empty `id`, `pattern` (a regex in Python's `re`
+  syntax, look-around included) and `hint`. `\w`, `\W`, `\b` and `\B` keep Python's meaning: a
+  word character is a letter, a digit or `_`, never a combining mark or a joiner. A bracket class
+  may not hold `--`, `&&` or `~~` unescaped. A search that exhausts its backtracking budget blocks
+  the line. `blocking`
   defaults to true, and false makes the rule a warning. `prose` defaults to false. A prose rule is
   skipped inside a closed fenced code block, and every other rule applies there too. A rule with a
   core rule's `id` replaces that core rule.
@@ -186,11 +443,33 @@ Every source below is optional. While its keys are empty, its panel stays off th
 | `DEVICE_PROBE_CMD` | the device row of each machine, under a 5 s timeout. Split shell-style and run without a shell on this host. On each remote host ssh hands it to the remote user's shell, as one command whose words are each quoted, so that shell runs the same words and expands nothing in them. A probe that needs a shell names one: `sh -c '...'` |
 | `RUN_QUEUE_GLOB`, `RUN_QUEUE_HOLDER`, `RUN_QUEUE_STOP_WORDS`, `RUN_QUEUE_LOG` | run queues on the flow board |
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
+| `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and any `FLEET_CONFIG` in its environment as a tick's fleet has them, so a plain `fleet status --json` reads the instance's fleet.toml |
+
+The live ticks are those `harness ticks` lists, with the agent, model and kind each slot file names.
+The usage panel weighs each agent's windows as `harness usage` does, from the model list
+(`state/tick-model`, else `TICK_MODELS`), `LANE_MODEL` while `LANE_LABEL` is set, `TICK_AGENT`,
+`MAX_SLOTS`, `TICK_WIDTH`, `MODEL_COOLDOWN_S` and every `USAGE_*` and `AGENT_*` key, read from
+harness.env as above (expanded as a path key is) and else from the environment. It never runs a
+`USAGE_FETCH` command: refreshing a reading is the launcher's job. It cannot tell whether the
+launcher wants a lane tick, so its pool is shown as at most the cap it gives.
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has
 tab-separated `time host connect_s upload_mb_s load1 nproc gpu_util_pct gpu_mem_used_mb status`
 columns. `stalls.log` has `<UTC> STALL <kind> <key> <detail>` lines.
+
+### `FLEET_STATUS_CMD` output
+
+The document must carry `version` 1 and the fields [`docs/FLEET.md`](FLEET.md) gives, each of its
+type; anything else is a failed read, and the panels keep the last good one. fleet exits 1 when a
+device failed, with the document complete, so the document decides. The Devices panel shows each
+device's transport, reachability or error, CPU, load, memory, GPUs and each adapter's running and
+maximum dispatched sessions. The Agent sessions panel shows each session's device, adapter and
+model, pid (else id), state, age, workdir, and its issue: the `issue` label, else the worktree its
+workdir lies in. Every string from fleet goes through the dashboard's redaction. The command runs
+without any variable whose name holds `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`,
+`PRIVATE_KEY` or `CREDENTIAL`, in any case, and its stdout is capped at 8 MiB: past that it is
+killed and the read fails.
 
 ### `RESOURCE_STATUS_CMD` output
 

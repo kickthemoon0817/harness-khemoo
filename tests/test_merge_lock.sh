@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Exercises bin/merge-lock.sh in a scratch harness home, with a sleeping process as a live holder.
+# Exercises libexec/merge-lock.sh in a scratch harness home, with a sleeping process as a live holder.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 sleep 600 & A=$!
 trap 'kill $A 2>/dev/null; rm -rf "$H"' EXIT
-mkdir -p "$H/bin"
-cp "$here/bin/merge-lock.sh" "$H/bin/merge-lock.sh"
+mkdir -p "$H/libexec"
+cp "$here/libexec/merge-lock.sh" "$H/libexec/merge-lock.sh"
 export HARNESS_HOME="$H"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
-ML="$H/bin/merge-lock.sh"; F="$H/state/locks/merge.lock"
+ML="$H/libexec/merge-lock.sh"; F="$H/state/locks/merge.lock"
 
 out=$("$ML" acquire 7); check "a free lock is taken, its directory made" '[[ "$out" == ACQUIRED ]] && grep -q "^7 $$ " "$F"' "$out"
 out=$("$ML" release 7); check "the holder releases it" '[[ "$out" == RELEASED ]] && [ ! -e "$F" ]' "$out"

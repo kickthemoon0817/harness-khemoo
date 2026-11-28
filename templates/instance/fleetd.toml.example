@@ -1,0 +1,61 @@
+# Not read by the harness: the policy of each device's fleetd, at ~/.config/fleetd/fleetd.toml there.
+# docs/FLEET.md (fleetd.toml) gives every key. A device that takes harness ticks needs:
+#
+# - a harness checkout and its own instance, whose harness.env names this device's TARGET_REPO
+#   and WORKTREE_ROOT, and each agent's usage source; the adapter's `env` table points a tick at
+#   them, because fleetd gives a dispatched agent none of the hub's environment;
+# - an adapter named as each agent of TICK_MODELS and LANE_MODEL, whose `models` include every model
+#   that agent's entries name (a tick asks for one by name, and one not listed is refused);
+# - `workdir_roots` holding TARGET_REPO, the directory a tick starts in;
+# - `timeout_s` of at least (LONG_TICK_BUDGET_MIN + 30) * 60, the timeout each tick asks for; a lower
+#   one ends a tick before its budget does;
+# - the permission flag a local tick's AGENT_FLAGS_<agent> gives, in `args`, since a tick cannot
+#   answer prompts.
+#
+# Every preset reads the prompt from stdin. fleetd sets FLEET_SESSION and FLEET_ADAPTER in each
+# agent's environment, so a claim made on the device belongs to the agent process and the tick's
+# usage check reads that agent's windows.
+
+device = "dev-a"
+
+[adapters.claude]
+preset = "claude"
+exe = "/usr/local/bin/claude"
+args = ["-p", "--model", "{model}", "--dangerously-skip-permissions"]
+models = ["claude-opus-5-5"]
+workdir_roots = ["/srv/checkout"]
+max_concurrent = 2
+timeout_s = 9000
+
+[adapters.claude.env]
+HARNESS_HOME = "/srv/harness"
+HARNESS_INSTANCE_DIR = "/srv/harness/instance"
+TARGET_REPO = "/srv/checkout"
+
+[adapters.codex]
+preset = "codex"
+exe = "/usr/local/bin/codex"
+args = ["exec", "--model", "{model}", "--dangerously-bypass-approvals-and-sandbox", "-"]
+models = ["gpt-5.5"]
+workdir_roots = ["/srv/checkout"]
+max_concurrent = 2
+timeout_s = 9000
+
+[adapters.codex.env]
+HARNESS_HOME = "/srv/harness"
+HARNESS_INSTANCE_DIR = "/srv/harness/instance"
+TARGET_REPO = "/srv/checkout"
+
+[adapters.gemini]
+preset = "gemini"
+exe = "/usr/local/bin/gemini"
+args = ["--model", "{model}", "--yolo"]
+models = ["gemini-3-pro"]
+workdir_roots = ["/srv/checkout"]
+max_concurrent = 2
+timeout_s = 9000
+
+[adapters.gemini.env]
+HARNESS_HOME = "/srv/harness"
+HARNESS_INSTANCE_DIR = "/srv/harness/instance"
+TARGET_REPO = "/srv/checkout"

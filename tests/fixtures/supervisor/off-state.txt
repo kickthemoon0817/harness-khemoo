@@ -1,0 +1,10 @@
+["fleet","flow","generated_at","generated_epoch","harness","harness_home","health","history_hours","landings","leases","machines","queue","repo","sources","ticks","title","usage"]
+state/dashboard/flow_state.json
+state/dashboard/local_history.tsv
+state/locks/claim.7
+state/locks/claim.guard
+state/locks/slot1.lock
+state/locks/slot2.lock
+state/logs/allocator.log
+state/logs/tick-TS-slot1.log
+claude=2[five_hour:10%,weekly:10%] pool=2 room=2 busy=0 claimable=1 -> spawning 1

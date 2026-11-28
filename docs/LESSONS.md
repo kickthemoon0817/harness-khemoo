@@ -6,8 +6,8 @@ because the reasoning matters more than the patch.
 
 ## Ticks are finite batch runs — scheduling anything is fatal
 
-A tick called a scheduling/wakeup tool to nap while a long job ran, then ended its turn. Under
-`claude -p` the process exits when the turn ends: the wakeup never fired, and the job, what it
+A tick called a scheduling/wakeup tool to nap while a long job ran, then ended its turn. Under a
+non-interactive agent CLI the process exits when the turn ends: the wakeup never fired, and the job, what it
 held, and its issue claim were all orphaned. The log was empty, so it looked like a crash.
 
 **Fix:** the tick prompt states the finite-batch contract explicitly — no wakeups, no ending a
@@ -117,7 +117,7 @@ its machine, and for the operator, who shared its context.
 repository and nothing else — and fixes the sections of a body, the form of a reading (commit and
 condition, always), and where the harness's own bookkeeping goes (a collapsed block at the end of a
 comment, the claim protocol line included, never a body; the launcher finds that line anywhere in
-the comment). A lint (`bin/public_record_lint.py`) gates every post on the mechanical
+the comment). A lint (`"$HARNESS_BIN" lint`) gates every post on the mechanical
 half: host paths, hosts, PIDs, harness files, and the installation's own rules
 (`lint_rules.json`). Audit the record with its `--audit` mode now
 and then; a rising count is the runbook asking for something the contract forbids.

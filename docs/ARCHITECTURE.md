@@ -26,19 +26,36 @@ Ordered cheapest-first because it runs every couple of minutes:
 1. Exit if the harness is paused (`state/paused`, or no live cron line) or the instance's
    `hooks/hold` says it is held.
 2. Exit if the instance is incomplete (`docs/INSTANCE.md`), logging it at most hourly.
+   With `SUPERVISOR=1`, send TERM to a stopped tick whose grace ended, start a supervisor tick
+   when one is due, and exit inside the directive's pause or before its `wake_at`.
 3. Count held slot locks. If none are free, exit — no API calls at all.
-4. Refresh usage telemetry only if the cache is older than `USAGE_REFRESH_AFTER`.
-5. Map utilization to a slot cap.
-6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `bin/claimable.sh`).
+4. Refresh each agent's usage reading only if it is older than `USAGE_REFRESH_AFTER`.
+5. Map each agent's windows to its cap, and sum the caps into the pool's. A directive's `width` lowers it.
+   With every cap at 0 and a reset ahead, nothing starts before it; the launcher says so once.
+6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `$HARNESS_BIN claimable`).
 7. `spawn = clamp(allowed − busy, 0, unclaimed)`, plus a rate-limited heartbeat when the queue
    is empty.
 
 ### Runner (`tick.sh runner <max> <delay>`)
 
-Sleeps for its stagger, takes the first free slot via `flock`, and runs a `claude -p`
-invocation with the composed prompt: the lane line, `prompts/tick-core.md`, then the
-instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is a
-normal outcome, not an error.
+Sleeps for its stagger, takes the first free slot via `flock`, and runs an agent CLI (Claude
+Code, Codex or Gemini) with the composed prompt on stdin: the lane line, `prompts/tick-core.md`,
+then the instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is
+a normal outcome, not an error.
+
+The runner starts every tick as its own child and records it in its slot's
+`state/locks/slot<n>.tick`: pid, start time, agent, model and kind (work, lane or landing). A tick is
+live while its pid has that start time, so a reused pid is never mistaken for one, and a slot holds
+one tick at most, so a tool child that outlives its tick is never a second. `harness ticks` counts
+live ticks from these files, and `libexec/tick-pid.sh` gives a claim to the first ancestor a slot
+file records; on a device, to the process fleetd started. Both read only `/proc/<pid>/stat`, which
+stays readable for an agent CLI that marks itself non-dumpable, as the release Codex CLI does. Two
+installations on one host, and an operator's own agent sessions, stay out of each other's counts.
+
+With `FLEET_DISPATCH=1` the runner hands the same prompt to `fleet dispatch --wait` on stdin
+instead ([`docs/FLEET.md`](FLEET.md)). The slot, the model order, the cooldown and chaining stay
+here: fleet only places the agent on a device and returns its output and exit status, so a tick
+reads the same whichever device ran it.
 
 A runner keeps its slot and chains: when a tick ends, it re-reads usage and the queue and starts
 the next tick at once on a fresh context, so work finished early is followed immediately rather
@@ -46,13 +63,98 @@ than at the next cron firing. It stops when the queue is empty, usage no longer 
 tick ended in under `CHAIN_MIN_TICK_S` (nothing claimable, or an error), after `MAX_CHAIN` ticks,
 or when the harness is paused (cron line commented out, or `state/paused`) or held by `hooks/hold`.
 
-Each tick runs on the best model in the priority list (`state/tick-model`, else `TICK_MODELS`)
-that is not cooling down. A tick that dies on a model's usage limit marks that model in
-`state/model-cooldown/` for `MODEL_COOLDOWN_S` and re-runs at once on the next model.
+Each tick runs on the best entry of the priority list (`state/tick-model`, else `TICK_MODELS`),
+whose entries are `agent:model` across vendors, that is not cooling down and whose agent runs
+fewer ticks than its usage windows allow. A tick that dies on its usage limit marks that entry in
+`state/model-cooldown/` for `MODEL_COOLDOWN_S` and re-runs at once on the next entry, which may
+be another agent's.
 
 The stagger exists because two ticks starting in the same second will read the same unclaimed
 issue list and claim the same issue. Staggering is cheaper and more robust than a distributed
 lock for this.
+
+### Supervisor (`tick.sh supervisor`, with `SUPERVISOR=1`)
+
+An agent decides the harness's direction and rhythm; the script keeps every hard rule. The
+supervisor proposes and the harness disposes. The supervisor is a tick, not a daemon: the
+launcher starts one when it is due, it reads one snapshot, answers, and ends. Nothing must stay up,
+so the "no daemon" rule below stands, and a supervisor that is absent, late, wrong or dead leaves
+the harness on its own formulas.
+
+It is due when an event happened since its last run, or when `SUPERVISOR_INTERVAL_S` passed. The
+events are:
+- a tick ended non-zero, or a model hit its limit;
+- a usage window reset;
+- the queue changed: the open issues carrying `ISSUE_LABEL`, claimed ones included, from the same
+  listing as the claimable count, so a claim and its label change nothing;
+- a tick ran past the longest budget, or the instance logged a stall;
+- an issue loops: claimed by three ticks in six hours with no label change, no PR naming it and no
+  commit referencing it between the first and the third claim;
+- an operator's `Operator` comment landed (a login in `OPERATOR_LOGINS`, else the repository's
+  owner, a member or a collaborator: anyone can comment on a public repository);
+- the human lifted a pause, or the directive expires within ten minutes.
+
+It never starts sooner than `SUPERVISOR_MIN_INTERVAL_S` after its last start, waits that interval
+doubled for each failed run in a row, and starts only while its entry is not cooling down and every
+window of its agent is under the point where a running tick stands down. It needs no room under the
+agent's cap: it is one short run outside the slots, and it is counted toward its agent as soon as it
+starts. That exception covers the cap only: the stand-down point, a fresh reading and the cooldown
+still hold, and the agent runs at most one tick past its cap, for one budget. At most one runs, under `state/locks/supervisor.lock`, recorded in
+`state/locks/supervisor.tick`, within `SUPERVISOR_BUDGET_MIN`.
+
+**Confinement.** The supervisor's agent runs with no tools:
+- no shell, no file access, no web and no MCP server (the flags `docs/INSTANCE.md` lists per agent);
+- an empty temporary working directory, and an environment that holds only what its CLI needs to
+  sign in, nothing of `harness.env`;
+- an agent whose CLI cannot be confined this way, gemini today, is refused as `SUPERVISOR_MODEL`.
+
+Its prompt is `prompts/supervisor-core.md` and the instance's `prompts/supervisor.md`, then the
+output of `harness health --json`, all on stdin. The snapshot is bounded and holds usage, live
+ticks, recent tick outcomes, the signals above, the queue, failing PRs of this repository's own
+branches, this host, the directive and the supervisor's own runs, every string clipped and masked.
+It answers with one JSON document, `{"directive": … | null, "github": […]}`, and `harness supervisor
+answer` applies it:
+- the directive through `harness directive apply`'s validation;
+- at most five GitHub actions (a comment, a label change, a parked question), performed by the
+  harness with `gh`, only on open issues carrying `ISSUE_LABEL`;
+- a `label` action adds or removes only `FIRST_LABEL` and `LOW_LABEL`; `OPERATOR_LABEL` goes on only
+  through `park`, with a question, and never comes off by the supervisor's hand: it is the human's hold;
+  the lane, long-budget, sign-off, ready, claim and queue labels are never the supervisor's;
+- every body masked, linted as a tick's comment is, and headed as the supervisor's, and none with a
+  mention, a link, an image, HTML, an address or a closing keyword;
+- at most `SUPERVISOR_MAX_PARKS_PER_DAY` parks a day;
+- nothing at all when the answer's directive is refused.
+
+A directive narrows or reorders what the configuration allows, never widens it:
+
+| Field | Effect | Rail |
+|---|---|---|
+| `pause` | no tick starts and no runner chains until `until` | ends at the directive's expiry; only an operator's comment or the human lifting a pause ends it sooner |
+| `wake_at` | the launcher starts nothing until then | a window reset, an operator's comment or the human lifting a pause ends it sooner, once and for good for that directive |
+| `width` | at most this many ticks; 0 starts nothing new, a landing tick included | clamped to the configured width, then to what the usage windows allow |
+| `models` | the entries to try, in this order | a subset or reordering of the configured list; any other entry is refused |
+| `focus`, `avoid` | a sentence on each tick's lane line | changes what a tick prefers, never what it may claim |
+| `notes` | one line to the tick working an issue, through `libexec/usage-ok.sh`, as `SUPERVISOR (advisory) on #N: …` | shown once per tick; refused if it names an operator or starts as the harness's own notice |
+| `stop` | TERM to the tick's own process group `SUPERVISOR_STOP_GRACE_S` after a directive first named it, which naming it again does not put off; its runner writes the trailer (`exit=143`) and chains as usual; its issue is avoided while the directive lasts | only a live tick of this installation whose start time still matches and that leads its own group; any other is refused and logged |
+
+The usage ceiling and caps, claims, the merge lock, the token's handling, the lint and the human's
+pause stay in the script, and the human's pause (`state/paused`, the cron line, `hooks/hold`)
+always beats a directive. Every rail key (`SUPERVISOR_*`, the model list and widths, the labels,
+`OPERATOR_LOGINS`) is read from `harness.env` alone, never from the environment. With no
+directive, an expired one, or one that no longer validates against the configuration, the launcher
+runs exactly its own formulas; an expired or invalid directive is logged once. A stored directive
+no longer validates when:
+- a model was removed from the list;
+- its `applied_at` lies more than five minutes ahead;
+- its expiry is past the longest directive;
+- a stop's grace is shorter than `SUPERVISOR_STOP_GRACE_S`.
+
+The directive is a plain file, `state/directive.json`, and every change to it, every GitHub action
+and every refusal is a line in `state/logs/directive.log`, written before the directive is.
+
+What remains: a tick runs as the same user as the harness, so a tick that ignored its prompt could
+write `state/` itself, the directive included. The core prompt forbids it, and the directive's own
+checks bound what such a file could do; only a separate user for ticks would close it.
 
 ### Slots
 
@@ -63,14 +165,18 @@ the process exits, so a crashed tick never leaks a slot.
 
 ### Allocator
 
-Keeps both rate-limit windows under `USAGE_CEILING_PCT` (90 %), leaving the last tenth of each
-for the human. Each window maps to its own cap and the smaller one wins, so a healthy 5-hour
-window cannot mask an exhausted weekly one. A window steps down to half width, then one slot,
-then none, and stops well under the ceiling, because the ticks already running keep spending
-until they end: the 5-hour window fills several times faster, so it stops at 80 % and the
-weekly one at 88 %. With no fresh reading nothing starts. The ceiling itself is held inside
-the ticks: each runs `bin/usage_ok.sh` before starting work and pauses two points under it, so
-its wind-down stays under the ceiling too.
+Keeps every usage window of every agent under `USAGE_CEILING_PCT` (90 %), leaving the last
+tenth of each for the human. `harness usage` reads each agent's windows from its own source:
+Claude Code's usage cache, the rate limits Codex records in its session rollouts, a normalized
+file any fetch script can write, or none, where only the usage-limit cooldown gates the agent.
+Each window maps to its own cap and the agent's smallest one wins, so a healthy 5-hour window
+cannot mask an exhausted weekly one. A window steps down to half width, then one slot, then none,
+and stops well under the ceiling, because the ticks already running keep spending until they end:
+a window under a day fills several times faster, so it stops at 80 % and a longer one at 88 %.
+With no fresh reading an agent starts nothing. The pool's cap is the agents' caps summed, at most
+`TICK_WIDTH`, so when one vendor's windows fill the next vendor's entries take the pool. The
+ceiling itself is held inside the ticks: each runs `libexec/usage-ok.sh` for its own agent before
+starting work and pauses two points under it, so its wind-down stays under it too.
 
 Reading percentages rather than counting tokens keeps the harness honest about usage it did
 not cause — the human's own sessions consume the same budget.
@@ -79,8 +185,8 @@ not cause — the human's own sessions consume the same budget.
 
 A lock held for a long session is fragile: if the holder dies, others cannot tell whether the
 thing it guards is still in use. So the harness pairs a short `flock`, which serializes the
-handoff, with a record of `issue PID timestamp` held for the session. `bin/claim.sh` (one tick per
-issue) and `bin/merge-lock.sh` (one landing at a time) both work this way. Ownership is then testable
+handoff, with a record of `issue PID timestamp` held for the session. `libexec/claim.sh` (one tick per
+issue) and `libexec/merge-lock.sh` (one landing at a time) both work this way. Ownership is then testable
 by anyone with `kill -0`, and a dead owner's record is taken over at once.
 
 This is the single most important pattern in the harness: **ownership is proven by process
@@ -111,19 +217,34 @@ entire history in the GitHub UI, and any tick can resume any other tick's work f
 | Tick crashes | Kernel releases the slot; PID-liveness frees the claim and the merge lock |
 | Network outage | Ticks exit with `exit=1`; cron retries; nothing corrupted |
 | Rate limit exhausted | Allocator reaches 0 and stops spawning; in-flight ticks finish; chains stop at the next boundary |
-| One model's limit reached | The tick re-runs on the next model; that model cools down; the launcher spawns nothing while every model cools |
+| One model's limit reached | The tick re-runs on the next entry, which may be another agent's; that entry cools down; the launcher spawns nothing while every entry cools |
 | Two ticks race one issue | Stagger plus label claim; the loser picks the next issue |
 | Claim orphaned | The next tick sees a dead claimant PID and resumes from the recorded state |
 | Something every tick needs is down | `hooks/hold` holds the harness; nothing spawns or chains until it recovers |
 | Launcher missed | Stateless recompute; the next firing catches up |
+| Supervisor crashes, hangs or errs | Its budget's timeout ends it; the run counts as failed and backs off; the directive in force runs to its expiry, then the defaults hold |
+| Directive malformed or out of date | Ignored and logged once; the defaults hold |
+
+What the design leaves open, knowingly:
+
+- Two runners may both pick the last room of one agent in the moment between a pick and the
+  slot file it leads to. The second tick runs past that agent's cap; if its windows are full, its
+  limit message cools the entry as usual.
+- An agent runs for a few milliseconds before its slot file exists, so a scan in that moment does
+  not count it.
+- A tool shell runs as the harness's user and could write a slot file of its own. No design that
+  trusts files of one user can tell that from the runner's.
+- The dashboard counts the lane's agent whenever `LANE_LABEL` is set, not only when the launcher
+  wants a lane tick, so the pool it shows is an upper bound, and it says so.
 
 ## What is deliberately absent
 
-**No daemon** — cron plus flock is more robust than a supervisor process that can itself die.
+**No daemon** — cron plus flock is more robust than a process that must stay up and can itself die;
+the supervisor is one more tick that cron's launcher starts and that ends.
 **No queue database** — GitHub already is one, and it is auditable.
 **No inter-tick messaging** — ticks coordinate through issue labels; anything richer would
 create states a human cannot inspect.
 **No retry logic in the harness** — a failed tick just ends; the next firing re-derives what to
 do. Retries hide problems that logs should surface. The one exception is a model's usage limit,
-which says nothing about the work: that tick re-runs once per remaining model, and the trailer
-in its log names the model each attempt used.
+which says nothing about the work: that tick re-runs once per remaining entry, and the trailer
+in its log names the agent and model each attempt used.

@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
-# Starts bin/dashboard.py detached on 127.0.0.1 and prints its URL, which carries this start's access token.
-#   dashboard.sh [dashboard.py options]   start it, or print the URL of the one already running
+# Starts `harness dashboard` detached on 127.0.0.1 and prints its URL, which carries this start's access token.
+#   dashboard.sh [harness dashboard options]   start it, or print the URL of the one already running
 #   dashboard.sh status                   print its pid and URL (exit 1 when it is not running)
 #   dashboard.sh stop                     stop it
 # HARNESS_HOME names the harness it reads (default: this script's repo), DASHBOARD_PORT its port (8787,
 # or --port), DASHBOARD_DATA_DIR where its own history, cache, pid file, URL and log go (default:
 # <state>/dashboard, the state directory being HARNESS_STATE from the environment, else from harness.env,
 # else <home>/state). It writes nothing else, and nothing there is readable by other users. HARNESS_ENV
-# and HARNESS_INSTANCE_DIR reach dashboard.py, which finds the config with them.
+# and HARNESS_INSTANCE_DIR reach the dashboard, which finds the config with them. HARNESS_BIN names the
+# harness binary (default: <home>/target/release/harness when it is executable, else harness on PATH).
 set -u
 umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 H="${HARNESS_HOME:-$(cd "$here/.." && pwd)}"
-# dashboard.py resolves the state directory, so this script and the server agree on it.
+if [ -z "${HARNESS_BIN:-}" ]; then
+  if [ -x "$H/target/release/harness" ]; then HARNESS_BIN=$H/target/release/harness; else HARNESS_BIN=harness; fi
+fi
+# The dashboard resolves the state directory, so this script and the server agree on it.
 DATA="${DASHBOARD_DATA_DIR:-}"
-[ -n "$DATA" ] || DATA=$(python3 "$here/dashboard.py" --harness-home "$H" --print-data-dir) || exit 1
+[ -n "$DATA" ] || DATA=$("$HARNESS_BIN" dashboard --harness-home "$H" --print-data-dir) || exit 1
 PORT="${DASHBOARD_PORT:-8787}"
 PIDFILE="$DATA/dashboard.pid"
 URLFILE="$DATA/dashboard.url"
 LOG="$DATA/dashboard.log"
 
-# The pid file's process, when it is alive and still a dashboard: a reused pid is not ours.
+# The pid file's process, when it is alive and still a dashboard, its first argument `dashboard`: a
+# reused pid is not ours.
 running_pid() {
   local p
   p=$(awk '{print $1}' "$PIDFILE" 2>/dev/null)
-  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null \
-    | grep -q 'dashboard\.py' && echo "$p"
+  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null \
+    | sed -n 2p | grep -qx 'dashboard' && echo "$p"
 }
 running_url() { cat "$URLFILE" 2>/dev/null || echo "http://127.0.0.1:$(awk '{print $2}' "$PIDFILE")/ (URL file missing)"; }
 
@@ -54,10 +59,12 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 if p=$(running_pid); then echo "already running (pid $p): $(running_url)"; exit 0; fi
-mkdir -p "$DATA"
-chmod 700 "$DATA"
+mkdir -p "$DATA" || exit 1
+# The pid and URL files hold the access token: never write them where another user could.
+[ ! -L "$DATA" ] && [ -d "$DATA" ] && [ -O "$DATA" ] || { echo "dashboard.sh: $DATA is not a directory of this user's" >&2; exit 1; }
+chmod 700 "$DATA" || exit 1
 rm -f "$URLFILE"
-setsid nohup python3 "$here/dashboard.py" --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
+setsid nohup "$HARNESS_BIN" dashboard --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
   >> "$LOG" 2>&1 < /dev/null &
 pid=$!
 echo "$pid $PORT" > "$PIDFILE"
