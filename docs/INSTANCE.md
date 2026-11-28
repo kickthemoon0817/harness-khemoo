@@ -205,10 +205,11 @@ The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else 
 - `version_words`: words after which a dotted quad reads as a version rather than an address. They
   are added to `v` and `version`.
 - `labels`: more labels to warn on in prose.
-- `rules`: each entry needs a non-empty `id`, `pattern` and `hint`. A pattern is a regex in the syntax of
-  Rust's `regex` crate, which runs in linear time. Each of its top-level alternatives may open with
-  look-behinds of a fixed width (`(?<![\w./-])`) and close with look-aheads (`(?!kit\.log\b)`);
-  look-around anywhere else and backreferences do not compile. `blocking`
+- `rules`: each entry needs a non-empty `id`, `pattern` (a regex in Python's `re`
+  syntax, look-around included) and `hint`. `\w`, `\W`, `\b` and `\B` keep Python's meaning: a
+  word character is a letter, a digit or `_`, never a combining mark or a joiner. A bracket class
+  may not hold `--`, `&&` or `~~` unescaped. A search that exhausts its backtracking budget blocks
+  the line. `blocking`
   defaults to true, and false makes the rule a warning. `prose` defaults to false. A prose rule is
   skipped inside a closed fenced code block, and every other rule applies there too. A rule with a
   core rule's `id` replaces that core rule.

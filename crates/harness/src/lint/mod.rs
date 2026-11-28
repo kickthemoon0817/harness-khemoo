@@ -52,8 +52,8 @@ on stderr on every run. The file is a JSON object:
                 \"blocking\": true,         false makes it a warning
                 \"prose\": false}]}         true skips it inside a closed fence
 
-A pattern is a regex in the regex crate's syntax; each top-level alternative may open with fixed-width
-look-behinds and close with look-aheads. A rule whose id is a core rule's replaces that rule.
+A pattern is a regex in Python's re syntax, \\w and \\b meaning what they mean there. A bracket class may
+not hold --, && or ~~ unescaped. A rule whose id is a core rule's replaces that rule.
 Exit 0 clean (warnings allowed), 1 blocking findings, 2 usage, rules-file or fetch error.";
 
 #[derive(clap::Args)]
@@ -154,15 +154,19 @@ fn lint_main(args: &Args) -> Result<u8, String> {
     let mut version_words = Vec::new();
     let mut installation = Vec::new();
     let (rules_file, instance) = rules_path();
-    if rules_file.is_none()
-        && let Some(instance) = instance.as_ref().filter(|dir| dir.is_dir())
-    {
-        // An instance without its rules is likely a missed copy, and the lint then passes what
-        // the project's rules would block, so say so on every run.
-        eprintln!(
-            "harness lint: no lint_rules.json in {}; only the core rules applied",
-            instance.display()
-        );
+    // An instance without its rules is likely a missed copy, and the lint then passes what the
+    // project's rules would block, so say so on every run.
+    if rules_file.is_none() {
+        match &instance {
+            Some(dir) if dir.is_dir() => eprintln!(
+                "harness lint: no lint_rules.json in {}; only the core rules applied",
+                dir.display()
+            ),
+            Some(_) => {}
+            None => eprintln!(
+                "harness lint: no instance dir found (set HARNESS_INSTANCE_DIR or HARNESS_HOME); only the core rules applied"
+            ),
+        }
     }
     if let Some(path) = rules_file {
         let file = load_rules_file(&path)?;

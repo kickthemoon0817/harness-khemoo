@@ -1,6 +1,5 @@
 //! The rules: the core every installation gets, and an installation's `lint_rules.json`.
 
-// Writing to a String cannot fail.
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -65,9 +64,8 @@ impl Rule {
     }
 }
 
-/// Each string once, longest first: one alternative per string, so a longer one its context
-/// rejects still lets a shorter one match at the same start.
-fn longest_first(items: &[String]) -> Vec<&str> {
+/// Each string once, escaped, longest first, as alternatives of one group.
+fn alternation(items: &[String]) -> String {
     let mut unique: Vec<&str> = Vec::new();
     for item in items {
         if !unique.contains(&item.as_str()) {
@@ -75,7 +73,8 @@ fn longest_first(items: &[String]) -> Vec<&str> {
         }
     }
     unique.sort_by_key(|item| std::cmp::Reverse(item.chars().count()));
-    unique
+    let escaped: Vec<_> = unique.into_iter().map(fancy_regex::escape).collect();
+    format!("(?:{})", escaped.join("|"))
 }
 
 /// A bare dotted quad passes right after a version word (`version 1.2.3.4`); with a port it is an
@@ -89,14 +88,15 @@ fn host_address_pattern(version_words: &[String]) -> String {
         let Some(first) = chars.next() else { continue };
         let head = if first.is_alphabetic() {
             let cased: String = first.to_uppercase().chain(first.to_lowercase()).collect();
-            format!("[{}]", regex_syntax::escape(&cased))
+            format!("[{}]", fancy_regex::escape(&cased))
         } else {
-            regex_syntax::escape(&first.to_string())
+            fancy_regex::escape(&first.to_string()).into_owned()
         };
+        // Writing to a String cannot fail.
         let _ = write!(
             prefix,
             r"(?<!\b{head}{} )",
-            regex_syntax::escape(chars.as_str())
+            fancy_regex::escape(chars.as_str())
         );
     }
     format!(r"(?<![\w.]){ipv4}:\d{{1,5}}\b|(?<![\w.-]){prefix}{ipv4}(?![\w-]|\.\d|:\d)")
@@ -116,13 +116,9 @@ pub fn core_rules(
         .filter(|root| !root.is_empty())
         .collect();
     if !roots.is_empty() {
-        let alternatives: Vec<String> = longest_first(&roots)
-            .into_iter()
-            .map(|root| format!(r"(?<![\w.-]){}(?![\w.-])", regex_syntax::escape(root)))
-            .collect();
         rules.push(Rule::core(
             "harness-path",
-            &alternatives.join("|"),
+            &format!(r"(?<![\w.-]){}(?![\w.-])", alternation(&roots)),
             "a path in the harness's own trees: name the path inside the repository at a commit",
             true,
             false,
@@ -155,7 +151,7 @@ pub fn core_rules(
     )?);
     rules.push(Rule::core(
         "harness-file",
-        r"\b(?:claim|merge-lock|tick-pid|tick|usage-ok|pr-sweep|worktree-gc|dashboard)\.(?:sh|py)\b|\blib/(?:instance|usage)\.sh\b|\bstate/(?:locks|logs|paused)\b",
+        r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage-ok|pr-sweep|worktree-gc|public-record-lint|dashboard)\.(?:sh|py)\b|\blib/(?:instance|usage)\.sh\b|\bstate/(?:locks|logs|paused)\b|\bharness (?:lint|claimable)\b",
         "a harness file: name the repository command that does the same",
         true,
         false,
@@ -182,13 +178,9 @@ pub fn core_rules(
         false,
     )?);
     if !labels.is_empty() {
-        let alternatives: Vec<String> = longest_first(labels)
-            .into_iter()
-            .map(|label| format!(r"(?<![\w:-]){}(?![\w:-])", regex_syntax::escape(label)))
-            .collect();
         rules.push(Rule::core(
             "label-mention",
-            &alternatives.join("|"),
+            &format!(r"(?<![\w:-]){}(?![\w:-])", alternation(labels)),
             "a harness label in prose: the labels show on the issue; say the state in words",
             false,
             false,
