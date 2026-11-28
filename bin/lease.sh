@@ -60,6 +60,19 @@
 #          It prints YIELDED (exit 1) and joins the line. Needs no tick.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
+#   Idle holds: a single-slot kit hold, or a whole-card --all / --all-remote hold, whose slot
+#       containers have not been seen running for IDLE_HOLD_S (600 s) on end is released by the next
+#       acquire or status that sees it. That call prints RECLAIMED slot=K from <issue> (no kit for N s)
+#       on stderr, a line a slot, and appends it to state/logs/lease.log. A local slot's container is
+#       read on this host's daemon, a remote slot's on that slot's host over ssh. A whole-card hold is
+#       one hold: idle only while the container of every slot it holds is down. idle-since.K records
+#       when slot K's hold was first seen idle; the clock starts again when the container is seen
+#       running, when the slot changes holder, when its daemon cannot be read (so a failed read never
+#       reclaims) and when no call has looked for IDLE_SAMPLE_GAP_S (300 s). Device leases, whole-card
+#       reservations and holds of an issue the operator named (`prioritize`) are left alone.
+#       IDLE_HOLD_S=0 turns the rule off. bin/card_dispatch.sh reads status every minute, so the
+#       samples are never far apart. A tick whose hold was reclaimed asks again with the acquire it
+#       makes before its next run.
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
@@ -373,13 +386,91 @@ drop_whole_card() {
   done
   return $held
 }
+# A tick that compiles or writes between runs holds no card meanwhile: a hold whose slot containers
+# stay down IDLE_HOLD_S on end is released (see the header). Runs under the lease lock.
+: "${IDLE_HOLD_S:=600}"
+: "${IDLE_SAMPLE_GAP_S:=300}"
+LEASE_LOG="$H/state/logs/lease.log"
+reclaim_by=""
+idle_file() { echo "$LOCKS/idle-since.$1"; }
+operator_named() { [ -s "$OPERATOR_FILE" ] && tr ' ' '\n' < "$OPERATOR_FILE" | grep -qxF -- "$1"; }
+# The daemon that runs slot $1's containers: this host's, or the remote host the slot belongs to.
+slot_daemon() { if [ "$1" -le "$GPU_SLOTS" ]; then echo local; else slot_host "$1"; fi; }
+# The names of a daemon's running containers, one a line; fails when the daemon cannot be read.
+# This host's daemon is read whatever DOCKER_HOST the caller carries (bin/remote-env.sh), and
+# `timeout` runs the docker binary, never an exported docker function.
+running_names() {
+  if [ "$1" = local ]; then
+    DOCKER_HOST='' timeout 15 docker ps --format '{{.Names}}' 2>/dev/null
+  else
+    timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=5 "$1" "docker ps --format '{{.Names}}'" 2>/dev/null
+  fi
+}
+reclaim_idle() {
+  [[ "$IDLE_HOLD_S" =~ ^[0-9]+$ ]] && [ "$IDLE_HOLD_S" -gt 0 ] || return 0
+  local now s f line hi hp d key since last ri rp out msg
+  local -a slots=() keys=()
+  local -A read_ok=() names=() gslots=() gidle=() gbusy=() gissue=()
+  now=$(date -u +%s)
+  for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
+    f=$(slot_file "$s"); line=$(cat "$f" 2>/dev/null); hi=""; hp=""
+    read -r hi hp _ <<< "$line"
+    if [ -z "$line" ] || ! kill -0 "$hp" 2>/dev/null || [[ "$line" == *" reserved-for-all" ]] || operator_named "$hi"; then
+      rm -f "$(idle_file "$s")"; continue
+    fi
+    slots+=("$s")
+  done
+  [ "${#slots[@]}" -gt 0 ] || return 0
+  # One read a daemon a call.
+  for s in "${slots[@]}"; do
+    d=$(slot_daemon "$s")
+    [ -n "${read_ok[$d]+x}" ] && continue
+    if out=$(running_names "$d"); then read_ok[$d]=1; names[$d]=$'\n'"$out"$'\n'; else read_ok[$d]=0; fi
+  done
+  for s in "${slots[@]}"; do
+    f=$(slot_file "$s"); line=$(cat "$f" 2>/dev/null); hi=""; hp=""
+    read -r hi hp _ <<< "$line"
+    d=$(slot_daemon "$s")
+    case "$line" in
+      *" exclusive"|*" held-for-all"|*" remote-all"*) key="card $hp $d" ;;
+      *) key="slot $s" ;;
+    esac
+    [ -n "${gslots[$key]+x}" ] || keys+=("$key")
+    gslots[$key]+="$s "; gissue[$key]=$hi
+    if [ "${read_ok[$d]}" != 1 ] || [[ "${names[$d]}" == *$'\n'"$(slot_container "$s")"$'\n'* ]]; then
+      rm -f "$(idle_file "$s")"; gbusy[$key]=1; continue
+    fi
+    since=""; last=""; ri=""; rp=""
+    [ -s "$(idle_file "$s")" ] && read -r since last ri rp < "$(idle_file "$s")"
+    if ! [[ "$since" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || [ "$ri" != "$hi" ] || [ "$rp" != "$hp" ] \
+        || [ $(( now - last )) -gt "$IDLE_SAMPLE_GAP_S" ]; then
+      since=$now
+    fi
+    echo "$since $now $hi $hp" > "$(idle_file "$s")"
+    if [ -z "${gidle[$key]:-}" ] || [ $(( now - since )) -lt "${gidle[$key]}" ]; then gidle[$key]=$(( now - since )); fi
+  done
+  for key in "${keys[@]}"; do
+    [ -z "${gbusy[$key]:-}" ] && [ "${gidle[$key]:-0}" -ge "$IDLE_HOLD_S" ] || continue
+    for s in ${gslots[$key]}; do
+      f=$(slot_file "$s"); line=$(cat "$f" 2>/dev/null)
+      rm -f "$f" "$(idle_file "$s")"
+      msg="RECLAIMED slot=$s from ${gissue[$key]} (no kit for ${gidle[$key]} s)"
+      echo "$msg" >&2
+      mkdir -p "${LEASE_LOG%/*}" 2>/dev/null
+      echo "$(date -u +%FT%TZ) $msg [$line] seen by ${reclaim_by:-lease.sh}" >> "$LEASE_LOG" 2>/dev/null
+    done
+  done
+  return 0
+}
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
     case "$issue" in -*) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote [--no-cost]|--device]: an issue number comes first, not $issue" >&2; exit 2 ;; esac
     stated="${3:-}"
+    reclaim_by="acquire $issue${stated:+ $stated}"
     if [ "$stated" = "--device" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      reclaim_idle
       for s in $(card_slots); do
         f=$(slot_file $s)
         if [ -s "$f" ] && [[ "$(cat "$f")" == *" exclusive" || "$(cat "$f")" == *" held-for-all" ]] \
@@ -422,6 +513,7 @@ case "${1:-}" in
       no_cost=""; room=--alone
       if [ "${4:-}" = --no-cost ]; then no_cost=" no-cost"; room=--alone-card; fi
       exec 8>"$K"; flock 8
+      reclaim_idle
       [ -n "$REMOTE_CARD_HOSTS" ] || { echo "BUSY no remote card is named"; exit 1; }
       n=$(remote_count)
       grant_remote_all() {
@@ -488,6 +580,7 @@ case "${1:-}" in
         exit 2
       fi
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      reclaim_idle
       first_issue=$(priority_issue)
       if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
         # Yield to the issue with priority and keep the wait on record. A holder
@@ -550,6 +643,7 @@ case "${1:-}" in
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+    reclaim_idle
     render=""
     if [ "$stated" = "--render" ]; then render=1; stated=""; fi
     render_live && render_busy=1
@@ -677,7 +771,7 @@ case "${1:-}" in
     out="NOT-HOLDER"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
-      if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f"; out="RELEASED slot=$s"; fi
+      if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f" "$(idle_file "$s")"; out="RELEASED slot=$s"; fi
     done
     if [ -s "$DEVICE_FILE" ] && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then rm -f "$DEVICE_FILE"; out="RELEASED device"; fi
     echo "$out"
@@ -723,6 +817,8 @@ case "${1:-}" in
     esac
     ;;
   status)
+    # A status that cannot take the lock within a few seconds lists the slots without reclaiming.
+    if { exec 8>"$K"; } 2>/dev/null && flock -w 5 8; then reclaim_by=status; reclaim_idle; exec 8>&-; fi
     for i in $(seq 1 "$(remote_count)"); do
       echo "remote card: $(remote_host $i) (slots $(host_slots $i | head -1)-$(host_slots $i | tail -1))"
     done

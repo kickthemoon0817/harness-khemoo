@@ -82,6 +82,11 @@ immediately.
 This is the single most important pattern in the harness: **ownership is proven by process
 liveness, never by elapsed time.** The same rule governs issue claims.
 
+A GPU slot adds one condition for a live holder: its slot containers must run. A hold whose
+containers are seen down for `IDLE_HOLD_S` on end is released by the next `lease.sh` call that
+sees it, because a card held with no kit on it starves every tick waiting for one; the holder
+takes it again with its next acquire.
+
 ### Issue queue as the work protocol
 
 Issues are the queue, labels are the state machine (`ai` = queued, `ai:wip` = claimed), and PRs
