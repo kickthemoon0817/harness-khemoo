@@ -22,6 +22,7 @@ printf '%s\n' "${FROM_HOOK:-unset} ${FROM_EXPORTS:-unset}" > "$FAKE_ENV"
 printf '%s\n' "rules=${PUBLIC_RECORD_RULES:-unset} pr=${PUBLIC_RECORD_PR_SECTIONS:-unset}" \
     "issue=${PUBLIC_RECORD_ISSUE_SECTIONS:-unset} repo=${GH_REPO:-unset} wip=${WIP_LABEL:-unset}" \
     "low=${LOW_LABEL:-unset} token=${GH_TOKEN:-unset}" > "$FAKE_LINT_ENV"
+printf '%s\n' "${HARNESS_BIN:-unset}" > "$FAKE_LINT_ENV.bin"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
@@ -145,6 +146,8 @@ check_with "QUEUE_DEPTH_CMD=\"$H/plain-file --flag\""
 check "check fails when QUEUE_DEPTH_CMD is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable QUEUE_DEPTH_CMD ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "CLAUDE_BIN=no-such-claude"
 check "check fails when CLAUDE_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable CLAUDE_BIN (no-such-claude)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "HARNESS_BIN=$H/plain-file"
+check "check fails when HARNESS_BIN is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable HARNESS_BIN ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "GH_REPO="
 check "check fails when GH_REPO is unset and the origin names none" '[ "$rc" -eq 1 ] && grep -q "GH_REPO unset" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 git -C "$H/target" remote add origin git@github.com:derived-org/derived-repo.git
@@ -207,6 +210,7 @@ GH_TOKEN=env-token launch
 check "the lint's settings and the labels reach the tick, GH_TOKEN does not" \
     '[ "$(cat "$FAKE_LINT_ENV")" = "$(printf "%s\n" "rules=$H/rules.json pr=Summary,Why" "issue=Summary repo=o/r&x|y\\z wip=bot:wip" "low=bot:low token=unset")" ]' \
     "$(cat "$FAKE_LINT_ENV" 2>/dev/null)"
+check "HARNESS_BIN reaches the tick, for the lint" '[ "$(cat "$FAKE_LINT_ENV.bin")" = "$HARNESS_BIN" ]' "$(cat "$FAKE_LINT_ENV.bin" 2>/dev/null)"
 check "the queue count gets the config's GH_TOKEN in its environment, never in its argv" \
     'grep -qx "token=secret-token" "$FAKE_QUEUE_SEEN" && grep -q "^argv=.*queue" "$FAKE_QUEUE_SEEN" && ! grep "^argv=" "$FAKE_QUEUE_SEEN" | grep -q secret-token' \
     "$(cat "$FAKE_QUEUE_SEEN" 2>/dev/null)"
