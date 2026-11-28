@@ -112,15 +112,26 @@ impl Lint {
                 if in_fence && rule.prose {
                     continue;
                 }
-                for (start, end) in rule.pattern.find_iter(line) {
-                    findings.push(Finding::hit(rule, index + 1, &line[start..end]));
+                match rule.pattern.find_iter(line) {
+                    Ok(hits) => findings.extend(
+                        hits.into_iter()
+                            .map(|(start, end)| Finding::hit(rule, index + 1, &line[start..end])),
+                    ),
+                    Err(error) => findings.push(Finding::unchecked(rule, index + 1, &error)),
                 }
             }
             if in_fence {
                 continue;
             }
             for rule in &self.warnings {
-                for (start, end) in rule.pattern.find_iter(line) {
+                let hits = match rule.pattern.find_iter(line) {
+                    Ok(hits) => hits,
+                    Err(error) => {
+                        findings.push(Finding::unchecked(rule, index + 1, &error));
+                        continue;
+                    }
+                };
+                for (start, end) in hits {
                     let matched = &line[start..end];
                     if seen_warnings.insert((rule.id.clone(), matched.to_owned())) {
                         findings.push(Finding::hit(rule, index + 1, matched));
@@ -246,6 +257,20 @@ impl Finding {
             matched: matched.to_owned(),
             hint: rule.hint.clone(),
             blocking: rule.blocking,
+        }
+    }
+
+    /// A line the rule could not be checked on blocks, whatever the rule, so nothing is passed
+    /// unchecked.
+    fn unchecked(rule: &Rule, line: usize, error: &str) -> Self {
+        Self {
+            rule_id: rule.id.clone(),
+            line,
+            matched: String::new(),
+            hint: format!(
+                "the rule could not be checked on this line ({error}): shorten or split the line"
+            ),
+            blocking: true,
         }
     }
 }
@@ -417,6 +442,7 @@ budget 120 min (labels: ai,ai:wip). Claim time 2026-11-03T09:06:50Z.";
 
 #[cfg(test)]
 mod tests {
+    use super::super::pattern::Pattern;
     use super::super::rules::{DEFAULT_VERSION_WORDS, compose_rules, core_rules, default_labels};
     use super::*;
 
@@ -626,5 +652,81 @@ mod tests {
              8      0     0  -  | clean\n2 bodies: 1 clean, 1 with blocking findings; most frequent: process-id 2, \
              host-path 1"
         );
+    }
+
+    #[test]
+    fn a_joiner_mark_or_connector_does_not_hide_a_hit() {
+        let lint = core_lint();
+        for (text, id) in [
+            ("x\u{200d}/tmp/a", "container-tmp"),
+            ("\u{200d}pid 123", "process-id"),
+            ("e\u{301}\u{301}pid 123", "process-id"),
+            ("a\u{331}/home/bob", "host-path"),
+            ("\u{200c}~/foo", "host-path"),
+            ("x\u{203f}/tmp/a", "container-tmp"),
+        ] {
+            let findings = lint.lint(text, Kind::Comment);
+            assert!(
+                blocking_ids(&findings).contains(id),
+                "{text:?}: {}",
+                format(&findings, Kind::Comment)
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_look_ahead_retries_shorter() {
+        for (pattern, text) in [
+            (r"corp-\d+(?!\.pub)", "corp-12.pub"),
+            (r"\d+(?!x)", "12x"),
+            (r"(?:ab|abc)(?!c)", "abc"),
+        ] {
+            let rule = Rule {
+                id: "instance".to_owned(),
+                pattern: Pattern::new(pattern).expect("compiles"),
+                hint: "h".to_owned(),
+                blocking: true,
+                prose: false,
+            };
+            let lint = Lint::new(Vec::new(), Vec::new(), vec![rule]);
+            assert!(
+                blocking_ids(&lint.lint(text, Kind::Comment)).contains("instance"),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_past_the_backtrack_limit_blocks_even_for_a_warning() {
+        let rule = Rule {
+            id: "slow".to_owned(),
+            pattern: Pattern::new(r"(?:(?=a)a|a)+b").expect("compiles"),
+            hint: "h".to_owned(),
+            blocking: false,
+            prose: false,
+        };
+        let lint = Lint::new(Vec::new(), Vec::new(), vec![rule]);
+        let findings = lint.lint(&"a".repeat(40), Kind::Comment);
+        assert!(
+            blocking_ids(&findings).contains("slow"),
+            "{}",
+            format(&findings, Kind::Comment)
+        );
+    }
+
+    #[test]
+    fn harness_tools_are_harness_files() {
+        let lint = core_lint();
+        for text in [
+            "ran claimable.sh",
+            "ran public-record-lint.py",
+            "ran harness lint",
+            "ran harness claimable",
+        ] {
+            assert!(
+                blocking_ids(&lint.lint(text, Kind::Comment)).contains("harness-file"),
+                "{text}"
+            );
+        }
     }
 }
