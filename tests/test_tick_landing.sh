@@ -55,7 +55,7 @@ record() {
     local stat state=${4:-$H/state}; local -a f
     mkdir -p "$state/locks"
     stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
-    printf '%s %s claude fake-model %s\n' "$1" "${f[19]}" "$3" > "$state/locks/slot$2.tick"
+    printf '%s %s %s claude fake-model %s\n' "$1" "${f[19]}" "$(cat /proc/sys/kernel/random/boot_id)" "$3" > "$state/locks/slot$2.tick"
 }
 # A claude tick holding slot $1. -o: the lock is flock's own, so killing it frees the slot. Returns
 # once the slot is held.

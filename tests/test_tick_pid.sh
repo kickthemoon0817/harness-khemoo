@@ -15,7 +15,7 @@ pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 # What a shell runs to record itself as slot 1's tick in state directory $RECORD_IN, as the runner
 # records the agent it starts; RECORD_SKEW shifts the start time, as a reused pid's would differ.
-export RECORD='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s codex m work\n" $$ $(( ${f[19]} + ${RECORD_SKEW:-0} )) > "$RECORD_IN/locks/slot1.tick"'
+export RECORD='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s codex m work\n" $$ $(( ${f[19]} + ${RECORD_SKEW:-0} )) ${RECORD_BOOT:-$(cat /proc/sys/kernel/random/boot_id)} > "$RECORD_IN/locks/slot1.tick"'
 # The agent shell records itself, writes its pid to $H/pid and runs tick-pid.sh under a tool shell
 # of its own; every shell runs a second command, so none execs into the next.
 agent() {  # $1 = the state directory the agent is recorded in
@@ -35,6 +35,10 @@ RECORD_SKEW=-1 agent "$H/state"
 check "a slot file whose start time differs, as a reused pid's does, records no tick" \
     '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
+RECORD_BOOT=00000000-0000-0000-0000-000000000000 agent "$H/state"
+check "a slot file from another boot records no tick" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+
 rm -f "$H"/state/locks/slot*.tick
 bash -c 'echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
 check "without a slot file no shell here is the tick" \
@@ -51,7 +55,7 @@ rm -f "$H"/state/locks/slot*.tick
 "$H/nodump" 'until [ -s "$H/state/locks/slot1.tick" ]; do sleep 0.05; done; cat /proc/$PPID/environ >/dev/null 2>&1 && echo readable > "$H/environ"; "$TP" > "$OUT" 2>&1' 1 &
 nd=$!
 sleep 0.2
-RECORD_IN=$H/state bash -c 'stat=$(cat /proc/'"$nd"'/stat); read -ra f <<<"${stat##*) }"; printf "%s %s codex m work\n" '"$nd"' ${f[19]} > "$RECORD_IN/locks/slot1.tick"'
+RECORD_IN=$H/state bash -c 'stat=$(cat /proc/'"$nd"'/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s codex m work\n" '"$nd"' ${f[19]} $(cat /proc/sys/kernel/random/boot_id) > "$RECORD_IN/locks/slot1.tick"'
 wait "$nd"
 check "a non-dumpable agent, whose environment no one may read, is the tick" \
     '[ "$(cat "$OUT")" = "$nd" ] && [ ! -e "$H/environ" ]' "out=$(cat "$OUT") pid=$nd environ=$(cat "$H/environ" 2>/dev/null)"
@@ -71,7 +75,7 @@ rm -f "$H"/state/locks/slot*.tick "$H"/other/locks/slot*.tick
 # On a fleet device fleetd records the agent it starts in the file FLEET_SESSION_TICK names.
 export SESSION_TICK="$H/session/tick"
 mkdir -p "$H/session"
-export STAMP='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s\n" $$ ${f[19]} > "$SESSION_TICK"'
+export STAMP='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s\n" $$ ${f[19]} $(cat /proc/sys/kernel/random/boot_id) > "$SESSION_TICK"'
 bash -c 'eval "$STAMP"; echo $$ > "$H/pid"; FLEET_SESSION=d-1-abc FLEET_SESSION_TICK="$SESSION_TICK" bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
 check "the agent fleetd's session file records is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 mv "$SESSION_TICK" "$H/session/real"; ln -s "$H/session/real" "$SESSION_TICK"

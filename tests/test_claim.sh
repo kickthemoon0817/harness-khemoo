@@ -38,7 +38,7 @@ unset HARNESS_TICK FLEET_SESSION
 record() {  # $1 = pid: recorded as slot 1's tick, as the runner records the agent it starts
     local stat; local -a f
     stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
-    printf '%s %s codex m work\n' "$1" "${f[19]}" > "$L/slot1.tick"
+    printf '%s %s %s codex m work\n' "$1" "${f[19]}" "$(cat /proc/sys/kernel/random/boot_id)" > "$L/slot1.tick"
 }
 "$H/nodump" 'until [ -s "$H/state/locks/slot1.tick" ]; do sleep 0.05; done; "$CLAIM" acquire 13 > "$H/out" 2>&1' 3 &
 agent=$!

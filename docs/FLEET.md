@@ -402,8 +402,9 @@ A dispatch only selects among what the operator configured. For an adapter:
   each name in `env_allow` that fleetd's environment sets, then the adapter's static `env` table,
   then `FLEET_SESSION` (the session id), `FLEET_SESSION_TICK` and `FLEET_ADAPTER` (the adapter
   name), which no table can override. `FLEET_SESSION_TICK` names `<state_dir>/sessions/<id>/tick`,
-  which fleetd writes right after the spawn (mode 0600, by rename) as the agent's `pid starttime`,
-  field 22 of `/proc/<pid>/stat`, and removes when the session ends: the harness's
+  which fleetd writes right after the spawn (mode 0600, by rename) as the agent's
+  `pid starttime bootid`, from field 22 of `/proc/<pid>/stat` and `/proc/sys/kernel/random/boot_id`,
+  and removes when the session ends: the harness's
   `libexec/tick-pid.sh` takes the process it records as the tick. Without `/proc` no file is
   written. Secrets therefore come from the device, never from the request.
 - At most `max_concurrent` dispatched sessions of the adapter run at once.

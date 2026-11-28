@@ -56,7 +56,7 @@ INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
 LOCAL_AGENTS="claude codex gemini"
 CLAUDE_LIMIT_RE="You've (reached|hit) your [^.]{0,40}limit"
 CODEX_LIMIT_RE="You've hit your usage limit|rate_limit_reached"
-GEMINI_LIMIT_RE="Quota exceeded|RESOURCE_EXHAUSTED|status 429|You have exhausted your"
+GEMINI_LIMIT_RE="TerminalQuotaError|RESOURCE_EXHAUSTED|exhausted your daily quota|exhausted your capacity|Quota exceeded|status 429"
 agent_setting() {  # $1 = setting, $2 = agent, $3 = default when the setting is unset
     local name="$1_$2"
     if [ -n "${!name+x}" ]; then printf '%s' "${!name}"; else printf '%s' "$3"; fi
@@ -225,6 +225,10 @@ instance_missing() {
             else echo "$HARNESS_ENV_FILE: $name is not read; remove it"; fi
         done
     fi
+    # Every tick starts through it, with SIGINT and SIGQUIT restored (BusyBox's and coreutils' before
+    # 8.31 have no such option).
+    env --default-signal=INT,QUIT true >/dev/null 2>&1 \
+        || echo "an env that takes --default-signal (GNU coreutils 8.31 or later), which starts each tick"
     # A tick runs the lint through it before every post, and the launcher counts ticks and usage with it.
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
@@ -422,17 +426,19 @@ compose_prompt() {  # $1 = the lane line
 }
 
 # Records process $1 as this slot's tick, running agent $2 on model $3 as a tick of kind $4: its
-# pid and its start time, field 22 of /proc/<pid>/stat, which stays readable for a non-dumpable
-# process and which a reused pid does not share. Written whole, by rename, and readable by this
-# user only.
+# pid, its start time, field 22 of /proc/<pid>/stat, which stays readable for a non-dumpable
+# process and which a reused pid does not share, and the boot that start time counts from, so a
+# file a crash left behind matches no process after a reboot. Written whole, by rename, and
+# readable by this user only.
 record_tick() {
-    local stat start
+    local stat start boot
     local -a fields
     stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
     read -ra fields <<<"${stat##*) }"
     start=${fields[19]:-}
-    [[ "$start" =~ ^[0-9]+$ ]] || return 0
-    (umask 077 && printf '%s %s %s %s %s\n' "$1" "$start" "$2" "$3" "$4" >"$slot_file.$$" \
+    boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    [[ "$start" =~ ^[0-9]+$ ]] && [ -n "$boot" ] || return 0
+    (umask 077 && printf '%s %s %s %s %s %s\n' "$1" "$start" "$boot" "$2" "$3" "$4" >"$slot_file.$$" \
         && mv -f "$slot_file.$$" "$slot_file")
 }
 
@@ -443,13 +449,21 @@ limit_failed() {
     [ "$1" != gemini ] || [ "$2" -ne 0 ]
 }
 
-# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message:
-# one of its last 5 non-empty lines starts with it, after spaces and an error prefix such as
-# `Error:`, `ERROR:` or `[API Error:`. An agent that quotes the sentence mid-output, from an issue
-# body or a diff, writes more after it.
+# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message.
+# For claude and codex, one of its last 5 non-empty lines starts with it, after spaces and an error
+# prefix such as `Error:` or `ERROR:`: an agent that quotes the sentence mid-output, from an issue
+# body or a diff, writes more after it. Gemini ends a quota error with a stack trace, or wraps it in
+# `[API Error: ...]`, so for it the message may be anywhere in the last 40 lines; limit_failed has
+# already required the failure that makes it one.
 limit_message() {
-    tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
-        | grep -qE -- "^[[:space:]]*(\[?([A-Za-z]+ )?([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($(agent_limit_re "$2"))"
+    local re
+    re=$(agent_limit_re "$2")
+    if [ "$2" = gemini ]; then
+        tail -c +"$1" "$log" | tail -n 40 | grep -qE -- "$re"
+    else
+        tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
+            | grep -qE -- "^[[:space:]]*(([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($re)"
+    fi
 }
 
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the

@@ -53,6 +53,17 @@ echo "$$ $(group $$) $(group $PPID | cut -d' ' -f1)" > "$FAKE_AGENTS/$name.group
 [ -e "$FAKE_AGENTS/$name.uncool" ] && rm -f "$(cat "$FAKE_AGENTS/$name.uncool")"
 limit() { case $name in codex) echo "ERROR: You've hit your usage limit. Try again later." ;; gemini) echo "Error: RESOURCE_EXHAUSTED: Quota exceeded" ;; esac; }
 [ -e "$FAKE_AGENTS/$name.limit" ] && { limit; exit 1; }
+# gemini-cli's two shapes of a quota error: a critical error and its stack, and a bracketed API error.
+if [ -e "$FAKE_AGENTS/$name.stack" ]; then
+    echo "An unexpected critical error occurred:TerminalQuotaError: You have exhausted your daily quota on this model."
+    for i in 1 2 3 4 5 6 7 8 9 10; do echo "    at frame$i (file:///usr/lib/gemini/dist/chunk-$i.js:1:$i)"; done
+    exit 1
+fi
+if [ -e "$FAKE_AGENTS/$name.api" ]; then
+    echo "[API Error: Resource has been exhausted (e.g. check quota). (Status: RESOURCE_EXHAUSTED)]"
+    printf '%s\n' "Tip: switch models with /model." "" "Session ended."
+    exit 1
+fi
 # The message without the failure: a tick that quoted it and went on.
 [ -e "$FAKE_AGENTS/$name.quoted" ] && limit
 # A tool child that outlives the tick.
@@ -452,6 +463,16 @@ launch
 check "a gemini limit message from a tick that exited 0 is no usage limit" \
     '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$H/state/logs/"tick-*.log && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
 rm -f "$FAKE_AGENTS/gemini.quoted"
+for shape in stack api; do
+    rm -rf "$H/state/model-cooldown"
+    agents_env "TICK_MODELS='gemini:model-g codex:model-x'"
+    touch "$FAKE_AGENTS/gemini.$shape"
+    launch
+    check "gemini's quota error as a $shape cools its entry and the tick moves on" \
+        '[ -e "$H/state/model-cooldown/gemini:model-g" ] && [ -s "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+    rm -f "$FAKE_AGENTS/gemini.$shape"
+done
+rm -rf "$H/state/model-cooldown"
 agents_env "TICK_MODELS='claude:model-c codex:model-x'"
 touch "$FAKE_AGENTS/claude.echo"
 launch
@@ -475,7 +496,7 @@ live() {  # $1 slot, $2 agent, $3 kind: holds the slot and records the holder as
     flock -o "$H/state/locks/slot$1.lock" sleep 60 >/dev/null 2>&1 & holders+=($!)
     until ! flock -n "$H/state/locks/slot$1.lock" true; do sleep 0.05; done
     stat=$(cat "/proc/$!/stat"); read -ra f <<<"${stat##*) }"
-    printf '%s %s %s m %s\n' "$!" "${f[19]}" "$2" "$3" > "$H/state/locks/slot$1.tick"
+    printf '%s %s %s %s m %s\n' "$!" "${f[19]}" "$(cat /proc/sys/kernel/random/boot_id)" "$2" "$3" > "$H/state/locks/slot$1.tick"
 }
 release() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); rm -f "$H"/state/locks/slot*.tick; }
 # claude at its cap 2 (65 %, half of 4) with two live ticks: the next tick runs on codex.
@@ -558,7 +579,7 @@ cat > "$FAKE_AGENTS/claude.fill.sh" <<EOF
 for fd in \$(ls /proc/\$\$/fd); do [ "\$fd" -gt 2 ] && eval "exec \$fd>&-"; done 2>/dev/null
 flock -o "$H/state/locks/slot2.lock" sleep 60 >/dev/null 2>&1 & pid=\$!
 stat=\$(cat /proc/\$pid/stat); read -ra f <<<"\${stat##*) }"
-printf '%s %s claude m work\n' \$pid \${f[19]} > "$H/state/locks/slot2.tick"
+printf '%s %s %s claude m work\n' \$pid \${f[19]} \$(cat /proc/sys/kernel/random/boot_id) > "$H/state/locks/slot2.tick"
 echo \$pid > "$FAKE_AGENTS/filler"
 EOF
 chmod +x "$FAKE_AGENTS/claude.fill.sh"
@@ -593,6 +614,17 @@ rm -rf "$H/state/model-cooldown"
 check_with "TICK_MODELS='fake-model gemini:model-g'" "AGENT_BIN_gemini=$H/fakebin/gemini" "USAGE_SOURCE_gemini="
 check "an agent without a default source must name one" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*USAGE_SOURCE_gemini unset: name gemini.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+mkdir -p "$H/oldenv"
+printf '#!/bin/sh\ncase "$1" in --default-signal*) echo "env: unrecognized option" >&2; exit 125 ;; esac\nexec /usr/bin/env "$@"\n' > "$H/oldenv/env"
+chmod +x "$H/oldenv/env"
+check_with "HARNESS_PATH=$H/oldenv:$H/fakebin:$PATH"
+check "an env without --default-signal is named as missing" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: an env that takes --default-signal (GNU coreutils 8.31 or later)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -f "$H/state/locks/instance-incomplete.stamp"
+launch
+check "the launcher logs that env as an incomplete instance and starts nothing" \
+    'grep -q "instance incomplete: an env that takes --default-signal" "$LOG" && [ ! -e "$FAKE_PROMPT" ]' "log=$(cat "$LOG")"
+write_env
 check_with "AGENT_LIMIT_RE_claude="
 check "an empty limit pattern is refused" '[ "$rc" -eq 1 ] && grep -q "missing: .*AGENT_LIMIT_RE_claude is empty" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 write_env
