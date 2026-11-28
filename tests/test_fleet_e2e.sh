@@ -77,6 +77,7 @@ TARGET_REPO=$H/target
 WORKTREE_ROOT=$H/worktrees
 GH_REPO=example-org/example-repo
 TICK_AGENT=fake
+USAGE_SOURCE_fake=none
 TICK_MODELS="model-a model-b"
 FLEET_DISPATCH=1
 FLEET_BIN=$FLEET

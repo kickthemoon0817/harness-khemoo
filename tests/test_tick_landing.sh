@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercises bin/tick.sh's landing tick in a scratch harness home: a fake claude records its lane,
-# a fake queue command answers per label, held slot locks stand for running ticks, and processes
-# carrying the runner's marker stand for live ticks.
+# a fake queue command answers per label, and processes holding a slot lock and recorded in its slot
+# file, as the runner records a tick, stand for running ticks.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -50,19 +50,25 @@ check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL
 usage() { printf '{"timestamp": %s000, "data": {"fiveHourPercent": %s, "weeklyPercent": %s}}\n' "$(date +%s)" "$1" "$2" > "$H/usage-cache.json"; }
 # Polls every 50 ms until the command $@ succeeds, for at most 20 s.
 until_ok() { local n=0; until "$@"; do [ "$n" -lt 400 ] || return 1; sleep 0.05; n=$((n + 1)); done; }
-# -o: the lock is flock's own, so killing it frees the slot. Returns once the slot is held.
+# Records process $1 as slot $2's tick of kind $3 in state directory $4 (default this home's).
+record() {
+    local stat state=${4:-$H/state}; local -a f
+    mkdir -p "$state/locks"
+    stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
+    printf '%s %s claude fake-model %s\n' "$1" "${f[19]}" "$3" > "$state/locks/slot$2.tick"
+}
+# A claude tick holding slot $1. -o: the lock is flock's own, so killing it frees the slot. Returns
+# once the slot is held.
 hold() {
     flock -o "$L/slot$1.lock" sleep 60 >/dev/null 2>&1 & holders+=($!)
     until_ok held "$1"
+    record "$!" "$1" work
 }
 held() { ! flock -n "$L/slot$1.lock" true; }
-# Starts a stand-in tick of kind $1 for state directory $2 (default this home's) in the background,
-# holding its slot's lock open as a tick does, and returns once its environment carries the marker.
+# Starts a stand-in tick of kind $1, recorded as slot 9's in state directory $2 (default this home's).
 live() {
-    local pid state=${2:-$H/state}
-    mkdir -p "$state/locks"
-    HARNESS_TICK="state=$state slot=9 agent=claude model=fake-model kind=$1" sleep 30 9>"$state/locks/slot9.lock" & pid=$!; holders+=("$pid")
-    until_ok grep -qa "^HARNESS_TICK=" <(tr '\0' '\n' < "/proc/$pid/environ")
+    sleep 30 & holders+=("$!")
+    record "$!" 9 "$1" "${2:-}"
 }
 release_all() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); }
 # The launcher's detached runners and the forks that become them both carry its path.

@@ -70,7 +70,9 @@ rollout 95 -60 86400
 check "an old rollout whose window reset still allows only one tick" '[ "$(pool codex:gpt-5.5)" = "1 codex=1" ]' "$(pool codex:gpt-5.5)"
 rm -f "$H/sessions/2026/11/28/rollout-a.jsonl"
 check "no rollout: codex starts nothing" '[ "$(pool codex:gpt-5.5)" = "0 codex=0" ]' "$(pool codex:gpt-5.5)"
-check "gemini has no windows by default: the full width" '[ "$(pool gemini:gemini-3-pro)" = "8 gemini=8" ]' "$(pool gemini:gemini-3-pro)"
+check "gemini without a source allows nothing" '[ "$(pool gemini:gemini-3-pro)" = "0 gemini=0" ]' "$(pool gemini:gemini-3-pro)"
+export USAGE_SOURCE_gemini=none
+check "gemini with the source none has the full width" '[ "$(pool gemini:gemini-3-pro)" = "8 gemini=8" ]' "$(pool gemini:gemini-3-pro)"
 
 # The pool sums the agents' caps, up to the width.
 cache 75 10; rollout 86 3600 0
@@ -86,8 +88,13 @@ EOF
 chmod +x "$H/fetch"
 printf '{"timestamp": 1000, "windows": []}\n' > "$H/gemini.json"
 export USAGE_SOURCE_gemini="json:$H/gemini.json" USAGE_FETCH_gemini="$H/fetch"
+check "reading the pool runs no fetch" '[ "$(pool gemini:g)" = "0 gemini=0" ]' "$(pool gemini:g); $(cat "$H/gemini.json")"
+TICK_MODELS=gemini:g "$HARNESS_BIN" usage refresh
 check "a stale normalized file is refreshed by its fetch script" '[ "$(pool gemini:g)" = "4 gemini=4" ]' "$(pool gemini:g); $(cat "$H/gemini.json")"
-unset USAGE_SOURCE_gemini USAGE_FETCH_gemini
+printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 1, "window_minutes": 60}]}\n' "$(( $(date +%s) + 3600 ))" > "$H/gemini.json"
+check "a reading dated an hour ahead allows nothing" '[ "$(pool gemini:g)" = "0 gemini=0" ]' "$(pool gemini:g)"
+export USAGE_SOURCE_gemini=none
+unset USAGE_FETCH_gemini
 
 # usage-ok.sh asks about the agent its tick runs.
 cache 87 87; ok claude
@@ -109,8 +116,15 @@ cache 10 10 4000; ok claude
 check "usage-ok.sh with a stale reading exits 2" '[ "$rc" -eq 2 ] && [[ "$out" == "usage unknown"* ]]' "rc=$rc $out"
 rollout 89 3600 0; cache 10 10; ok codex
 check "usage-ok.sh in a codex tick reads codex's windows" '[ "$rc" -eq 1 ] && [[ "$out" == "codex: primary=89% "* ]]' "rc=$rc $out"
+rollout 89 3600 86400; ok codex
+check "usage-ok.sh stands down on an old codex reading past the stand-down point" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+rollout 40 3600 86400; ok codex
+check "usage-ok.sh goes on with an old codex reading under it" '[ "$rc" -eq 0 ]' "rc=$rc $out"
+(unset USAGE_SOURCE_gemini; ok gemini; [ "$rc" -eq 2 ] && [[ "$out" == *"USAGE_SOURCE_gemini is not set"* ]]); rc_unset=$?
+check "usage-ok.sh in a gemini tick without a source starts nothing" '[ "$rc_unset" -eq 0 ]' "rc=$rc_unset"
 ok gemini
 check "usage-ok.sh in a gemini tick with no windows goes on" '[ "$rc" -eq 0 ] && [[ "$out" == "gemini: no windows "*": go on" ]]' "rc=$rc $out"
+rollout 89 3600 0
 out=$(FLEET_ADAPTER=codex "$H/libexec/usage-ok.sh"); rc=$?
 check "usage-ok.sh under fleetd reads the adapter's agent" '[ "$rc" -eq 1 ] && [[ "$out" == "codex: "* ]]' "rc=$rc $out"
 out=$(HARNESS_TICK="state=$H/elsewhere slot=1 agent=codex model=m kind=work" TICK_AGENT=claude "$H/libexec/usage-ok.sh"); rc=$?

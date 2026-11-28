@@ -73,22 +73,33 @@ agent_limit_re() {
 }
 # Sets argv to the command line that runs agent $1 on model $2 here.
 agent_argv() {
-    local bin flags
-    bin=$(agent_bin "$1")
-    # The entry names the model; a --model among the flags would contradict it.
+    local flags word skip=""
+    local -a words
     case $1 in
         claude) flags=$(agent_setting AGENT_FLAGS claude --dangerously-skip-permissions) ;;
         codex) flags=$(agent_setting AGENT_FLAGS codex --dangerously-bypass-approvals-and-sandbox) ;;
         gemini) flags=$(agent_setting AGENT_FLAGS gemini --yolo) ;;
     esac
-    flags=$(printf '%s' "$flags" | sed -E 's/--model[= ][^ ]+//')
-    # shellcheck disable=SC2206
+    # Split on whitespace, never globbed.
+    read -ra words <<<"$flags"
+    argv=("$(agent_bin "$1")")
     case $1 in
-        claude) argv=("$bin" -p --model "$2" $flags) ;;
-        codex) argv=("$bin" exec --model "$2" $flags -) ;;
+        claude) argv+=(-p --model "$2") ;;
+        codex) argv+=(exec --model "$2") ;;
         # gemini runs headless because its stdin is not a terminal.
-        gemini) argv=("$bin" --model "$2" $flags) ;;
+        gemini) argv+=(--model "$2") ;;
     esac
+    # The entry names the model; a model flag among the flags would contradict it.
+    for word in "${words[@]}"; do
+        if [ -n "$skip" ]; then skip=""; continue; fi
+        case $word in
+            --model|-m) skip=1 ;;
+            --model=*|-m?*) ;;
+            *) argv+=("$word") ;;
+        esac
+    done
+    [ "$1" = codex ] && argv+=(-)
+    return 0
 }
 
 # The launcher fires every couple of minutes: a state that persists is logged once, not each time.
@@ -120,6 +131,11 @@ entry_of() {  # $1 = a list entry; prints it as agent:model
 : "${LANE_LABEL:=}"
 lane_entry=""; [ -n "$LANE_MODEL" ] && lane_entry=$(entry_of "$LANE_MODEL")
 lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
+# True while entry $1 cools down on its usage limit.
+entry_cooling() {
+    local stamp="$MODEL_COOL/$1"
+    [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
+}
 
 # The agents the model list and the lane name, one a line, each once.
 list_agents() {
@@ -141,6 +157,14 @@ harness_usage() {
         export MAX_SLOTS MODEL_COOLDOWN_S
         TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" usage "$@"
     )
+}
+# Runs each stale agent's fetch command, once per launcher firing and per tick a runner starts; the
+# readings are only read in between.
+usage_refresh() {
+    local was=$pool_lane
+    lane_on && pool_lane=$lane_entry
+    harness_usage refresh >/dev/null 2>&1
+    pool_lane=$was
 }
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
@@ -177,17 +201,30 @@ instance_missing() {
             done
         fi
     fi
-    # Keys this harness does not read, which an older harness.env may still set: a tick would run
-    # without what they ask for, so each must move to the key named after it.
-    for k in CLAUDE_BIN:AGENT_BIN_claude CLAUDE_FLAGS:AGENT_FLAGS_claude TICK_AGENT_EXES: \
-        FIVE_HALF_AT:USAGE_STEPS_SHORT FIVE_ONE_AT:USAGE_STEPS_SHORT FIVE_NONE_AT:USAGE_STEPS_SHORT \
-        WEEK_HALF_AT:USAGE_STEPS_LONG WEEK_ONE_AT:USAGE_STEPS_LONG WEEK_NONE_AT:USAGE_STEPS_LONG \
-        USAGE_TICK_STOP_WEEK_PCT:USAGE_TICK_STOP_LONG_PCT; do
-        name=${k%%:*}
-        [ -n "${!name+x}" ] || continue
-        if [ -n "${k#*:}" ]; then echo "$HARNESS_ENV_FILE: $name is not read; set ${k#*:} instead"
-        else echo "$HARNESS_ENV_FILE: $name is not read; remove it"; fi
+    for a in $(list_agents); do
+        # Only claude's cache and codex's rollouts are found without being named.
+        name="USAGE_SOURCE_$a"
+        case $a in claude|codex) ;; *)
+            [ -n "${!name:-}" ] || echo "$HARNESS_ENV_FILE: $name unset: name $a's usage source, or none" ;;
+        esac
+        # An empty pattern matches every line, so every attempt would read as a usage limit.
+        name="AGENT_LIMIT_RE_$a"
+        [ -n "${!name+x}" ] && [ -z "${!name}" ] && echo "$HARNESS_ENV_FILE: $name is empty"
     done
+    # Keys this harness does not read, which an older harness.env may still set: a tick would run
+    # without what they ask for, so each must move to the key named after it. Only the file is read
+    # for them: an environment that happens to carry one is not this config.
+    if [ -r "$HARNESS_ENV_FILE" ]; then
+        for k in CLAUDE_BIN:AGENT_BIN_claude CLAUDE_FLAGS:AGENT_FLAGS_claude TICK_AGENT_EXES: \
+            FIVE_HALF_AT:USAGE_STEPS_SHORT FIVE_ONE_AT:USAGE_STEPS_SHORT FIVE_NONE_AT:USAGE_STEPS_SHORT \
+            WEEK_HALF_AT:USAGE_STEPS_LONG WEEK_ONE_AT:USAGE_STEPS_LONG WEEK_NONE_AT:USAGE_STEPS_LONG \
+            USAGE_TICK_STOP_WEEK_PCT:USAGE_TICK_STOP_LONG_PCT; do
+            name=${k%%:*}
+            grep -qE "^[[:space:]]*(export[[:space:]]+)?$name=" "$HARNESS_ENV_FILE" || continue
+            if [ -n "${k#*:}" ]; then echo "$HARNESS_ENV_FILE: $name is not read; set ${k#*:} instead"
+            else echo "$HARNESS_ENV_FILE: $name is not read; remove it"; fi
+        done
+    fi
     # A tick runs the lint through it before every post, and the launcher counts ticks and usage with it.
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
@@ -199,29 +236,36 @@ if [ "${1:-}" != check ]; then
     [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] \
         || log_changed "hooks/env.sh failed (exit $rc); ticks run without it"
 fi
-# What the core prompt, the lint and a tick's gh calls read; none of it is secret. GH_TOKEN never
-# reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
+# What the core prompt, the lint and a tick's gh calls read; none of it is secret. No GitHub token
+# reaches a tick, whoever exported it: the config's is for the cron scripts and the dashboard.
 export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
     ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
     TICK_AGENT FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG HARNESS_BIN
-export -n GH_TOKEN
+export -n GH_TOKEN GITHUB_TOKEN
 
-# Sets allowed, the pool's cap from each agent's usage windows; usage_line, each agent's cap and
-# windows for the log; and unknown, the agents without a fresh reading. Slots past TICK_WIDTH and up
-# to MAX_SLOTS are left for the landing tick. A failed reading allows nothing.
-compute_allowed() {
+# The width the usage steps scale from. Slots past it and up to MAX_SLOTS are left for the landing tick.
+width=${TICK_WIDTH:-$MAX_SLOTS}
+
+# Sets pool_cap, the ticks the agents' usage windows allow at once; room, how many more may start,
+# each agent's cap less its live ticks summed; usage_line, each agent's cap and windows for the log;
+# and unknown, the agents without a fresh reading. A failed reading allows nothing.
+compute_pool() {
     local doc err
-    allowed=0; usage_line="usage=unknown"; unknown=""
+    pool_cap=0; room=0; usage_line="usage=unknown"; unknown=""
     # A lane agent with no lane tick to run would size the pool for runners that find no entry.
     pool_lane=""; lane_wanted && pool_lane=$lane_entry
     err=$(mktemp)
     if doc=$(harness_usage --json 2>"$err"); then
-        { read -r allowed; read -r usage_line; read -r unknown; } < <(jq -r '
-            .pool_cap,
-            ([.agents[] | "\(.agent)=\(.cap)[" + (if .reading.state == "fresh" or .reading.state == "unmetered"
-                then [.windows[] | "\(.name):\(.used_pct | if . == floor then floor else . end)%"] | join(",") else "unknown" end) + "]"] | join(" ")),
+        { read -r pool_cap; read -r room; read -r usage_line; read -r unknown; } < <(jq -r '
+            def windows: [.windows[] | "\(.name):\(.used_pct | if . == floor then floor else . end)%"];
+            .pool_cap, .room,
+            ([.agents[] | "\(.agent)=\(.cap)[" + (.reading.state as $s
+                | if $s == "fresh" or $s == "unmetered" then windows
+                  elif $s == "holding" then ["holding"] + windows
+                  else ["unknown"] end | join(",")) + "]"] | join(" ")),
             ([.agents[] | select(.reading.state == "stale" or .reading.state == "unreadable") | .agent] | join(" "))' <<<"$doc")
-        [[ "$allowed" =~ ^[0-9]+$ ]] || allowed=0
+        [[ "$pool_cap" =~ ^[0-9]+$ ]] || pool_cap=0
+        [[ "$room" =~ ^[0-9]+$ ]] || room=0
     else
         log_changed "ERROR harness usage failed ($(tail -n 1 "$err" | cut -c1-200)); starting nothing"
     fi
@@ -326,11 +370,20 @@ queue_depth() {  # $1 = the label to count
 # True while no lane tick can start: the lane's entry cools down on its usage limit, or its agent's
 # windows allow none.
 lane_closed() {
-    local stamp="$MODEL_COOL/$lane_entry"
-    [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ] && return 0
+    entry_cooling "$lane_entry" && return 0
     ! pick_model "" --entry "$lane_entry" --landing >/dev/null
 }
-lane_wanted() {  # true when this tick should run on the model lane
+# True when this tick should run on the model lane. Decided once per launcher firing and per tick a
+# runner starts: clear lane_known to decide again.
+lane_known=""
+lane_wanted() {
+    if [ -z "$lane_known" ]; then
+        lane_known=1; lane_yes=""
+        lane_decide && lane_yes=1
+    fi
+    [ -n "$lane_yes" ]
+}
+lane_decide() {
     lane_on && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
     lane_closed && return 1
     local want_l
@@ -366,6 +419,28 @@ compose_prompt() {  # $1 = the lane line
     sed "${subst[@]}" "$CORE_PROMPT"
     printf '\n## This installation\n\n'
     sed "${subst[@]}" "$INSTANCE_PROMPT"
+}
+
+# Records process $1 as this slot's tick, running agent $2 on model $3 as a tick of kind $4: its
+# pid and its start time, field 22 of /proc/<pid>/stat, which stays readable for a non-dumpable
+# process and which a reused pid does not share. Written whole, by rename, and readable by this
+# user only.
+record_tick() {
+    local stat start
+    local -a fields
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    read -ra fields <<<"${stat##*) }"
+    start=${fields[19]:-}
+    [[ "$start" =~ ^[0-9]+$ ]] || return 0
+    (umask 077 && printf '%s %s %s %s %s\n' "$1" "$start" "$2" "$3" "$4" >"$slot_file.$$" \
+        && mv -f "$slot_file.$$" "$slot_file")
+}
+
+# Whether attempt status $2 of agent $1 can be a usage limit. Gemini exits non-zero on every error
+# it ends on, a quota error included, so its message echoed by a tick that went on is not one.
+# Claude's and Codex's status on a limit is not known, so for them the message alone decides.
+limit_failed() {
+    [ "$1" != gemini ] || [ "$2" -ne 0 ]
 }
 
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
@@ -500,6 +575,8 @@ if [ "${1:-}" = "runner" ]; then
     done
     # No free slot: another runner won the race. Exit quietly.
     [ -z "$slot" ] && exit 0
+    slot_file="$LOCKS/slot$slot.tick"
+    usage_refresh
 
     # A slot does not wait for the next cron firing: when a tick ends early and work is
     # still queued, the slot starts the next tick at once, each with a fresh context.
@@ -541,7 +618,7 @@ if [ "${1:-}" = "runner" ]; then
                 break
             fi
             agent=${entry%%:*}; model=${entry#*:}
-            # How `harness ticks` and libexec/tick-pid.sh tell this tick, whichever process runs it.
+            # The tick's own description, for its tool shells (libexec/usage-ok.sh reads its agent).
             marker="state=$HARNESS_STATE slot=$slot agent=$agent model=$model kind=$kind"
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
@@ -553,16 +630,22 @@ if [ "${1:-}" = "runner" ]; then
                 dispatch=("$FLEET_BIN" dispatch --device "${FLEET_DEVICE:-auto}" --adapter "$agent"
                     --workdir "$TARGET_REPO" --model "$model" --wait --timeout $(( (LONG_TICK_BUDGET_MIN + 30) * 60 )))
                 [ "$kind" = landing ] && dispatch+=(--label tick=landing)
-                compose_prompt "$lane" | HARNESS_TICK="$marker" "${dispatch[@]}" >>"$log" 2>&1
-                rc=$?
+                argv=("${dispatch[@]}")
             else
                 agent_argv "$agent" "$model"
-                compose_prompt "$lane" | HARNESS_TICK="$marker" "${argv[@]}" >>"$log" 2>&1
-                rc=$?
             fi
+            # The tick is this shell's own child, so its pid is known, and its prompt comes on a
+            # pipe, never on disk or in argv. The slot file is how `harness ticks` and
+            # libexec/tick-pid.sh know it: they never read its environment, which a non-dumpable
+            # agent keeps private.
+            HARNESS_TICK="$marker" "${argv[@]}" < <(compose_prompt "$lane") >>"$log" 2>&1 &
+            tick_pid=$!
+            record_tick "$tick_pid" "$agent" "$model" "$kind"
+            wait "$tick_pid"; rc=$?
+            rm -f "$slot_file"
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$agent model=$model" >>"$log"
-            if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] \
+            if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" \
                 && tail -c +"$log_from" "$log" | tail -n 40 | grep -qE -- "$(agent_limit_re "$agent")"; then
                 mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
                 echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
@@ -580,11 +663,14 @@ if [ "${1:-}" = "runner" ]; then
         [ -n "$landing" ] && break
         [ "$chain" -ge "${MAX_CHAIN:-24}" ] && break
         harness_paused && break
-        compute_allowed
-        [ "$slot" -gt "$allowed" ] && break
+        usage_refresh; lane_known=""
+        compute_pool
+        # The slot goes on only while the agent it ran can still run here: another agent's room is
+        # the launcher's to fill.
+        pick_model "" --agent "$agent" >/dev/null || break
         compute_want
         [ "$want" -lt 1 ] && break
-        echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot chains tick $(( chain + 1 )) after ${dur}s: $usage_line allowed=$allowed claimable=$claimable young=$young" \
+        echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot chains tick $(( chain + 1 )) after ${dur}s: $usage_line pool=$pool_cap room=$room claimable=$claimable young=$young" \
             >>"$LOGS/allocator.log"
     done
     exit 0
@@ -613,13 +699,16 @@ while [ "$s" -le "$MAX_SLOTS" ]; do
     s=$(( s + 1 ))
 done
 [ "$free" -eq 0 ] && exit 0
-# No entry can run even a landing tick (each cools down or its agent's windows allow none), and
-# no model lane can run: a runner would only log that nothing ran. A pick that fails goes on, so
-# compute_allowed logs why.
-pick_model "" --landing >/dev/null 2>&1
-[ "$?" -eq 1 ] && ! lane_wanted && exit 0
+# Every entry, the lane's too, cools down on its usage limit: a runner would only log that nothing
+# ran. Anything less goes on, so a reading that allows nothing is logged below.
+all_cooling=1
+for e in $(model_list) $(lane_on && printf '%s' "$lane_entry"); do
+    entry_cooling "$(entry_of "$e")" || { all_cooling=""; break; }
+done
+[ -n "$all_cooling" ] && exit 0
 
-compute_allowed
+usage_refresh
+compute_pool
 if [ -n "$unknown" ]; then
     # Say so at most hourly: the launcher fires every couple of minutes.
     stamp="$LOCKS/usage-unknown.stamp"
@@ -637,13 +726,15 @@ if [ "$busy" -eq 0 ] && [ "$want" -lt 1 ]; then
     if [ "$hb_age" -ge "$HEARTBEAT_INTERVAL" ]; then want=1; touch "$hb"; fi
 fi
 
-spawn=$(( allowed - busy ))
+spawn=$(( width - busy ))
+[ "$spawn" -gt "$room" ] && spawn=$room
 [ "$spawn" -gt "$want" ] && spawn=$want
 [ "$spawn" -lt 0 ] && spawn=0
 # A landing needs little budget, but in a full pool it waits for a slot to free,
-# which can outlast the merge slot. With every allowed slot held and no young tick about to
-# claim, one landing tick starts past the width for an issue waiting for the slot.
-if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
+# which can outlast the merge slot. With the pool full (no slot inside the width, or no agent with
+# room) and no young tick about to claim, one landing tick starts past the width for an issue
+# waiting for the slot.
+if [ "$spawn" -eq 0 ] && [ "$pool_cap" -gt 0 ] && { [ "$busy" -ge "$width" ] || [ "$room" -eq 0 ]; } && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
     && ! awk '$6 == "landing" { found = 1 } END { exit !found }' <<<"$ticks"; then
     ready=0
@@ -651,7 +742,7 @@ if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [
     else log_changed "ERROR ready queue count failed ($queue_error); no landing tick"; fi
     if [ "$ready" -gt 0 ]; then
         slotmax=$(( busy + 1 )); [ "$slotmax" -gt "$MAX_SLOTS" ] && slotmax=$MAX_SLOTS
-        echo "$(date -u +%Y%m%dT%H%M%SZ) $usage_line allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
+        echo "$(date -u +%Y%m%dT%H%M%SZ) $usage_line pool=$pool_cap room=$room busy=$busy ready=$ready -> spawning 1 landing tick" \
             >>"$LOGS/allocator.log"
         setsid "$0" runner "$slotmax" 0 landing >/dev/null 2>&1 &
         exit 0
@@ -660,12 +751,12 @@ fi
 [ "$spawn" -eq 0 ] && exit 0   # quiet: no log spam on the frequent no-op firings
 
 ts=$(date -u +%Y%m%dT%H%M%SZ)
-echo "$ts $usage_line allowed=$allowed busy=$busy claimable=$claimable -> spawning $spawn" \
+echo "$ts $usage_line pool=$pool_cap room=$room busy=$busy claimable=$claimable -> spawning $spawn" \
     >>"$LOGS/allocator.log"
 
 i=0
 while [ "$i" -lt "$spawn" ]; do
-    setsid "$0" runner "$allowed" $(( i * STAGGER_SECONDS )) >/dev/null 2>&1 &
+    setsid "$0" runner "$width" $(( i * STAGGER_SECONDS )) >/dev/null 2>&1 &
     i=$(( i + 1 ))
 done
 exit 0
