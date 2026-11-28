@@ -31,8 +31,9 @@ skipped.
 `WIP_LABEL`, `READY_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`, `LONG_LABEL`, `FIRST_LABEL`, `LOW_LABEL`,
 `LANE_LABEL`), and the agent and fleet keys (`TICK_AGENT`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
 `FLEET_CONFIG`). None of them is secret. No other config key reaches a tick's environment unless
-`TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
-`TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr-sweep.sh` and
+`TICK_EXPORTS` lists it. `GH_TOKEN` and `GITHUB_TOKEN` never do: `tick.sh` unexports both, whether
+the environment, `TICK_EXPORTS` or `hooks/env.sh` exported them, and passes `GH_TOKEN` only to the
+queue count. `pr-sweep.sh` and
 `worktree-gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
@@ -97,31 +98,42 @@ Three agents run locally, each with the composed prompt on stdin, never in argv:
 
 `AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
 is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
-the entry names the model. `AGENT_LIMIT_RE_<agent>` is an extended regex matched against the last
-40 lines of the attempt's output. Any other agent runs only through fleet, where its limit regex
-defaults to the three above joined.
+the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. `AGENT_LIMIT_RE_<agent>`
+is an extended regex matched against the last 40 lines of the attempt's output; set but empty,
+`check` refuses it, since it would match every line. A gemini attempt counts as a usage limit only
+when it also exited non-zero, as gemini does on every error it ends on, so a tick that quoted the
+message and went on does not cool its entry; claude's and codex's exit status on a limit is not
+documented, so for them the message alone decides. Any other agent runs only through fleet, where
+its limit regex defaults to the three above joined.
 
 ### Tick identity
 
-The runner starts every tick, a local agent or `fleet dispatch`, with
-`HARNESS_TICK="state=<HARNESS_STATE> slot=<n> agent=<agent> model=<model> kind=work|lane|landing"`
-in its environment. A tick is the topmost process carrying it: one whose parent does not. A node
-shim and the native agent it starts, and every tool shell, inherit the variable, so each resolves
-to the process the runner started. `harness ticks [--json]` lists the live ticks of
-`$HARNESS_STATE` as pid, age in seconds, slot, agent, model and kind, read from this user's
-`/proc/<pid>/environ` and `stat`. Only markers naming this state directory count, so two
-installations on one host never count each other's ticks. The launcher counts young, lane and
-landing ticks and each agent's running ticks with it.
+The runner starts each tick, a local agent or `fleet dispatch`, as its own child, its prompt on a
+pipe, and records it in `$HARNESS_STATE/locks/slot<n>.tick` (mode 0600, written by rename) as
+`pid starttime agent model kind`, where `starttime` is field 22 of `/proc/<pid>/stat` and `kind` is
+`work`, `lane` or `landing`. It removes the file when the tick ends, so a slot records one tick at
+most. A tick is live while `/proc/<pid>/stat` gives the same start time, which a reused pid does
+not. Only `stat` is read, never a process's environment or descriptors, which an agent CLI that
+marks itself non-dumpable (the release Codex CLI does) keeps private. `harness ticks [--json]` lists
+the live ticks of `$HARNESS_STATE` as pid, age in seconds, slot, agent, model and kind; the launcher
+counts young, lane and landing ticks and each agent's running ticks with it. A tool child that
+outlives its tick, `nohup`'d or backgrounded, is no tick: no slot file records it.
 
-`libexec/tick-pid.sh` gives a claim and the merge lock to the nearest ancestor of the calling shell
-that carries `HARNESS_TICK` for this state directory, or `FLEET_SESSION` (fleetd sets it in every
-agent it starts), while its parent carries neither. An operator's own agent CLI carries neither, so
-it never takes a claim or the merge lock.
+`libexec/tick-pid.sh` gives a claim and the merge lock to the first ancestor of the calling shell
+whose pid and start time a slot file of this state directory records. On a fleet device, where the
+caller's own environment carries `FLEET_SESSION` (fleetd sets it in every agent it starts), it is
+the ancestor whose parent is `fleetd`. An operator's own agent CLI is recorded nowhere, so it never
+takes a claim or the merge lock. The tick also carries `HARNESS_TICK="state=<HARNESS_STATE>
+slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool shells, and
+`libexec/usage-ok.sh` among them, which agent they run under; nothing counts or identifies ticks by it.
 
 ## Usage windows
 
-`harness usage [--json]` prints each agent of the model list and the lane with its windows and cap,
-and the pool's cap; `harness usage check --agent <agent>` is the stand-down test
+`harness usage [--json]` prints each agent of the model list and the lane with its windows, cap and
+live ticks, and the pool's cap and room; `harness usage pick` names the entry the next tick runs on;
+`harness usage refresh` runs the fetch command (below) of each agent whose reading is old, which the
+launcher does once per firing and a runner once per tick it starts, and nothing else does but
+`check`; `harness usage check --agent <agent>` is the stand-down test
 `libexec/usage-ok.sh` runs for the agent its tick's `HARNESS_TICK` names (else `FLEET_ADAPTER`, set
 by fleetd, else `TICK_AGENT`): exit 0 while every window is under its stand-down point, 1 at or
 past one, 2 without a fresh reading. Both read the keys below from the environment, which
@@ -133,13 +145,20 @@ past one, 2 without a fresh reading. Both read the keys below from the environme
 |---|---|---|
 | `json:<path>` | `{"timestamp": <ms>, "windows": [{"name": "<name>", "used_pct": <n>, "window_minutes": <n>, "resets_at": ...}]}`, any number of windows; a name is 1 to 32 of `A-Z`, `a-z`, `0-9` and `_` | |
 | `claude-cache:<path>` | Claude Code's `{"timestamp": <ms>, "data": {"fiveHourPercent": <n>, "weeklyPercent": <n>}}`, as windows `five_hour` (300 min) and `weekly` (10080 min) | `claude`, at `USAGE_CACHE` (default `~/.claude/usage-cache.json`) |
-| `codex-sessions[:<dir>]` | the last `rate_limits` in the newest `rollout-*.jsonl` under `<dir>` (default `${CODEX_HOME:-~/.codex}/sessions`), as windows `primary` and `secondary` from `used_percent`, `window_minutes` and `resets_at`; a null window is absent | `codex` |
-| `none` | no windows: only the usage-limit cooldown gates the agent | every other agent |
+| `codex-sessions[:<dir>]` | the last `rate_limits` of the newest `rollout-*.jsonl` that has one under `<dir>/YYYY/MM/DD/` (default `${CODEX_HOME:-~/.codex}/sessions`), walked newest first by name and given up after 16 rollouts or a directory of more than 10000 entries, as windows `primary` and `secondary` from `used_percent`, `window_minutes` and `resets_at`; a null window is absent | `codex` |
+| `none` | no windows: only the usage-limit cooldown gates the agent | |
 
-`USAGE_FETCH_<agent>` is an executable that refreshes the reading when it is missing or older than
-`USAGE_REFRESH_AFTER` (default 120 s); it runs with no input or output and is killed after 60 s.
+Only claude and codex have a default. Every other agent, gemini and any fleet adapter included,
+must set `USAGE_SOURCE_<agent>`, to `none` when only the cooldown is to gate it: without one its cap
+is 0 and `check` names the key.
+
+`USAGE_FETCH_<agent>` is an executable that `harness usage refresh` runs when the reading is missing
+or older than `USAGE_REFRESH_AFTER` (default 120 s); it runs with no input or output and is killed
+after 60 s.
 Claude's defaults to `USAGE_FETCH` (default `~/.claude/scripts/usage-fetch.sh`). A reading older
-than `USAGE_MAX_AGE` (default 1800 s) is stale. A codex reading is as new as the newest codex
+than `USAGE_MAX_AGE` (default 1800 s) is stale, and one that names no window, one dated more than
+300 s ahead of this host's clock, or one with a numeric `resets_at` under 1000000000 (not Unix
+seconds) is unreadable: each allows nothing. A codex reading is as new as the newest codex
 session on the host. Past its age, while every window gives `resets_at`, it allows one codex tick
 rather than none: that tick's own run writes a fresh reading, which then sizes the pool. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. The
 rollouts hold only this host's codex use: an instance whose codex ticks run on fleet devices, or
@@ -150,10 +169,15 @@ A window under a day long steps by `USAGE_STEPS_SHORT` (default `60 70 80`), a l
 `USAGE_STEPS_LONG` (default `80 85 88`), and `USAGE_STEPS_<agent>_<name>` sets one window's steps:
 under the first point the window allows `TICK_WIDTH` (default `MAX_SLOTS`) ticks, under the second
 half of it, under the third one, and from there none. No window may reach `USAGE_CEILING_PCT`
-(default 90). An agent's cap is its tightest window's, `TICK_WIDTH` with no windows, and 0 with no
-fresh reading from a source other than `none`. The pool's cap is the agents' caps summed, at most
-`TICK_WIDTH`, leaving out an agent each of whose entries cools down, and an agent only the lane
-names while no lane tick is wanted; slots past it and up to `MAX_SLOTS` are left for the landing tick. A running tick
+(default 90). An agent's cap is its tightest window's, `TICK_WIDTH` with the source `none`, and 0
+with no fresh reading. The pool's cap is the agents' caps summed, at most `TICK_WIDTH`, leaving out
+an agent each of whose entries cools down, and an agent only the lane names while no lane tick is
+wanted. Its room is each such agent's cap less its live ticks, never below 0, summed and at most
+`TICK_WIDTH`, so one agent's ticks past its cap, its windows having filled while they ran, take
+none of another's. The launcher starts `min(TICK_WIDTH − held slots, room, queued issues)` runners,
+and a runner chains its next tick only while the agent it ran can still run. Slots past
+`TICK_WIDTH` and up to `MAX_SLOTS` are left for the landing tick, which starts when the pool is
+full. A running tick
 stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
 `USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
 
@@ -176,7 +200,7 @@ usage windows on the device, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and `TA
 adapter's `env` table, since fleetd gives a dispatched agent no environment of the hub's (see
 [`docs/FLEET.md`](FLEET.md)). The adapter's `timeout_s` caps the tick: a device whose `timeout_s` is
 under the `--timeout` above ends a tick before its budget does. The launcher counts
-a live tick by its `fleet dispatch` process, which carries `HARNESS_TICK`.
+a live tick by its `fleet dispatch` process, which the slot file records.
 
 An adapter's `exe` may be a wrapper script, but it must stay inside the adapter's `workdir_roots`:
 on Linux, fleetd checks the child's working directory right after the spawn and kills its process
@@ -262,7 +286,7 @@ The prompt's first line tells the tick which issues it may claim:
 
 The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, it needs `QUEUE_DEPTH_CMD`
 to count lane issues, and the lane's agent needs room under its usage windows. The launcher
-recognises a lane or landing tick by its marker's `kind`.
+recognises a lane or landing tick by its slot file's `kind`.
 
 ## Lint rules
 
@@ -318,12 +342,13 @@ Every source below is optional. While its keys are empty, its panel stays off th
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
 | `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and any `FLEET_CONFIG` in its environment as a tick's fleet has them, so a plain `fleet status --json` reads the instance's fleet.toml |
 
-The live ticks are those `harness ticks` lists, with the agent, model and kind each marker names.
+The live ticks are those `harness ticks` lists, with the agent, model and kind each slot file names.
 The usage panel weighs each agent's windows as `harness usage` does, from the model list
 (`state/tick-model`, else `TICK_MODELS`), `LANE_MODEL` while `LANE_LABEL` is set, `TICK_AGENT`,
 `MAX_SLOTS`, `TICK_WIDTH`, `MODEL_COOLDOWN_S` and every `USAGE_*` and `AGENT_*` key, read from
 harness.env as above (expanded as a path key is) and else from the environment. It never runs a
-`USAGE_FETCH` command: refreshing a reading is the launcher's job.
+`USAGE_FETCH` command: refreshing a reading is the launcher's job. It cannot tell whether the
+launcher wants a lane tick, so its pool is shown as at most the cap it gives.
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has
