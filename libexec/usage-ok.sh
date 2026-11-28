@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Prints the usage reading of this tick's agent and exits 0 while each of its windows is under the
-# point where a tick stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT
-# unless set, for a window under a day; USAGE_TICK_STOP_LONG_PCT, the same point unless set, for a
-# longer one), 1 at or above one, and 2 when no fresh reading exists (`harness usage check`). The
-# agent is the one HARNESS_TICK names, else the fleet adapter that started the tick, else
-# TICK_AGENT. Ticks run it before starting any build, suite, long run or agent.
+# Prints the usage reading of this tick's agent and exits 0 while each of its windows is under its
+# stand-down point (`harness usage check`, docs/INSTANCE.md), 1 at or above one, and 2 when no fresh
+# reading exists. The agent is the one HARNESS_TICK names, else the fleet adapter that started the
+# tick, else TICK_AGENT. Ticks run it before starting any build, suite, long run or agent.
 set -u
 # shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
@@ -26,8 +24,9 @@ find_claim() {
     return 1
 }
 
-# A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue this tick claimed that is newer than the
-# claim, once per tick. Silent, and never fatal, when no token or no answer is found.
+# A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue
+# this tick claimed that is newer than the claim, once per tick. Silent, and never fatal, when no
+# token or no answer is found.
 operator_notes() {
     local state="$HARNESS_STATE" seen since filter out
     [ -n "${GH_REPO:-}" ] || return 0

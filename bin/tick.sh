@@ -42,7 +42,6 @@ harness_load
 : "${SUPERVISOR_STOP_GRACE_S:=1200}"
 : "${SUPERVISOR_MAX_PARKS_PER_DAY:=2}"
 supervisor=""; [ "${SUPERVISOR:-}" = 1 ] && supervisor=1
-# The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
 : "${FLEET_BIN:=fleet}"
 fleet=""; [ "${FLEET_DISPATCH:-}" = 1 ] && fleet=1
@@ -148,13 +147,11 @@ entry_of() {  # $1 = a list entry; prints it as agent:model
 : "${LANE_LABEL:=}"
 lane_entry=""; [ -n "$LANE_MODEL" ] && lane_entry=$(entry_of "$LANE_MODEL")
 lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
-# True while entry $1 cools down on its usage limit.
 entry_cooling() {
     local stamp="$MODEL_COOL/$1"
     [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
 }
 
-# The agents the model list and the lane name, one a line, each once.
 list_agents() {
     local w
     for w in $(model_list) $(lane_on && printf '%s' "$lane_entry"); do
@@ -201,7 +198,6 @@ harness_supervisor() {
     )
 }
 
-# The supervisor's entry: SUPERVISOR_MODEL, else the configured list's last.
 supervisor_entry() {
     local m=${SUPERVISOR_MODEL:-}
     [ -n "$m" ] || m=$(configured_models | awk '{print $NF}')
@@ -246,12 +242,9 @@ supervisor_argv() {
         codex) argv=("$(agent_bin codex)" exec --model "$2" "${flags[@]}" -) ;;
     esac
 }
-# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. Each flag is
-# one the defaults use, given once, and the confining ones are all there: claude's --tools with an
-# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox, every --disable of
-# SUPERVISOR_CODEX_DISABLED and -c web_search=disabled, its only -c. A flag outside this list,
-# such as one that names tools, loads settings or MCP servers, enables a feature or lifts the
-# sandbox, is refused, not weighed.
+# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. An
+# allowlist: a flag outside it, such as one that names tools, loads settings or MCP servers, enables
+# a feature or lifts the sandbox, is refused, not weighed.
 supervisor_flags_ok() {
     local agent=$1 word seen=" " f
     shift
@@ -316,7 +309,6 @@ directive_read() {
         esac
     done <<<"$out"
 }
-# The directive's focus and avoid, as sentences for the lane line.
 directive_lane() {
     local n f="" a=""
     for n in $d_focus; do f+="${f:+, }#$n"; done
@@ -560,8 +552,9 @@ queue_depth() {  # $1 = the label to count
     queue_n=$out
 }
 
-# True while no lane tick can start: the lane's entry cools down on its usage limit, or its agent's
-# windows allow none.
+# True while the lane cannot run at all: its entry cools down, or its agent's cap is 0. --landing
+# ignores how many ticks that agent runs, so a lane only full for now stays open, and work ticks
+# keep off its issues.
 lane_closed() {
     entry_cooling "$lane_entry" && return 0
     ! pick_model "" --entry "$lane_entry" --landing >/dev/null
@@ -599,8 +592,7 @@ lane_decide() {
 LANDING_MARK="This tick is the merge slot's landing tick"
 LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
 
-# The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
-# the key's value through a sed escape, never eval, so a value cannot run as code.
+# {{KEY}} takes the key's value through a sed escape, never eval, so a value cannot run as code.
 PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
 SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S SUPERVISOR_MAX_PARKS_PER_DAY"
 prompt_subst() {  # sets subst to the sed expressions for the keys $@
@@ -620,8 +612,7 @@ compose_prompt() {  # $1 = the lane line
     printf '\n## This installation\n\n'
     sed "${subst[@]}" "$INSTANCE_PROMPT"
 }
-# The supervisor's prompt: its core rules, this installation's own when it has them, then the health
-# snapshot. GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
+# GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
 compose_supervisor_prompt() {
     local subst doc
     # shellcheck disable=SC2086
@@ -684,7 +675,6 @@ limit_message() {
 # fleet exits 1 when any device failed, with the document complete, so only the document decides.
 fleet_check() {
     # The document is read as text, so one that is not JSON is reported like one of the wrong shape.
-    # A device is down when its ok is false, null, 0, "", [] or {}.
     # shellcheck disable=SC2016
     timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null | jq -Rrs \
         --argjson agents "$(list_agents | jq -Rsc 'split("\n") | map(select(. != ""))')" \
@@ -721,7 +711,6 @@ fleet_check() {
            | "@missing \(.)")'
 }
 
-# ----------------------------------------------------------------- check mode
 if [ "${1:-}" = check ]; then
     echo "harness home:  $HARNESS_HOME"
     echo "instance:      $HARNESS_INSTANCE_DIR"
@@ -793,7 +782,6 @@ if [ "${1:-}" = check ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------- runner mode
 # bash parses this whole block when a runner starts, so a running runner keeps
 # chaining ticks on the code it started with. After changing the block, stop the
 # runner shells (`kill` the `tick.sh runner` process, never its tick). A tick
@@ -818,7 +806,7 @@ if [ "${1:-}" = "runner" ]; then
         eval "exec $fd>&-"
         s=$(( s + 1 ))
     done
-    # No free slot: another runner won the race. Exit quietly.
+    # No free slot: another runner won the race.
     [ -z "$slot" ] && exit 0
     slot_file="$LOCKS/slot$slot.tick"
     usage_refresh
@@ -936,7 +924,6 @@ if [ "${1:-}" = "runner" ]; then
     exit 0
 fi
 
-# ------------------------------------------------------------ supervisor mode
 # One supervisor tick, outside the slots. The agent runs with no tools (supervisor_argv), in an
 # empty directory, with an environment that holds only what its CLI needs to sign in: it can only
 # answer. Its prompt and the health snapshot come on stdin; its answer, one JSON document at the
@@ -1035,7 +1022,7 @@ if [ -n "$supervisor" ]; then
     [ -n "$d_width" ] && [ "$width" -gt "$d_width" ] && width=$d_width
 fi
 
-# 1. Cheapest gate: if every slot is held there is nothing to decide.
+# Cheapest gate: if every slot is held there is nothing to decide.
 busy=0; free=0; s=1
 while [ "$s" -le "$MAX_SLOTS" ]; do
     exec {fd}>"$LOCKS/slot$s.lock"
