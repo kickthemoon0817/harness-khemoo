@@ -27,6 +27,7 @@ cron line or a `state/paused` file stops each chain at its next tick boundary.
 ```bash
 target/release/harness ticks               # live ticks: pid, age, slot, agent, model, kind
 bin/tick.sh check | grep '^usage:'         # each agent's usage windows and the ticks they allow
+bin/tick.sh check | grep '^account:'       # each account's sign-in, its end and its cap
 tail -5 state/logs/allocator.log           # sizing decisions
 ls -lt state/logs | head                   # recent ticks (0 bytes = still running)
 cat state/locks/claim.* 2>/dev/null        # local claims: issue, PID, since
@@ -44,11 +45,11 @@ runs keep their newest 20 logs, `supervisor-*`.
 20260819T081558Z claude=4[five_hour:62%,weekly:53%] codex=8[primary:20%] allowed=8 busy=1 claimable=6 -> spawning 6
 ```
 
-Each agent's cap and the usage of its windows (`unknown` without a fresh reading), the pool's cap
-they sum to, how many slots are held, how many issues are unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
+Each agent's cap and the usage of its windows (`unknown` without a fresh reading), each account
+counted as its own (`claude@work=4[...]`), the pool's cap they sum to, how many slots are held, how many issues are unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
 Other lines name a state the launcher noticed, logged once rather than at every firing: `held: <reason>`
 (the instance's `hooks/hold`), `instance incomplete: <item>`, `hooks/env.sh failed`, a model that
-hit its usage limit, or no fresh usage reading. A line with `ERROR queue count failed` means the
+hit its usage limit, an account signed out or signed in again, or no fresh usage reading. A line with `ERROR queue count failed` means the
 queue count could not be read (a GitHub outage, or a broken `QUEUE_DEPTH_CMD`); the launcher then
 counts one claimable issue so a tick still runs.
 
@@ -109,6 +110,23 @@ Usually not. Check in this order:
    or incomplete, usage may have hit a band that caps at 0, or `claimable` may be 0 because every
    issue carries the WIP label.
 4. **Everything looks idle mid-turn.** You are probably between firings. Wait two minutes.
+
+## Accounts
+
+With `AGENT_ACCOUNTS_DIR` set, each `agent@account` entry runs on its own folder
+([`docs/INSTANCE.md`](INSTANCE.md#accounts); read its note on the providers' terms first). To add
+one, create its folder, sign in to it once by hand, and name it in `TICK_MODELS`:
+
+```bash
+mkdir -p "$HOME/.agents-accounts/claude/claude-work" && chmod 700 "$HOME/.agents-accounts/claude/claude-work"
+CLAUDE_CONFIG_DIR="$HOME/.agents-accounts/claude/claude-work" claude auth login
+target/release/harness accounts            # each folder: signed in or out, how, until when, its cap
+```
+
+`signed out` in `allocator.log`, the `account:` lines of `tick.sh check` or the dashboard's Accounts
+panel means that account's ticks start no more: sign in to its folder again, and the first
+launcher firing after its last check is five minutes old notices. The other accounts and agents run on meanwhile. A sign-in ending in
+under 3 days is marked on the dashboard; sign in again before it ends.
 
 ## Recovery
 

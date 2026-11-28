@@ -44,7 +44,8 @@ then the instance's `prompts/tick.md`. If no slot is free it exits silently — 
 a normal outcome, not an error.
 
 The runner starts every tick as its own child and records it in its slot's
-`state/locks/slot<n>.tick`: pid, start time, agent, model and kind (work, lane or landing). A tick is
+`state/locks/slot<n>.tick`: pid, start time, agent (with its account, when it runs on one), model
+and kind (work, lane or landing). A tick is
 live while its pid has that start time, so a reused pid is never mistaken for one, and a slot holds
 one tick at most, so a tool child that outlives its tick is never a second. `harness ticks` counts
 live ticks from these files, and `libexec/tick-pid.sh` gives a claim to the first ancestor a slot
@@ -67,7 +68,12 @@ Each tick runs on the best entry of the priority list (`state/tick-model`, else 
 whose entries are `agent:model` across vendors, that is not cooling down and whose agent runs
 fewer ticks than its usage windows allow. A tick that dies on its usage limit marks that entry in
 `state/model-cooldown/` for `MODEL_COOLDOWN_S` and re-runs at once on the next entry, which may
-be another agent's.
+be another agent's. An entry may also name one of the agent's accounts, `agent@account:model`: a
+folder under `AGENT_ACCOUNTS_DIR` the owner signed in to by hand, which the tick runs with as the
+agent's own config folder. Each account then counts as an agent of its own, with its own windows,
+cap, running ticks and cooldowns, and one found signed out allows nothing; off, with no
+`AGENT_ACCOUNTS_DIR`, none of it exists ([`docs/INSTANCE.md`](INSTANCE.md#accounts), which also
+says why to read each provider's terms first).
 
 The stagger exists because two ticks starting in the same second will read the same unclaimed
 issue list and claim the same issue. Staggering is cheaper and more robust than a distributed

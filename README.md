@@ -18,7 +18,10 @@ infrastructure live in an instance directory that you own.
   free slot (an `flock`ed file) or exits quietly.
 - The runner composes the prompt (a lane line, `prompts/tick-core.md`, then the instance's
   `prompts/tick.md`) and pipes it to the agent CLI of the best `TICK_MODELS` entry
-  (`agent:model`) that is not cooling down and whose agent has room under its windows.
+  (`agent:model`) that is not cooling down and whose agent has room under its windows. An entry
+  may name one of several accounts of an agent, `agent@account:model`, each a folder signed in to by
+  hand and counted on its own (`AGENT_ACCOUNTS_DIR`, docs/INSTANCE.md; check the providers' terms
+  first).
 - The tick claims an issue (`libexec/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
   worktree under `WORKTREE_ROOT`, lints every body with `"$HARNESS_BIN" lint` before posting
   it, and ends with a summary. It stays inside its budget and the usage ceiling (`libexec/usage-ok.sh`).
