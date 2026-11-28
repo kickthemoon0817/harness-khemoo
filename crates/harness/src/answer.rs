@@ -113,12 +113,20 @@ pub fn last_answer(text: &str) -> Option<Result<Answer, String>> {
 /// What a body the supervisor posts must not hold: each would reach past the issue it is on. A
 /// mention notifies a person or a team, a link or an image sends readers, or their browsers,
 /// elsewhere, HTML hides what it says, an address is a person's, and a closing keyword closes
-/// whatever it names once its PR merges.
-static UNSAFE: LazyLock<[(Regex, &str); 7]> = LazyLock::new(|| {
+/// whatever it names once its PR merges. GitHub reads a character reference (`&#64;`, `&commat;`)
+/// as the character it names, so none is taken; a link reference's definition, and a `//` that
+/// starts a word, make a link of text that shows none.
+static UNSAFE: LazyLock<[(Regex, &str); 10]> = LazyLock::new(|| {
     let pattern = |text: &str| Regex::new(text).unwrap_or_else(|error| panic!("{text}: {error}"));
     [
+        (
+            pattern(r"&#|&[A-Za-z][A-Za-z0-9]*;"),
+            "a character reference",
+        ),
         (pattern(r"(^|[^A-Za-z0-9_])@[A-Za-z0-9]"), "an @-mention"),
+        (pattern(r"(?m)^\s{0,3}\[[^\]]+\]:"), "a link reference"),
         (pattern(r"(?i)\b[a-z][a-z0-9+.-]*://|(?i)\bwww\."), "a URL"),
+        (pattern(r"(?m)(^|[\s(<:=])//"), "a URL"),
         (pattern(r"!\["), "an image"),
         (pattern(r"\]\("), "a link"),
         (pattern(r"<[A-Za-z/!?]"), "HTML or an autolink"),
@@ -347,33 +355,78 @@ fn lint(paths: &Paths, text: &str) -> Result<(), String> {
     }
 }
 
+/// Why an action failed, and whether its comment had already been posted.
+struct Failure {
+    posted: bool,
+    why: String,
+}
+
 /// Performs `plan`, its comment first: a park's label goes on only once its question is posted,
 /// so no issue waits on the operator for a question nobody can read.
-fn perform(paths: &Paths, repo: &Repo, plan: &Plan, queue_label: &str) -> Result<(), String> {
-    in_queue(repo, plan.issue, queue_label)?;
+fn perform(paths: &Paths, repo: &Repo, plan: &Plan, queue_label: &str) -> Result<(), Failure> {
+    let before = |why: String| Failure { posted: false, why };
+    in_queue(repo, plan.issue, queue_label).map_err(before)?;
+    let mut posted = false;
     if let Some(text) = &plan.comment {
-        lint(paths, text)?;
+        lint(paths, text).map_err(before)?;
         repo.api(
             &["-X", "POST", "-f", &format!("body={text}")],
             &format!("issues/{}/comments", plan.issue),
-        )?;
+        )
+        .map_err(before)?;
+        posted = true;
     }
+    let after = |why: String| Failure { posted, why };
     for name in &plan.add {
         repo.api(
             &["-X", "POST", "-f", &format!("labels[]={name}")],
             &format!("issues/{}/labels", plan.issue),
-        )?;
+        )
+        .map_err(after)?;
     }
     for name in &plan.remove {
         repo.api(
             &["-X", "DELETE"],
             &format!("issues/{}/labels/{}", plan.issue, path_segment(name)),
-        )?;
+        )
+        .map_err(after)?;
     }
     Ok(())
 }
 
-/// The issues parked in the 24 hours before `now`, as the directive log records them.
+/// What is read of the end of the directive log to count the day's parks: a day of runs, every
+/// one of them parking, logs far less.
+const PARK_LOG_TAIL: u64 = 64 * 1024;
+
+/// The issues parked in the 24 hours before `now`, counted from the end of the directive log at
+/// `path`. No log is no park; a log that cannot be read is an error, so the cap fails closed.
+pub fn parks_today(path: &Path, now: u64) -> Result<usize, String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.to_string()),
+    };
+    let size = file
+        .seek(SeekFrom::End(0))
+        .map_err(|error| error.to_string())?;
+    let from = size.saturating_sub(PARK_LOG_TAIL);
+    file.seek(SeekFrom::Start(from))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(PARK_LOG_TAIL)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    // A tail cut mid-line starts at the next whole one.
+    let whole = if from > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok(recent_parks(whole, now))
+}
+
+/// The issues parked in the 24 hours before `now`, as the directive log `log` records them.
 pub fn recent_parks(log: &str, now: u64) -> usize {
     log.lines()
         .filter(|line| line.contains(" github: parked #"))
@@ -464,8 +517,7 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
     let max_parks: usize = env("SUPERVISOR_MAX_PARKS_PER_DAY")
         .and_then(|text| text.trim().parse().ok())
         .unwrap_or(2);
-    let log_text = files::read_text_limited(&paths.directive_log(), 1 << 20).unwrap_or_default();
-    let mut parks = recent_parks(&log_text, now);
+    let mut parks = parks_today(&paths.directive_log(), now);
     let allowed = allowed_labels(env);
     let operator = env("OPERATOR_LABEL").unwrap_or_else(|| "ai:operator".to_owned());
     let queue_label = env("ISSUE_LABEL").unwrap_or_else(|| "ai".to_owned());
@@ -473,9 +525,18 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
     for value in &answer.github {
         let line = match serde_json::from_value::<Action>(value.clone()) {
             Err(error) => format!("github: refused an action: {error}"),
-            Ok(Action::Park { issue, .. }) if parks >= max_parks => format!(
-                "github: refused park on #{issue}: {parks} issues parked in 24 h already (SUPERVISOR_MAX_PARKS_PER_DAY)"
+            Ok(Action::Park { issue, .. }) if parks.as_ref().is_err() => format!(
+                "github: refused park on #{issue}: the day's parks cannot be counted ({})",
+                parks.as_ref().err().map_or("", String::as_str)
             ),
+            Ok(Action::Park { issue, .. })
+                if parks.as_ref().is_ok_and(|count| *count >= max_parks) =>
+            {
+                format!(
+                    "github: refused park on #{issue}: {} issues parked in 24 h already (SUPERVISOR_MAX_PARKS_PER_DAY)",
+                    parks.as_ref().map_or(0, |count| *count)
+                )
+            }
             Ok(action) => match plan(&action, &allowed, &operator) {
                 Err(why) => format!(
                     "github: refused {} on #{}: {why}",
@@ -488,19 +549,40 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
                         action.name(),
                         plan.issue
                     ),
-                    Some(repo) => match perform(paths, repo, &plan, &queue_label) {
-                        Ok(()) => {
-                            if matches!(action, Action::Park { .. }) {
-                                parks += 1;
-                            }
-                            describe(&action, &plan)
+                    Some(repo) => {
+                        let done = perform(paths, repo, &plan, &queue_label);
+                        // A posted question counts toward the cap whatever became of its label,
+                        // so the same question is not asked again.
+                        let posted = done
+                            .as_ref()
+                            .map_or_else(|failure| failure.posted, |()| true);
+                        if posted
+                            && matches!(action, Action::Park { .. })
+                            && let Ok(count) = parks.as_mut()
+                        {
+                            *count += 1;
                         }
-                        Err(why) => format!(
-                            "github: refused {} on #{}: {why}",
-                            action.name(),
-                            plan.issue
-                        ),
-                    },
+                        match done {
+                            Ok(()) => describe(&action, &plan),
+                            Err(Failure { posted: true, why })
+                                if matches!(action, Action::Park { .. }) =>
+                            {
+                                format!(
+                                    "github: parked #{} for the operator, but its label failed: {why}",
+                                    plan.issue
+                                )
+                            }
+                            Err(Failure { posted: true, why }) => format!(
+                                "github: commented on #{}, but its labels failed: {why}",
+                                plan.issue
+                            ),
+                            Err(Failure { why, .. }) => format!(
+                                "github: refused {} on #{}: {why}",
+                                action.name(),
+                                plan.issue
+                            ),
+                        }
+                    }
                 },
             },
         };
@@ -579,6 +661,18 @@ mod tests {
             ("Fixes #3", "a closing keyword"),
             ("this closes example-org/other#12", "a closing keyword"),
             ("Resolved: #4", "a closing keyword"),
+            ("thanks &#64;octocat", "a character reference"),
+            ("thanks &commat;octocat", "a character reference"),
+            ("mail a.b&#64;example.org", "a character reference"),
+            ("read &#x40;team", "a character reference"),
+            (
+                "see [here][1]\n\n[1]: //example.org/login",
+                "a link reference",
+            ),
+            ("see [docs]\n   [docs]: relative", "a link reference"),
+            ("off to //example.org/login", "a URL"),
+            ("link(//example.org)", "a URL"),
+            ("go to=//example.org", "a URL"),
         ] {
             let refused = plan_of(json!({"comment": {"issue": 7, "body": body}}));
             assert!(
@@ -596,6 +690,8 @@ mod tests {
             "user@ is not an address",
             "a < b and 2 > 1",
             "email the team",
+            "A & B; a path a/b//c and [a] list",
+            "rate 3/4 and 1//2",
         ] {
             assert!(
                 plan_of(json!({"comment": {"issue": 7, "body": body}})).is_ok(),
@@ -605,10 +701,33 @@ mod tests {
     }
 
     #[test]
+    fn a_long_log_still_counts_its_last_parks_and_an_unreadable_one_counts_none() {
+        let dir = crate::dashboard::testkit::TempDir::new();
+        let now = crate::supervisor::epoch_of("2026-11-28T12:00:00Z").unwrap();
+        let log = dir.path().join("directive.log");
+        let old =
+            "2026-11-20T00:00:00Z apply: an old directive with a long reason line\n".repeat(30_000);
+        let recent = "2026-11-28T10:00:00Z github: parked #4 for the operator\n2026-11-28T11:00:00Z github: parked #5 for the operator\n";
+        std::fs::write(&log, format!("{old}{recent}")).unwrap();
+        assert!(std::fs::metadata(&log).unwrap().len() > 1 << 20);
+        assert_eq!(parks_today(&log, now), Ok(2));
+        assert_eq!(parks_today(&dir.path().join("none.log"), now), Ok(0));
+        // A log that cannot be read fails closed.
+        let unreadable = dir.path().join("dir.log");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(parks_today(&unreadable, now).is_err());
+    }
+
+    #[test]
     fn parks_are_counted_over_the_last_day_from_the_log() {
         let now = crate::supervisor::epoch_of("2026-11-28T12:00:00Z").unwrap();
         let log = "2026-11-27T11:00:00Z github: parked #1 for the operator\n2026-11-27T12:30:00Z github: parked #2 for the operator\n2026-11-28T09:00:00Z github: refused park on #3: x\n2026-11-28T10:00:00Z github: parked #4 for the operator\n";
         assert_eq!(recent_parks(log, now), 2);
+        // A park whose label failed still asked its question, so it counts.
+        let failed = format!(
+            "{log}2026-11-28T11:00:00Z github: parked #6 for the operator, but its label failed: gh exit 1\n"
+        );
+        assert_eq!(recent_parks(&failed, now), 3);
     }
 
     #[test]

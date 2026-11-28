@@ -742,15 +742,12 @@ fn note_unpause(paths: &Paths, now: u64) {
     }
 }
 
-/// The queue as the supervisor weighs it: the claimable issues and those whose claim a live tick
-/// holds, as the launcher counted both at one moment (`queue`: `<claimable> <held>`). A claim moves
-/// an issue from the one to the other, so it changes nothing here; counts taken apart would.
+/// The queue as the supervisor weighs it: the open issues carrying the queue's label, claimed ones
+/// included, as the launcher's last queue count listed them (`queue`). A claim, and the claim
+/// label a tick adds or takes off, leaves this number as it was; a new, closed or relabelled issue
+/// changes it.
 fn queue_total(paths: &Paths) -> Option<u64> {
-    let text = files::read_text_limited(&paths.file("queue"), SMALL_FILE).ok()?;
-    let mut words = text.split_whitespace();
-    let claimable: u64 = words.next()?.parse().ok()?;
-    let held: u64 = words.next()?.parse().ok()?;
-    Some(claimable + held)
+    read_number(&paths.file("queue"))
 }
 
 /// The inputs of the events after `since`, but the loops, which [`loop_signals`] reads from GitHub.
@@ -1304,8 +1301,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("logs/allocator.log"), "[tick.sh] exit=9\n").unwrap();
-        // Three claimable and one held: a claim that moves one across leaves the queue at four.
-        std::fs::write(paths.file("queue"), "3 1\n").unwrap();
+        std::fs::write(paths.file("queue"), "4\n").unwrap();
         std::fs::write(paths.file("queue_at_run"), "2\n").unwrap();
         std::fs::write(paths.file("paused"), "").unwrap();
         note_unpause(&paths, NOW);
@@ -1363,28 +1359,27 @@ mod queue_tests {
     use super::*;
 
     #[test]
-    fn a_claim_is_no_queue_event_and_new_or_finished_work_is() {
+    fn a_claim_and_its_label_between_two_runs_are_no_queue_event() {
         let dir = crate::dashboard::testkit::TempDir::new();
         let paths = Paths {
             state: dir.path().to_path_buf(),
         };
         paths.prepare().unwrap();
         let settings = Settings::from_env(&|_| None).unwrap();
-        let queue_event = |record: &str| {
-            std::fs::write(paths.file("queue"), record).unwrap();
+        let queue_event = |total: &str| {
+            std::fs::write(paths.file("queue"), total).unwrap();
             let mut inputs = gather(&paths, 0);
             inputs.queue_at_run = Some(5);
             events(&inputs, &settings, 0, now_s())
                 .iter()
                 .any(|event| event.kind == EventKind::Claimable)
         };
-        // Five at the last run: 5 claimable, then 4 claimable and 1 held, then 3 and 2.
-        assert!(!queue_event("5 0\n"));
-        assert!(!queue_event("4 1\n"));
-        assert!(!queue_event("3 2\n"));
-        // An issue landed, or a new one was queued.
-        assert!(queue_event("3 1\n"));
-        assert!(queue_event("6 0\n"));
+        // Five open queue issues at the last run. A tick claims one and labels it: the claimable
+        // count falls to four, the open issues stay five.
+        assert!(!queue_event("5\n"));
+        // An issue landed and closed, or a new one was queued.
+        assert!(queue_event("4\n"));
+        assert!(queue_event("6\n"));
         // A record that does not read is no event.
         assert!(!queue_event("five\n"));
     }
