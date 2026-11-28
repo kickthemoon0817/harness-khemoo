@@ -348,6 +348,19 @@ overridden below.
      - then poll again.
      Re-acquire only between runs, never during one. A queue that held a slot for hours starved every capture
      while an advisory yield was ignored.
+   - **Hold a card only while a kit or device run of yours is on it (operator, 2026-11-28).** Before a build,
+     host cases or writing, bring your container down (`tools/dev/iter.sh down`, under your export line) and
+     release the slot with `lease.sh release <issue>`, which drops every slot and the device lease your tick
+     holds. Take it again with `lease.sh acquire` for the next run. Never release while your container is up.
+     The lease reclaims a hold whose slot containers have stayed down for `IDLE_HOLD_S` (600 s): the next
+     `acquire` or `status` releases it and prints `RECLAIMED slot=K from <issue>`, so acquire again before
+     any `iter.sh up`.
+   - **Overlap within the issue (operator, 2026-11-28).** Once an arm's build is done, start its timing and
+     identity queues in the background, on both cards at once, and run host cases, mutations and packet
+     writing beside them. Queue every arm the order names in one go.
+   - **Apply a remedy the order or a ruling already names, without pausing (operator, 2026-11-28).** Pause for
+     the operator only for a design change the order does not name, an owner's choice, or a stop rule with no
+     named remedy. Name the stop rule answered in the next comment.
    - **Poll the lease from the tick's own shell,** in a bounded foreground loop. `lease.sh` records the
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the
