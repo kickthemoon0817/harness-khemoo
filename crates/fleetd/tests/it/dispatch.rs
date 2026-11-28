@@ -4,7 +4,7 @@ use fleet_proto::{ResponseBody, Role, SessionState};
 use serde_json::json;
 
 use crate::support::{
-    TempDir, adapter, alive, base_config, collect, connect, dispatch, error_code, eventually,
+    TempDir, adapter, alive, base_config, collect, connect, dispatch, error_code, eventually, next,
     request, start, wait,
 };
 
@@ -488,9 +488,16 @@ async fn logs_tail_and_follow() {
     conn.send(&json!({"id": 6, "body": {"op": "logs", "session": id, "lines": 1, "follow": true}}))
         .await
         .unwrap();
+    // The agent prints its last line only once the tail is out, so the tail is "50" and never "after".
+    let first = next(&mut conn).await;
+    assert_eq!(first.id, 6);
+    let ResponseBody::Event { data: tail } = first.body else {
+        panic!("expected the tail, got {:?}", first.body)
+    };
+    assert_eq!(tail, "50\n");
     std::fs::write(root.join("go"), "").unwrap();
-    let (out, state) = collect(&mut conn, 6).await;
-    assert_eq!(out, "50\nafter\n");
+    let (rest, state) = collect(&mut conn, 6).await;
+    assert_eq!(tail + &rest, "50\nafter\n");
     assert_eq!(state, SessionState::Exited { code: 0 });
 
     let (out, _) = wait(&mut conn, &id).await;
