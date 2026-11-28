@@ -1,6 +1,6 @@
 # Fleet: devices and agent sessions
 
-Fleet monitors devices and the coding-agent sessions on them (Claude Code, Codex, Gemini, any agent
+Fleet monitors devices and the coding-agent sessions on them (Claude Code, Codex, agy, any agent
 CLI), and dispatches new agent sessions to them. It is part of the Cargo workspace at the repository root, under `crates/`:
 
 | Crate | Kind | Role |
@@ -622,7 +622,7 @@ without `exe` is discovery-only.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `preset` | `"claude"`, `"codex"` or `"gemini"` | none | fills every key below that the table leaves out, except `exe` and `workdir_roots` |
+| `preset` | `"claude"`, `"codex"` or `"agy"` | none | fills every key below that the table leaves out, except `exe` and `workdir_roots` |
 | `exe` | path | none | the agent CLI. Must be an executable regular file at startup. Absent: discovery-only. |
 | `args` | array of strings | preset, else `[]` | the fixed argv after `exe`. `{model}` and `{workdir}` are replaced wherever they appear; any other `{` or `}` is a config error. |
 | `models` | array of model names | preset, else `[]` | the allowlist; `models[0]` is the default. Required non-empty when `args` uses `{model}`. A request naming a model not listed is `forbidden`. |
@@ -643,11 +643,15 @@ Presets:
 |---|---|---|---|---|---|
 | `claude` | `["-p", "--model", "{model}"]` | `["opus", "sonnet", "haiku"]` | `["claude"]` | 1 | 3600 |
 | `codex` | `["exec", "--model", "{model}", "-"]` | none: set `models` | `["codex"]` | 1 | 3600 |
-| `gemini` | `["--model", "{model}"]` | none: set `models` | `["gemini"]` | 1 | 3600 |
+| `agy` | `["--model", "{model}", "--input-format", "stream-json", "--output-format", "stream-json"]` | none: set `models` | `["agy"]` | 1 | 3600 |
 
 A preset grants the agent no permissions of its own. An unattended agent usually needs a
-permission flag, and the operator adds it to `args` knowingly. Every preset reads the prompt from
-stdin: gemini runs headless because its stdin is not a terminal.
+permission flag, and the operator adds it to `args` knowingly (agy's is
+`--dangerously-skip-permissions`). Every preset reads the prompt from stdin, which fleetd writes as
+the dispatch sent it. agy reads it only as stream-json, one NDJSON message a line, so a dispatch to
+the `agy` preset must send that line, `{"event":"user","message":{"content":"<prompt>"}}`; the
+harness's runner does. fleetd stays out of what an agent's stdin means: a transform there would be
+one more parser of untrusted text, and a wrapper script one more file the device must trust.
 
 Example:
 
