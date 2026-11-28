@@ -102,11 +102,17 @@ LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
+# Waits until no tick.sh of this scratch home runs: the launcher's detached runners and the forks
+# that become them both carry its path. Gives up after 20 s, so a stuck runner fails its check.
+settle() {
+    local n=0
+    while pgrep -f "$H/bin/tick.sh" >/dev/null && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+}
 launch() {  # run the launcher once and wait for the runner it may start
     rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log; : > "$LOG"
     rm -f "$H/state/locks/heartbeat.stamp"
     "$H/bin/tick.sh"
-    sleep 2
+    settle
 }
 
 # A missing instance prompt starts nothing and says so, once.
@@ -114,7 +120,7 @@ write_env; mv "$I/prompts/tick.md" "$H/tick.md.away"
 launch
 check "a missing tick.md starts nothing" '[ ! -e "$FAKE_PROMPT" ]' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
 check "a missing tick.md is logged" 'grep -q "instance incomplete: $I/prompts/tick.md" "$LOG"' "$(cat "$LOG")"
-"$H/bin/tick.sh"; sleep 1
+"$H/bin/tick.sh"; settle
 check "the incomplete instance is logged at most hourly" '[ "$(grep -c "instance incomplete" "$LOG")" -eq 1 ]' "$(cat "$LOG")"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check exits 1 on an incomplete instance and names what is missing" \
@@ -249,7 +255,7 @@ write_env
 # hooks/hold: exit 0 holds and logs its reason once; exit 1 or a hang holds nothing.
 printf '#!/usr/bin/env bash\necho "service down since noon"\necho second line\nexit 0\n' > "$I/hooks/hold"; chmod +x "$I/hooks/hold"
 launch
-"$H/bin/tick.sh"; sleep 1
+"$H/bin/tick.sh"; settle
 check "a hold hook that exits 0 holds the harness" '[ ! -e "$FAKE_PROMPT" ]' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
 check "the hold reason is logged once" '[ "$(grep -c "held: service down since noon$" "$LOG")" -eq 1 ] && [ "$(wc -l < "$LOG")" -eq 1 ]' "$(cat "$LOG")"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1
@@ -259,7 +265,7 @@ launch
 check "a hold hook that exits 1 holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG"' "log=$(cat "$LOG")"
 printf '#!/usr/bin/env bash\necho "stuck"\nsleep 30\nexit 0\n' > "$I/hooks/hold"
 write_env "HOLD_TIMEOUT_S=1"
-start=$(date +%s); launch; sleep 2; took=$(( $(date +%s) - start ))
+start=$(date +%s); launch; took=$(( $(date +%s) - start ))
 check "a hold hook that hangs past HOLD_TIMEOUT_S holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG" && [ "$took" -lt 10 ]' "took=${took}s log=$(cat "$LOG")"
 rm -f "$I/hooks/hold"
 
