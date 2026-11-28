@@ -28,11 +28,11 @@ and LANE_LABEL, and the local claims under $HARNESS_STATE/locks (else $HARNESS_H
 pub struct Args {}
 
 static CLAIMED: LazyLock<Regex> =
-    LazyLock::new(|| constant(r"harness tick .*?pid (\d+) (?:claiming|resuming)"));
+    LazyLock::new(|| constant(r"harness tick .*?pid ([0-9]+) (?:claiming|resuming)"));
 static WITHDRAWN: LazyLock<Regex> =
-    LazyLock::new(|| constant(r"pid (\d+) (?:withdrawing|pausing|releasing)"));
+    LazyLock::new(|| constant(r"pid ([0-9]+) (?:withdrawing|pausing|releasing)"));
 static DEPENDS_LINE: LazyLock<Regex> = LazyLock::new(|| constant(r"Depends on[^:\n]*:\s*(.*)"));
-static ISSUE_REF: LazyLock<Regex> = LazyLock::new(|| constant(r"#(\d+)"));
+static ISSUE_REF: LazyLock<Regex> = LazyLock::new(|| constant(r"#([0-9]+)"));
 
 fn constant(pattern: &str) -> Regex {
     Regex::new(pattern).unwrap_or_else(|error| panic!("{pattern}: {error}"))
@@ -160,7 +160,7 @@ impl Queue {
         let first_waiting = gated && self.first_waiting(&candidates)?;
         let mut keep = candidates
             .iter()
-            .filter(|issue| !(issue.has(&self.low) || lane_work(issue) && first_waiting))
+            .filter(|issue| !(issue.has(&self.low) || (lane_work(issue) && first_waiting)))
             .count();
         if keep == 0 && !first_waiting {
             keep = candidates
