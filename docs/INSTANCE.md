@@ -38,8 +38,10 @@ skipped.
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
-`$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
+`$HARNESS_HOME`, `$HARNESS_INSTANCE_DIR` and `$HARNESS_BIN`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
+`WORKTREE_ROOT`, `FLEET_CONFIG`), those three and `$HOME`. `$HARNESS_BIN` resolves as `lib/instance.sh`
+resolves it: the file's `HARNESS_BIN`, else the environment's, else `<home>/target/release/harness` when
+it is executable, else `harness` from `PATH`. A path key from the environment wins over the file's. An
 empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `$HARNESS_BIN claimable`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
