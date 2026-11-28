@@ -29,47 +29,36 @@ const AGENTS: [(&str, &str); 3] = [
     ("codex", "CODEX_HOME"),
     ("gemini", "GEMINI_CLI_HOME"),
 ];
-/// The variables other than its folder through which each agent's CLI signs in: a key, a token, a
-/// cloud provider's credentials or the switch to one. A tick, fetch or sign-in check on an account
-/// runs without them, so the default account's never signs in on another's behalf. Read from
-/// Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3.
-const CREDENTIALS: [(&str, &[&str]); 3] = [
-    (
-        "claude",
-        &[
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-            "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY",
-        ],
-    ),
-    (
-        "codex",
-        &[
-            "OPENAI_API_KEY",
-            "CODEX_API_KEY",
-            "CODEX_ACCESS_TOKEN",
-            "OPENAI_IDENTITY_TOKEN_FILE",
-        ],
-    ),
-    (
-        "gemini",
-        &[
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "GOOGLE_GENAI_USE_VERTEXAI",
-            "GOOGLE_GENAI_USE_GCA",
-            "GOOGLE_CLOUD_ACCESS_TOKEN",
-            "GEMINI_DEFAULT_AUTH_TYPE",
-        ],
-    ),
+/// The variables other than a folder through which any agent's CLI signs in: a key, a token, a
+/// cloud provider's credentials or the switch to one, and the harness's own pointer at the default
+/// account's credentials file. A tick, fetch or sign-in check on an account runs without every one of
+/// them, its own agent's and the others', since a tick may start another agent as a sub-agent: the
+/// default account must never sign in on an account's behalf. Read from Claude Code 2.1.332, Codex
+/// 0.155.1 and Gemini CLI 0.27.3.
+const CREDENTIALS: [&str; 23] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "OPENAI_IDENTITY_TOKEN_FILE",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "GEMINI_DEFAULT_AUTH_TYPE",
+    "USAGE_CREDENTIALS_FILE",
 ];
 /// How long a sign-in check holds: the launcher fires every couple of minutes, and no firing should
 /// wait on the agents' CLIs.
@@ -130,12 +119,9 @@ pub fn variable(agent: &str) -> Option<&'static str> {
         .map(|(_, variable)| *variable)
 }
 
-/// The variables a tick, fetch or check on one of `agent`'s accounts runs without.
-pub fn credentials(agent: &str) -> &'static [&'static str] {
-    CREDENTIALS
-        .iter()
-        .find(|(name, _)| *name == agent)
-        .map_or(&[], |(_, names)| names)
+/// The variables a tick, fetch or sign-in check on any account runs without.
+pub fn credentials() -> &'static [&'static str] {
+    &CREDENTIALS
 }
 
 /// An account name: 1 to 32 of a-z, 0-9 and `-`, starting with a letter or a digit.
@@ -391,12 +377,12 @@ fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
     sign_in
 }
 
-/// `inherited` without the account's agent's credential variables, its folder variable naming it.
+/// `inherited` without any agent's credential variables, its folder variable naming the account's.
 fn probe_env(
     inherited: impl Iterator<Item = (String, String)>,
     account: &Account,
 ) -> Vec<(String, String)> {
-    let unset = credentials(&account.agent);
+    let unset = credentials();
     inherited
         .filter(|(name, _)| !unset.contains(&name.as_str()) && name != account.variable())
         .chain(std::iter::once((
@@ -554,7 +540,7 @@ fn env_command(env: Lookup, keys: &[String]) -> ExitCode {
         };
         match resolved {
             Ok(account) => {
-                for name in credentials(&account.agent) {
+                for name in credentials() {
                     println!("--unset={name}");
                 }
                 println!("{}={}", account.variable(), account.dir.display());
@@ -668,7 +654,7 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -873,8 +859,20 @@ mod tests {
         );
     }
 
+    /// The lock, waited for: a child that another test thread forked and has not yet exec'd holds a
+    /// copy of the lock's descriptor for that moment, and flock counts it as held.
+    pub(crate) fn held(state: &Path) -> Lock {
+        for _ in 0..200 {
+            if let Some(lock) = lock(state) {
+                return lock;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the accounts lock of {} stays held", state.display());
+    }
+
     fn refresh_logged(env: Lookup, state: &Path, account: &Account, now: u64) -> Vec<String> {
-        let lock = lock(state).unwrap();
+        let lock = held(state);
         refresh(&lock, env, state, std::slice::from_ref(account), now, true)
     }
 
@@ -940,7 +938,7 @@ mod tests {
             "an answer this cannot read leaves a signed-out account signed out"
         );
         std::fs::write(&answer, "Logged in using ChatGPT\n").unwrap();
-        let lock = lock(&state).unwrap();
+        let lock = held(&state);
         assert!(
             lock_again(&state).is_none(),
             "a second process cannot check meanwhile"
@@ -1028,20 +1026,31 @@ mod tests {
             ("ANTHROPIC_API_KEY", "sk-ant-default"),
             ("CLAUDE_CODE_OAUTH_TOKEN", "default-token"),
             ("CLAUDE_CONFIG_DIR", "/home/dev-a/.claude"),
-            ("OPENAI_API_KEY", "kept: another agent's"),
+            ("OPENAI_API_KEY", "sk-default-codex"),
+            (
+                "USAGE_CREDENTIALS_FILE",
+                "/home/dev-a/.claude/.credentials.json",
+            ),
+            ("LANG", "C.UTF-8"),
         ]
         .map(|(name, value)| (name.to_owned(), value.to_owned()));
         assert_eq!(
             probe_env(inherited.into_iter(), &account),
             [
                 ("PATH", "/usr/bin"),
-                ("OPENAI_API_KEY", "kept: another agent's"),
+                ("LANG", "C.UTF-8"),
                 ("CLAUDE_CONFIG_DIR", "/accounts/claude/claude-work"),
             ]
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
         );
-        assert!(credentials("codex").contains(&"CODEX_API_KEY"));
-        assert!(credentials("gemini").contains(&"GOOGLE_GENAI_USE_VERTEXAI"));
+        for name in [
+            "CODEX_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "USAGE_CREDENTIALS_FILE",
+        ] {
+            assert!(credentials().contains(&name), "{name}");
+        }
     }
 
     #[test]

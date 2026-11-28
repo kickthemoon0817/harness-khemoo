@@ -191,8 +191,12 @@ harness_usage() {
         [ -n "$vars" ] && export $vars
         [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
         accounts_export
-        # The supervisor's account is checked for its sign-in with the lists' accounts.
-        [ -n "$supervisor" ] && [[ "${SUPERVISOR_MODEL:-}" == *@* ]] && export SUPERVISOR SUPERVISOR_MODEL
+        # The supervisor's account is fetched and checked with the lists' accounts. Its entry comes from
+        # the configured list, which the list a directive narrows may leave it out of.
+        if [ -n "$supervisor" ]; then
+            s=$(supervisor_entry); s=${s%%:*}
+            [[ "$s" == *@* ]] && { SUPERVISOR_MODEL=$(supervisor_entry); export SUPERVISOR SUPERVISOR_MODEL; }
+        fi
         export MAX_SLOTS MODEL_COOLDOWN_S
         TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" "$sub" "$@"
     )
@@ -419,9 +423,11 @@ instance_missing() {
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
-    # An entry naming an account must name a model too: `claude@work` alone reads as a model.
+    # An entry naming an account must name a model too: `claude@work` alone reads as a model. A bare
+    # model may hold `@` otherwise, as a Vertex model id does.
     for s in $(model_list) $(lane_on && printf '%s' "$LANE_MODEL") $([ -n "$supervisor" ] && printf '%s' "${SUPERVISOR_MODEL:-}"); do
-        [[ "$s" == *@* && "$s" != *:* ]] && echo "$HARNESS_ENV_FILE: '$s' names an account but no model: write agent@account:model"
+        [[ "$s" == *@* && "$s" != *:* && "${s%%@*}" =~ ^(claude|codex|gemini)$ && "${s#*@}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] \
+            && echo "$HARNESS_ENV_FILE: '$s' names an account but no model: write agent@account:model"
     done
     # Each account named must be a folder a tick can run with; a fleet device keeps its own, and the
     # supervisor always runs here.

@@ -23,7 +23,7 @@ cat > "$H/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ]; then
     echo "${CLAUDE_CONFIG_DIR:-default}" >> "$FAKE_SEEN/claude.auth"
-    echo "key=${ANTHROPIC_API_KEY:-unset} token=${CLAUDE_CODE_OAUTH_TOKEN:-unset}" >> "$FAKE_SEEN/claude.auth-keys"
+    echo "key=${ANTHROPIC_API_KEY:-unset} token=${CLAUDE_CODE_OAUTH_TOKEN:-unset} codex=${OPENAI_API_KEY:-unset} file=${USAGE_CREDENTIALS_FILE:-unset}" >> "$FAKE_SEEN/claude.auth-keys"
     if [ -e "$CLAUDE_CONFIG_DIR/signed-out" ]; then
         echo '{"loggedIn": false, "authMethod": "none", "loginExpiresAt": null}'
         exit 1
@@ -42,7 +42,7 @@ case $prompt in
 esac
 dir=${CLAUDE_CONFIG_DIR:-default}
 { echo "dir=$dir"; echo "marker=$HARNESS_TICK"; echo "slot=$(cut -d' ' -f4- "$HARNESS_STATE/locks/slot1.tick")"
-  echo "keys=${ANTHROPIC_API_KEY:-unset} ${CLAUDE_CODE_OAUTH_TOKEN:-unset}"
+  echo "keys=${ANTHROPIC_API_KEY:-unset} ${CLAUDE_CODE_OAUTH_TOKEN:-unset} ${OPENAI_API_KEY:-unset} ${AWS_BEARER_TOKEN_BEDROCK:-unset} ${USAGE_CREDENTIALS_FILE:-unset}"
   echo "usage=$("$HARNESS_HOME/libexec/usage-ok.sh")"; } >> "$FAKE_SEEN/claude.ticks"
 if [ -e "$dir/limit" ]; then rm -f "$dir/limit"; echo "You've hit your session limit · resets 5pm"; exit 1; fi
 exit 0
@@ -104,7 +104,8 @@ unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR CLAUDE_CONFIG
     AGENT_ACCOUNTS_DIR $(compgen -v USAGE_)
 # The default account's credentials, in the environment the launcher starts from.
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home" FAKE_SEEN="$H/seen" \
-    ANTHROPIC_API_KEY=sk-ant-default-account CLAUDE_CODE_OAUTH_TOKEN=default-oauth-token
+    ANTHROPIC_API_KEY=sk-ant-default-account CLAUDE_CODE_OAUTH_TOKEN=default-oauth-token OPENAI_API_KEY=sk-default-codex \
+    AWS_BEARER_TOKEN_BEDROCK=default-bedrock USAGE_CREDENTIALS_FILE="$H/home/.claude/.credentials.json"
 S="$H/state"; LOG="$S/logs/allocator.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -166,6 +167,15 @@ chmod 755 "$A/claude"
 check_with "TICK_MODELS='claude@work codex@work:model-x'"
 check "check refuses an entry that names an account but no model, and names it" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*.claude@work. names an account but no model: write agent@account:model" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='claude-opus-4@20250514 claude@work:model-a'" "LANE_LABEL=ai:lane" "LANE_MODEL=claude-opus-4@20250514" \
+    "SUPERVISOR=1" "SUPERVISOR_MODEL=claude-opus-4@20250514"
+check "a bare model holding @, as a Vertex id does, is no account and passes check" \
+    '[ "$rc" -eq 0 ] && grep -q "^models:        claude-opus-4@20250514 claude@work:model-a$" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+mkdir -p "$A/claude/claude-sup"
+check_with "SUPERVISOR=1" "SUPERVISOR_MODEL=claude@sup:model-s" "USAGE_SOURCE_claude_sup=json:$H/shared.json" "USAGE_SOURCE_claude_work=json:$H/shared.json"
+check "the supervisor's account counts among the seats that may not share a source" \
+    '[ "$rc" -eq 1 ] && grep -q "claude@work and claude@sup both read their usage from $H/shared.json" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -rf "$A/claude/claude-sup"
 check_with "USAGE_SOURCE_claude_work=json:$H/shared.json" "USAGE_SOURCE_claude_home=json:$H/shared.json"
 check "check refuses two accounts reading one file, naming both" \
     '[ "$rc" -eq 1 ] && grep -q "missing: a usage configuration that harness usage reads (.*claude@work and claude@home both read their usage from $H/shared.json" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
@@ -205,8 +215,9 @@ check "the allocator's line counts each account on its own" \
     'grep -q "claude@work=1\[five_hour:10%,weekly:10%\] claude@home=1\[five_hour:40%,weekly:10%\] codex@work=1\[primary:30%\] pool=1" "$LOG"' "$(cat "$LOG")"
 check "the trailer names the account" 'grep -q "^\[tick.sh\] exit=0 .*agent=claude@work model=model-a$" "$S"/logs/tick-*.log' "$(cat "$S"/logs/tick-*.log)"
 check "a tick on an account gets none of the default account's credential variables" \
-    'grep -qx "keys=unset unset" "$H/seen/claude.ticks"' "$(cat "$H/seen/claude.ticks")"
-check "nor does its sign-in check" '[ "$(sort -u "$H/seen/claude.auth-keys")" = "key=unset token=unset" ]' "$(sort -u "$H/seen/claude.auth-keys")"
+    'grep -qx "keys=unset unset unset unset unset" "$H/seen/claude.ticks"' "$(cat "$H/seen/claude.ticks")"
+check "nor does its sign-in check, another agent's key and the default credentials file included" \
+    '[ "$(sort -u "$H/seen/claude.auth-keys")" = "key=unset token=unset codex=unset file=unset" ]' "$(sort -u "$H/seen/claude.auth-keys")"
 
 touch "$A/claude/claude-work/limit"
 launch
@@ -293,7 +304,18 @@ check "the supervisor's account gets its own fetch run, though no tick entry nam
     'grep -q "^$A/claude/claude-sup $A/claude/claude-sup/usage-cache.json " "$H/seen/fetch"' "$(cat "$H/seen/fetch" 2>/dev/null)"
 check "held back for want of a reading, the supervisor says so once" \
     '[ "$(grep -c "supervisor not due: claude@sup has no fresh usage reading" "$LOG")" = 1 ]' "$(cat "$LOG")"
-rm -rf "$A/claude/claude-sup" "$S/supervisor"
+rm -rf "$S/supervisor" "$H/seen/fetch"
+# No SUPERVISOR_MODEL: the last configured entry, which the directive's narrowed list leaves out.
+write_env "SUPERVISOR=1" "TICK_MODELS='claude@work:model-a claude@sup:model-s'" "USAGE_FETCH_claude_sup=$H/fakebin/fetch" \
+    "USAGE_REFRESH_AFTER=0" "SUPERVISOR_MIN_INTERVAL_S=86400"
+printf '{"version": 1, "reason": "work only", "expires_at": "%s", "models": ["claude@work:model-a"]}\n' \
+    "$(date -u -d "@$(( $(date +%s) + 3600 ))" +%Y-%m-%dT%H:%M:%SZ)" > "$H/directive.json"
+"$HARNESS_BIN" directive apply "$H/directive.json" >/dev/null 2>&1
+launch
+check "the supervisor's default account is fetched while a directive narrows the list past it" \
+    '[ -s "$S/directive.json" ] && grep -q "^$A/claude/claude-sup " "$H/seen/fetch" && grep -qx "dir=$A/claude/claude-work" "$H/seen/claude.ticks"' \
+    "fetch=$(cat "$H/seen/fetch" 2>/dev/null) dlog=$(cat "$S/logs/directive.log" 2>/dev/null)"
+rm -rf "$A/claude/claude-sup" "$S/supervisor" "$S/directive.json"
 write_env "SUPERVISOR=1" "SUPERVISOR_MODEL=claude@work:model-s"
 CLAUDE_CONFIG_DIR="$H/home/.claude" "$H/bin/tick.sh" supervisor manual
 check "the supervisor runs on its account's folder, with none of the default account's credentials" \

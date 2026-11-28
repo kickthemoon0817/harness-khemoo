@@ -5,8 +5,9 @@
 # marker, slot record and usage check each tick ran with; what the fetch command ran with;
 # `tick.sh check`, `harness usage` and `harness ticks`; the state files, the logs and the
 # dashboard's and health snapshot's keys. Paths and times are taken out. test_accounts.sh compares
-# it with off-state.txt, printed by ce3762a, the tree before accounts: with accounts off nothing may differ,
-# so never regenerate it from this tree.
+# it with off-state.txt, printed by ce3762a, the tree before accounts, and checked again against main
+# at 3236b8f, which prints it the same: with accounts off nothing may differ, so never regenerate it
+# from this tree.
 set -u
 src=$1
 H=$(mktemp -d)

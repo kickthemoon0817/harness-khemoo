@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prints what a harness without accounts does across its other paths, in a scratch home built from
 # the harness checkout $1 and run with $HARNESS_BIN: a supervisor tick, a lane tick that chains into
-# a work tick on a bare model, and a landing tick, each one at a time. For each it prints the
+# a work tick on a bare model, and a landing tick, each one at a time. The lane's, the supervisor's
+# and one listed model are bare models holding `@`, as a Vertex model id does, which no account names. For each it prints the
 # variables that pick an account, the marker, the slot record and the usage check its agent ran
 # with, and the lane line; then the supervisor's argv and environment, `tick.sh check`,
 # `harness usage`, the state files and the logs. Paths and times are taken out. test_accounts.sh
@@ -69,8 +70,8 @@ AGENT_BIN_codex=$H/fakebin/codex
 AGENT_FLAGS_claude=
 AGENT_FLAGS_codex=
 TICK_AGENT=claude
-TICK_MODELS="model-a codex:model-x"
-LANE_MODEL=model-l
+TICK_MODELS="model-a claude-opus-4@20250514 codex:model-x"
+LANE_MODEL=model-l@20250514
 LANE_LABEL=ai:lane
 MAX_SLOTS=1
 STAGGER_SECONDS=0
@@ -80,7 +81,7 @@ MAX_CHAIN=2
 USAGE_CACHE=$H/usage-cache.json
 USAGE_FETCH=$H/no-fetch
 SUPERVISOR=1
-SUPERVISOR_MODEL=claude:model-s
+SUPERVISOR_MODEL=model-s@20250514
 SUPERVISOR_MIN_INTERVAL_S=86400
 SUPERVISOR_INTERVAL_S=86400
 ANTHROPIC_API_KEY=sk-ant-fixture

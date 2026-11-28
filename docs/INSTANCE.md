@@ -229,13 +229,15 @@ many Linux distributions set it, `mkdir` makes group-writable folders, so run th
 root and each folder below it.
 
 An account signs in only through its folder. Its tick, its fetch command and its sign-in check run
-without its agent's credential variables, which would otherwise sign it in as the default account:
+without every agent's credential variables, its own agent's and the others', since a tick may start
+another agent as a sub-agent, and either would otherwise sign in as the default account:
 
 | Agent | Variables unset |
 |---|---|
-| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` |
+| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `AWS_BEARER_TOKEN_BEDROCK` |
 | `codex` | `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE` |
 | `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE` |
+| the harness | `USAGE_CREDENTIALS_FILE`, which may name the default account's credentials file; an account's fetch gets its folder's own instead, when there is one |
 
 The list was read from Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3; a variable a
 later release adds is not on it. The supervisor on an account takes none of them into its cut-down
@@ -244,9 +246,10 @@ environment either. An account signed in with an API key keeps that key in its f
 **Entries.** `agent@account:model` names an account in `TICK_MODELS`, `LANE_MODEL`,
 `SUPERVISOR_MODEL` and `state/tick-model`, as in
 `TICK_MODELS="claude@work:claude-opus-5-5 claude@home:claude-opus-5-5 codex@work:gpt-5.5"`. An entry
-without `@` runs as it always has, with the CLI's own default folder. An entry with `@` and no `:`,
-such as `claude@work`, names no model, and `check` refuses it; a model holding `@`, as a Vertex
-model id does, is written with its agent (`claude:claude-opus-4@20250514`). The runner sets the agent's
+without `@` runs as it always has, with the CLI's own default folder. An entry with no `:` whose
+text before `@` is `claude`, `codex` or `gemini` and whose text after it is an account name, such as
+`claude@work`, names no model, and `check` refuses it. Any other bare model may hold `@`, as a
+Vertex model id does (`claude-opus-4@20250514`), and runs on `TICK_AGENT` as before. The runner sets the agent's
 variable to the account's folder for that tick only (`harness accounts env`), and records
 `agent@account` in the slot file, `HARNESS_TICK` and the log's trailer, so `libexec/usage-ok.sh`
 checks that account's windows. A folder refused when its tick is about to start is logged and the
@@ -275,7 +278,9 @@ source is `USAGE_SOURCE_<agent>_<account>`, else its folder's own default, and i
 Two seats of the lists whose sources name one file or directory, one of them on an account, are
 refused: `harness usage` names them (`<seat> and <seat> both read their usage from <path>`), so
 `check` fails and the launcher starts nothing, since the pool would count one account's usage
-twice. The supervisor's account, with `SUPERVISOR=1`, gets its fetch command run with the lists';
+twice. The supervisor's account, with `SUPERVISOR=1`, counts among those seats and gets its fetch
+command run with the lists'. Its entry, `SUPERVISOR_MODEL` or else the last of the configured list,
+is taken from the configured list even while a directive narrows the model list;
 while it has no fresh reading, the launcher logs `supervisor not due: <account> has no fresh usage
 reading` once.
 
@@ -327,7 +332,7 @@ state blocks nothing. `check` prints the list (`account:` lines), `harness healt
 dashboard shows it ([Dashboard sources](#dashboard-sources)). The snapshot holds an account's usage
 to its named fields too, with no path of its folder. `harness accounts env <agent@account>...`
 prints the env(1) arguments each tick on one runs with, one a line (an `--unset=<name>` for each
-credential variable above, then `VARIABLE=folder`), or names each account refused and exits 1.
+variable of the table above, then `VARIABLE=folder`), or names each account refused and exits 1.
 
 ## Supervisor
 

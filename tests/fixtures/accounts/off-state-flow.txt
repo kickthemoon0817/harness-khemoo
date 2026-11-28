@@ -1,12 +1,12 @@
 --- claude supervisor
-argv: -p --model model-s --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence
+argv: -p --model model-s@20250514 --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence
 ANTHROPIC_API_KEY=sk-ant-fixture
 --- claude
-argv: -p --model model-l
-lane: This tick runs on model-l, the model lane: claim only an issue labelled `ai:lane`. If none is claimable, print a one-line summary and end.
-HARNESS_TICK=state=H/state slot=1 agent=claude model=model-l kind=lane
+argv: -p --model model-l@20250514
+lane: This tick runs on model-l@20250514, the model lane: claim only an issue labelled `ai:lane`. If none is claimable, print a one-line summary and end.
+HARNESS_TICK=state=H/state slot=1 agent=claude model=model-l@20250514 kind=lane
 TICK_AGENT=claude
-claude model-l lane
+claude model-l@20250514 lane
 claude: five_hour=10% weekly=20% stop=88% long_stop=88% ceiling=90%: go on
 --- claude
 argv: -p --model model-a
@@ -35,10 +35,10 @@ default agent: claude
 dispatch:      local
 agent claude: H/fakebin/claude -p --model <model> < prompt
 agent codex: H/fakebin/codex exec --model <model> - < prompt
-models:        model-a codex:model-x
-model lane:    model-l for `ai:lane`
-supervisor:    claude:model-s, budget 10 min, at least 86400s apart, at most 86400s
-supervisor:    runs with no tools: H/fakebin/claude -p --model model-s --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence < prompt
+models:        model-a claude-opus-4@20250514 codex:model-x
+model lane:    model-l@20250514 for `ai:lane`
+supervisor:    claude:model-s@20250514, budget 10 min, at least 86400s apart, at most 86400s
+supervisor:    runs with no tools: H/fakebin/claude -p --model model-s@20250514 --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence < prompt
 hook env.sh: none
 hook hold: none
 hook worktree-busy: none
@@ -73,8 +73,8 @@ state/supervisor/runs.log
 --- logs
 TS claude=1[five_hour:10%,weekly:20%] codex=1[primary:30%] pool=1 room=1 busy=0 claimable=2 -> spawning 1
 TS slot1 chains tick 2 after Ns: claude=1[five_hour:10%,weekly:20%] codex=1[primary:30%] pool=1 room=1 claimable=2 young=0
-[tick.sh] exit=0 duration=Ns agent=claude model=model-l
+[tick.sh] exit=0 duration=Ns agent=claude model=model-l@20250514
 [tick.sh] exit=0 duration=Ns agent=claude model=model-a
 [tick.sh] exit=0 duration=Ns agent=claude model=model-a
-[tick.sh] exit=0 duration=Ns agent=claude model=model-s
+[tick.sh] exit=0 duration=Ns agent=claude model=model-s@20250514
 exit=0 duration=Ns reason=manual

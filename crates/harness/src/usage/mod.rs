@@ -269,8 +269,13 @@ impl Entry {
     /// Parses `agent:model`, `agent@account:model`, or a bare `model` run by `default_agent`. The
     /// entry names its cooldown file, so the model holds no `/` and no control character.
     pub fn parse(text: &str, default_agent: &str) -> Result<Self, String> {
-        // `claude@work` alone would otherwise run model `claude@work` on the default account.
-        if !text.contains(':') && text.contains('@') {
+        // `claude@work` alone would otherwise run model `claude@work` on the default account. A bare
+        // model may hold `@` otherwise, as a Vertex model id does.
+        if !text.contains(':')
+            && let Some((agent, account)) = text.split_once('@')
+            && crate::accounts::variable(agent).is_some()
+            && crate::accounts::valid_name(account)
+        {
             return Err(format!(
                 "'{text}' names an account but no model: write agent@account:model"
             ));
@@ -426,21 +431,20 @@ impl AgentSource {
             account.variable().to_owned(),
             account.dir.display().to_string(),
         )];
-        let mut remove = crate::accounts::credentials(&account.agent).to_vec();
+        let mut remove = crate::accounts::credentials().to_vec();
         match &self.source {
             Source::ClaudeCache(path) | Source::Json(path) => {
                 set.push(("USAGE_CACHE".to_owned(), path.display().to_string()));
             }
             _ => remove.push("USAGE_CACHE"),
         }
+        // Set after the removals, so the folder's own file stands in for the default account's.
         let credentials = account.dir.join(".credentials.json");
         if credentials.is_file() {
             set.push((
                 "USAGE_CREDENTIALS_FILE".to_owned(),
                 credentials.display().to_string(),
             ));
-        } else {
-            remove.push("USAGE_CREDENTIALS_FILE");
         }
         (set, remove)
     }
@@ -761,7 +765,7 @@ pub fn pool(env: Lookup) -> Result<Pool, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
     let entries: Vec<Entry> = entries.into_iter().chain(lane).collect();
-    shared_sources(env, &entries)?;
+    shared_sources(env, entries.iter().chain(supervisor_seat(env)?.iter()))?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     let state = state_dir(env);
     let running = match &state {
@@ -830,21 +834,16 @@ pub fn state_dir(env: Lookup) -> Option<PathBuf> {
 fn refresh(env: Lookup) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
-    let supervisor = match env("SUPERVISOR_MODEL") {
-        Some(text) if env("SUPERVISOR").as_deref() == Some("1") => {
-            let agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
-            Some(
-                Entry::parse(text.trim(), &agent)
-                    .map_err(|message| format!("SUPERVISOR_MODEL: {message}"))?,
-            )
-        }
-        _ => None,
-    };
-    let all: Vec<&Entry> = entries.iter().chain(lane.iter()).collect();
+    let supervisor = supervisor_seat(env)?;
+    let all: Vec<&Entry> = entries
+        .iter()
+        .chain(lane.iter())
+        .chain(supervisor.iter())
+        .collect();
     shared_sources(env, all.iter().copied())?;
     let mut accounts = Vec::new();
     let mut refusals = Vec::new();
-    for (agent, account) in seats_of(all.into_iter().chain(supervisor.iter())) {
+    for (agent, account) in seats_of(all) {
         let source = match account {
             None => AgentSource::from_env(env, &agent)?,
             Some(name) => match Account::resolve(env, &agent, &name) {
@@ -884,6 +883,20 @@ fn refresh(env: Lookup) -> Result<ExitCode, String> {
         println!("{line}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The supervisor's entry with `SUPERVISOR=1`, as `bin/tick.sh` passes it while it runs on an
+/// account: from the configured list, which the model list a directive narrows may leave it out of.
+fn supervisor_seat(env: Lookup) -> Result<Option<Entry>, String> {
+    match env("SUPERVISOR_MODEL") {
+        Some(text) if env("SUPERVISOR").as_deref() == Some("1") => {
+            let agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
+            Entry::parse(text.trim(), &agent)
+                .map(Some)
+                .map_err(|message| format!("SUPERVISOR_MODEL: {message}"))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Refuses two seats, one of them on an account, whose sources name one file or directory: the
@@ -1086,7 +1099,11 @@ struct PickArgs<'a> {
 fn pick_command(env: Lookup, args: &PickArgs) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
-    shared_sources(env, entries.iter().chain(lane.iter()))?;
+    let supervisor = supervisor_seat(env)?;
+    shared_sources(
+        env,
+        entries.iter().chain(lane.iter()).chain(supervisor.iter()),
+    )?;
     let default_agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
     let mut entries = match args.entry {
         Some(text) => vec![Entry::parse(text, &default_agent)?],
@@ -1835,11 +1852,7 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR".to_owned(), dir.clone()),
                     ("USAGE_CACHE".to_owned(), cache.clone())
                 ],
-                [
-                    crate::accounts::credentials("claude"),
-                    &["USAGE_CREDENTIALS_FILE"]
-                ]
-                .concat()
+                crate::accounts::credentials().to_vec()
             )
         );
         std::fs::write(claude.dir.join(".credentials.json"), "{}").unwrap();
@@ -2017,7 +2030,7 @@ mod tests {
             "even a fresh cache is not trusted: nothing of this account's wrote it"
         );
         let state = dir.join("state");
-        let lock = crate::accounts::lock(&state).unwrap();
+        let lock = crate::accounts::tests::held(&state);
         assert!(crate::accounts::first_time(
             &lock,
             &state,
@@ -2084,6 +2097,19 @@ mod tests {
         assert_eq!(
             Entry::parse("claude@work", "claude").unwrap_err(),
             "'claude@work' names an account but no model: write agent@account:model"
+        );
+        assert_eq!(
+            Entry::parse("claude-opus-4@20250514", "claude")
+                .unwrap()
+                .to_string(),
+            "claude:claude-opus-4@20250514",
+            "a bare model holding @ is no account, as it was without accounts"
+        );
+        assert!(Entry::parse("gemini@lab", "claude").is_err());
+        assert_eq!(
+            Entry::parse("aider@work", "claude").unwrap().model,
+            "aider@work",
+            "only a known agent's name before @ makes it an account"
         );
         assert_eq!(
             Entry::parse("claude:claude-opus-4@20250514", "claude")
