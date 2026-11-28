@@ -42,6 +42,24 @@ pub struct BuildLockReader {
 }
 
 impl BuildLockReader {
+    /// A remote host's lock name: its `BUILD_LOCK_NAMES` name, else its address with every
+    /// character but a letter or digit made `-`.
+    pub fn lock_name(&self, host: &str) -> String {
+        self.lock_names.get(host).cloned().unwrap_or_else(|| {
+            host.split_once('@')
+                .map_or(host, |(_, address)| address)
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .collect()
+        })
+    }
+
     /// The lane of this host and of each remote host, as far as their lock names are configured,
     /// this host first; an error when lslocks could not run.
     pub fn read_lanes(
@@ -64,19 +82,7 @@ impl BuildLockReader {
         }
         if !self.remote_file.is_empty() {
             for host in hosts {
-                let name = self.lock_names.get(host).cloned().unwrap_or_else(|| {
-                    host.split_once('@')
-                        .map_or(host.as_str(), |(_, address)| address)
-                        .chars()
-                        .map(|character| {
-                            if character.is_ascii_alphanumeric() {
-                                character
-                            } else {
-                                '-'
-                            }
-                        })
-                        .collect()
-                });
+                let name = self.lock_name(host);
                 named_locks.push((
                     host.clone(),
                     self.lock_dir
@@ -216,5 +222,15 @@ mod tests {
         );
         assert_eq!(parse_lock_file(""), (None, None));
         assert_eq!(parse_lock_file("pid 1, , x"), (Some(1), None));
+        let reader = BuildLockReader {
+            lock_names: [("ci@worker-a.local".to_owned(), "wa".to_owned())].into(),
+            lock_dir: "/tmp".into(),
+            local_file: String::new(),
+            remote_file: "dev-build-remote-{name}.lock".to_owned(),
+            timeout: Duration::from_secs(1),
+            worktree_root: String::new(),
+        };
+        assert_eq!(reader.lock_name("ci@192.0.2.6"), "192-0-2-6");
+        assert_eq!(reader.lock_name("ci@worker-a.local"), "wa");
     }
 }

@@ -100,14 +100,21 @@ pub fn read_owned_text(path: &Path, limit: u64) -> io::Result<String> {
 pub fn prepare_private_dir(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
     std::fs::create_dir_all(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    // The directory itself, not where a symlink planted in its place points.
     let metadata =
-        std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "{} is a symlink or not a directory",
+            path.display()
+        ));
+    }
     if metadata.uid() != rustix::process::geteuid().as_raw() {
         return Err(format!("{} is not owned by this user", path.display()));
     }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("{}: cannot make it owner-only: {error}", path.display()))?;
-    let mode = std::fs::metadata(path)
+    let mode = std::fs::symlink_metadata(path)
         .map_err(|error| format!("{}: {error}", path.display()))?
         .mode();
     if mode & 0o022 != 0 {
@@ -187,6 +194,16 @@ mod tests {
         let cache = data.join("github_cache.json");
         write_replacing(&cache, "{}").expect("writes");
         assert_eq!(mode(&cache), 0o600);
+    }
+
+    #[test]
+    fn a_symlinked_data_directory_is_refused() {
+        let directory = TempDir::new();
+        let real = directory.path().join("real");
+        std::fs::create_dir_all(&real).ok();
+        let link = directory.path().join("data");
+        std::os::unix::fs::symlink(&real, &link).ok();
+        assert!(prepare_private_dir(&link).is_err());
     }
 
     #[test]

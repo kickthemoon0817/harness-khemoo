@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use super::shlex;
-use super::text::{basename, clean, joins_glyphs};
+use super::text::{basename, clean, invisible, joins_glyphs};
 
 pub const MASK: &str = "[redacted]";
 pub const MAX_SCRIPT_DEPTH: usize = 4;
@@ -36,7 +36,8 @@ const SECRET_WORDS: &str = "(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED|COOK[iIıİ]E|SES
 const AUTH_SCHEME: &str = "(?:bearer|token|bas[iIıİ]c|d[iIıİ]gest)";
 /// The longest text the redactor reads; past it the text is cut at a word and the cut marked.
 pub const MAX_REDACT_CHARS: usize = 8192;
-const ESCAPED_OR_QUOTED_VALUE: &str = r#"\\"[^"]*?\\"|\\'[^']*?\\'|"[^"]*"|'[^']*'"#;
+// A quote the clip or the text leaves open runs to the end: what follows it is still the value.
+const ESCAPED_OR_QUOTED_VALUE: &str = r#"\\"[^"]*?\\"|\\'[^']*?\\'|"[^"]*(?:"|$)|'[^']*(?:'|$)"#;
 const SCRIPT_CHARACTERS: &str = " \t\n'\"\\;|&";
 const PREAMBLE_COMMANDS: [&str; 19] = [
     "cd", "export", "source", ".", "set", "unset", "true", "false", ":", "local", "umask", "shopt",
@@ -85,7 +86,7 @@ static SECRET_ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| {
 // A quoted name and value, as JSON and YAML write them: `"token": "x"`, `password: 'x'`.
 static QUOTED_SECRET: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex(&format!(
-        r#"(?i)(["']?[A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*')"#
+        r#"(?i)(["']?[A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*(?:"|$)|'[^']*(?:'|$))"#
     ))
 });
 // The look-around of the patterns below is checked in code (see `replace_checked`), so every
@@ -141,51 +142,59 @@ static SUBSTITUTION: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"\$\(\([^()]*\)\)|\$\([^()]*\)|`[^`]*`"));
 static ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| regex(r"^[A-Za-z_][A-Za-z0-9_]*="));
 
-/// What `replace_checked`'s check makes of a match.
+/// What `masked_ranges`'s check makes of a match.
 enum Checked {
-    /// Replaced up to this end.
-    Replace(usize, String),
+    /// Masked over this byte range.
+    Mask(usize, usize),
     /// Refused; the search goes on one character after the match's start.
     Refuse,
     /// Refused, and so is every start up to this position: they are inside the same word.
     RefuseUpTo(usize),
 }
 
-/// Replaces the matches of `pattern` that `accept` takes, as a backtracking engine with
-/// look-around would. A refusal of a match glued to the word before it skips the whole word, so
-/// the search stays linear in the text.
-fn replace_checked(
+/// The ranges to mask for the matches of `pattern` that `accept` takes, as a backtracking engine
+/// with look-around would take them. A refusal of a match glued to the word before it skips the
+/// whole word, so the search stays linear in the text.
+fn masked_ranges(
     pattern: &regex::Regex,
     text: &str,
     accept: impl Fn(&regex::Captures<'_>) -> Checked,
-) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut last = 0;
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
     let mut position = 0;
     while position <= text.len()
         && let Some(found) = pattern.captures_at(text, position)
     {
         let Some(whole) = found.get(0) else { break };
-        let next_start = || {
-            whole.start()
-                + text[whole.start()..]
-                    .chars()
-                    .next()
-                    .map_or(1, char::len_utf8)
-        };
+        let next_start = whole.start()
+            + text[whole.start()..]
+                .chars()
+                .next()
+                .map_or(1, char::len_utf8);
         match accept(&found) {
-            Checked::Replace(end, replacement) => {
-                output.push_str(&text[last..whole.start()]);
-                output.push_str(&replacement);
-                last = end;
-                position = end.max(next_start());
+            Checked::Mask(start, end) => {
+                if start < end {
+                    ranges.push((start, end));
+                }
+                position = whole.end().max(end).max(next_start);
             }
-            Checked::Refuse => position = next_start(),
-            Checked::RefuseUpTo(end) => position = end.max(next_start()),
+            Checked::Refuse => position = next_start,
+            Checked::RefuseUpTo(end) => position = end.max(next_start),
         }
     }
-    output.push_str(&text[last..]);
-    output
+    ranges
+}
+
+/// The text with each masked range's bytes replaced by `\u{1}`, which no pattern takes as a
+/// name or a word, so the byte offsets of the text stay those of the view.
+fn blank(text: &str, masked: &[bool]) -> String {
+    text.char_indices()
+        .flat_map(|(index, character)| {
+            let blanked = masked[index];
+            let repeat = if blanked { character.len_utf8() } else { 1 };
+            std::iter::repeat_n(if blanked { '\u{1}' } else { character }, repeat)
+        })
+        .collect()
 }
 
 /// The look-behind `(?<![...])`: a match at `start` is taken only when the character before it
@@ -244,55 +253,121 @@ pub fn redact(text: &str) -> String {
     mask(&clip(text))
 }
 
-/// [`redact`] without the clip. The zero-width joiners and variation selectors go: they show
-/// nothing, and inside a secret they would hide it from every pattern.
-#[allow(clippy::too_many_lines)]
+/// A character the redactor reads through: one that shows nothing and could split a secret
+/// from every pattern.
+fn see_through(character: char) -> bool {
+    invisible(character) || joins_glyphs(character)
+}
+
+/// [`redact`] without the clip. The masks are found on two views of the text and joined: one
+/// with the invisible characters dropped, so a joiner inside a secret cannot hide it, and one
+/// with each turned into spaces, so a joiner before a keyword still ends the word before it.
+/// They are then applied to the text itself; what no mask covers keeps every character
+/// [`clean`] keeps.
 fn mask(text: &str) -> String {
-    let text: String = clean(text)
+    let mut masked = vec![false; text.len()];
+    // The dropped view, with the text offset of each of its bytes and of its end.
+    let mut dropped = String::with_capacity(text.len());
+    let mut offsets = Vec::with_capacity(text.len() + 1);
+    for (index, character) in text.char_indices() {
+        if !see_through(character) {
+            dropped.push(character);
+            offsets.extend(index..index + character.len_utf8());
+        }
+    }
+    offsets.push(text.len());
+    for (start, end) in mask_view(&dropped) {
+        masked[offsets[start]..offsets[end]]
+            .iter_mut()
+            .for_each(|byte| *byte = true);
+    }
+    let spaced: String = text
         .chars()
-        .filter(|character| !joins_glyphs(*character))
+        .flat_map(|character| {
+            let spaces = if see_through(character) {
+                character.len_utf8()
+            } else {
+                0
+            };
+            std::iter::repeat_n(' ', spaces).chain((spaces == 0).then_some(character))
+        })
         .collect();
-    let masked = replace_checked(&SECRET_ASSIGNMENT, &text, |found| {
+    for (start, end) in mask_view(&spaced) {
+        masked[start..end].iter_mut().for_each(|byte| *byte = true);
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut in_mask = false;
+    for (index, character) in text.char_indices() {
+        if masked[index] {
+            if !in_mask {
+                output.push_str(MASK);
+            }
+            in_mask = true;
+            continue;
+        }
+        in_mask = false;
+        output.push_str(&clean(character.encode_utf8(&mut [0u8; 4])));
+    }
+    output
+}
+
+/// The byte ranges of one view to mask, each pattern reading the view with the earlier
+/// patterns' masks blanked.
+#[allow(clippy::too_many_lines)]
+fn mask_view(view: &str) -> Vec<(usize, usize)> {
+    let mut masked = vec![false; view.len()];
+    let mut text = view.to_owned();
+    let mut apply = |text: &mut String, ranges: Vec<(usize, usize)>| {
+        if ranges.is_empty() {
+            return;
+        }
+        for (start, end) in ranges {
+            masked[start..end].iter_mut().for_each(|byte| *byte = true);
+        }
+        *text = blank(view, &masked);
+    };
+    let ranges = masked_ranges(&SECRET_ASSIGNMENT, &text, |found| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
+            let name = found.get(1).ok_or(Checked::Refuse)?;
             boundary_before(&text, whole.start(), name_char)?;
-            Ok(Checked::Replace(
-                whole.end(),
-                format!("{}={MASK}", group(found, 1)),
-            ))
+            Ok(Checked::Mask(name.end() + 1, whole.end()))
         })())
     });
-    let masked = replace_checked(&QUOTED_SECRET, &masked, |found| {
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&QUOTED_SECRET, &text, |found| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
-            boundary_before(&masked, whole.start(), name_or_dash)?;
-            let quote = group(found, 2).chars().next().unwrap_or('"');
-            Ok(Checked::Replace(
-                whole.end(),
-                format!("{}{quote}{MASK}{quote}", group(found, 1)),
+            let value = found.get(2).ok_or(Checked::Refuse)?;
+            boundary_before(&text, whole.start(), name_or_dash)?;
+            let quoted = value.as_str();
+            let closed = quoted.len() > 1 && quoted.ends_with(&quoted[..1]);
+            Ok(Checked::Mask(
+                value.start() + 1,
+                if closed { value.end() - 1 } else { value.end() },
             ))
         })())
     });
-    let masked = replace_checked(&SECRET_FLAG, &masked, |found| {
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&SECRET_FLAG, &text, |found| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
             let value = found.get(3).ok_or(Checked::Refuse)?;
-            boundary_before(&masked, whole.start(), name_or_dash)?;
+            boundary_before(&text, whole.start(), name_or_dash)?;
             // The value is a word that is no secret flag itself, unless it is a quoted value.
             let quoted = ESCAPED_OR_QUOTED_START.is_match(value.as_str());
-            if !quoted && SECRET_FLAG_START.is_match(&masked[value.start()..]) {
+            if !quoted && SECRET_FLAG_START.is_match(&text[value.start()..]) {
                 return Err(Checked::Refuse);
             }
-            Ok(Checked::Replace(
-                whole.end(),
-                format!("{}{}{MASK}", group(found, 1), group(found, 2)),
-            ))
+            Ok(Checked::Mask(value.start(), value.end()))
         })())
     });
+    apply(&mut text, ranges);
     // The empty groups mark where the command's name ends, which must be a word boundary.
     let command_flag = |text: &str, found: &regex::Captures<'_>| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
+            let kept = found.get(1).ok_or(Checked::Refuse)?;
             boundary_before(text, whole.start(), name_dot_or_dash)?;
             let name_end = (2..found.len())
                 .find_map(|index| found.get(index))
@@ -301,80 +376,90 @@ fn mask(text: &str) -> String {
             if text[name_end..].chars().next().is_some_and(name_char) {
                 return Err(Checked::Refuse);
             }
-            Ok(Checked::Replace(
-                whole.end(),
-                format!("{}{MASK}", group(found, 1)),
-            ))
+            Ok(Checked::Mask(kept.end(), whole.end()))
         })())
     };
-    let masked = replace_checked(&CURL_USER, &masked, |found| command_flag(&masked, found));
-    let masked = replace_checked(&PASSWORD_FLAG, &masked, |found| {
-        command_flag(&masked, found)
-    });
-    let masked = replace_checked(&SECRET_HEADER, &masked, |found| {
+    let ranges = masked_ranges(&CURL_USER, &text, |found| command_flag(&text, found));
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&PASSWORD_FLAG, &text, |found| command_flag(&text, found));
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&SECRET_HEADER, &text, |found| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
             let name = found.get(1).ok_or(Checked::Refuse)?;
-            boundary_before(&masked, whole.start(), name_or_dash)?;
-            let replacement = format!("{}{MASK}", name.as_str());
+            boundary_before(&text, whole.start(), name_or_dash)?;
             if !group(found, 3).starts_with("//") {
-                return Ok(Checked::Replace(whole.end(), replacement));
+                return Ok(Checked::Mask(name.end(), whole.end()));
             }
             // A value that is a URL path is not one: without the auth scheme, the scheme word is
             // the value instead.
             found.get(2).ok_or(Checked::Refuse)?;
-            let rest = &masked[name.end()..];
+            let rest = &text[name.end()..];
             let length = rest
                 .find(|character: char| {
                     character.is_whitespace() || character == '\'' || character == '"'
                 })
                 .unwrap_or(rest.len());
-            Ok(Checked::Replace(name.end() + length, replacement))
+            Ok(Checked::Mask(name.end(), name.end() + length))
         })())
     });
-    let at_word_start = |text: &str, found: &regex::Captures<'_>, suffix: &str| {
+    apply(&mut text, ranges);
+    // `trailing` bytes at the match's end stay, as the `@` after a URL's userinfo does.
+    let at_word_start = |text: &str, found: &regex::Captures<'_>, trailing: usize| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
+            let kept = found.get(1).ok_or(Checked::Refuse)?;
             boundary_before(text, whole.start(), name_char)?;
-            Ok(Checked::Replace(
-                whole.end(),
-                format!("{}{MASK}{suffix}", group(found, 1)),
-            ))
+            Ok(Checked::Mask(kept.end(), whole.end() - trailing))
         })())
     };
-    let masked = replace_checked(&BEARER, &masked, |found| at_word_start(&masked, found, ""));
-    let masked = replace_checked(&URL_PASSWORD, &masked, |found| {
-        at_word_start(&masked, found, "@")
+    let ranges = masked_ranges(&BEARER, &text, |found| at_word_start(&text, found, 0));
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&URL_PASSWORD, &text, |found| at_word_start(&text, found, 1));
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&HTTP_USERINFO, &text, |found| {
+        at_word_start(&text, found, 1)
     });
-    let masked = replace_checked(&HTTP_USERINFO, &masked, |found| {
-        at_word_start(&masked, found, "@")
-    });
-    let masked = TOKEN_SHAPE.replace_all(&masked, MASK);
-    let masked = replace_checked(&GITHUB_TOKEN, &masked, |found| {
+    apply(&mut text, ranges);
+    let ranges = TOKEN_SHAPE
+        .find_iter(&text)
+        .map(|found| (found.start(), found.end()))
+        .collect();
+    apply(&mut text, ranges);
+    let ranges = masked_ranges(&GITHUB_TOKEN, &text, |found| {
         checked((|| {
             let whole = found.get(0).ok_or(Checked::Refuse)?;
-            boundary_before(&masked, whole.start(), name_char)?;
-            Ok(Checked::Replace(whole.end(), MASK.to_owned()))
+            boundary_before(&text, whole.start(), name_char)?;
+            Ok(Checked::Mask(whole.start(), whole.end()))
         })())
     });
-    let masked = ALNUM_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let run = group(found, 0);
-        if run.len() >= 32 && run.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            MASK.to_owned()
-        } else {
-            run.to_owned()
-        }
-    });
-    BASE64_RUN
-        .replace_all(&masked, |found: &regex::Captures<'_>| {
-            let run = group(found, 0);
-            if looks_random(run) {
-                MASK.to_owned()
-            } else {
-                run.to_owned()
+    apply(&mut text, ranges);
+    let ranges = ALNUM_RUN
+        .find_iter(&text)
+        .filter(|run| run.len() >= 32 && run.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|run| (run.start(), run.end()))
+        .collect();
+    apply(&mut text, ranges);
+    let ranges = BASE64_RUN
+        .find_iter(&text)
+        .filter(|run| looks_random(run.as_str()))
+        .map(|run| (run.start(), run.end()))
+        .collect();
+    apply(&mut text, ranges);
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < masked.len() {
+        if masked[index] {
+            let start = index;
+            while index < masked.len() && masked[index] {
+                index += 1;
             }
-        })
-        .into_owned()
+            ranges.push((start, index));
+        } else {
+            index += 1;
+        }
+    }
+    ranges
 }
 
 /// Reduces a command line to its working command's executable and a few masked, shortened
@@ -1029,6 +1114,57 @@ mod tests {
                     assert!(!summary.contains(secret), "{text:?}: {summary:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_dropped_joiner_glues_no_word_onto_a_secret() {
+        for text in [
+            "a\u{200d}Bearer s3cret",
+            "a\u{200d}--token s3cret",
+            "a\u{200d}mysql -ps3cret",
+            "a\u{200c}sshpass -p s3cret",
+            "a\u{200c}curl -u u:s3cret",
+            "a\u{fe0f}ghp_s3cret",
+            "to\u{200d}ken=s3cret",
+            "PASS\u{ad}WORD=s3cret",
+        ] {
+            let masked = redact(text);
+            assert!(!masked.contains("s3cret"), "{text:?}: {masked:?}");
+        }
+        let soft = format!(
+            "gh\u{ad}p_{}",
+            "A1b2C3d4E5".repeat(4).get(..36).unwrap_or_default()
+        );
+        assert_eq!(redact(&format!("x {soft} y")), "x [redacted] y");
+    }
+
+    #[test]
+    fn text_with_nothing_to_mask_comes_back_unchanged() {
+        let title = "\u{26a0}\u{fe0f} Fix the \u{1f469}\u{200d}\u{1f4bb} page; \u{646}\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        assert_eq!(redact(title), title);
+        assert_eq!(
+            redact(&format!("{title} TOKEN=x")),
+            format!("{title} TOKEN=[redacted]")
+        );
+    }
+
+    #[test]
+    fn a_quote_the_clip_leaves_open_is_masked_to_the_end() {
+        for tail in [
+            r#"password: "hunter2 more words"#,
+            r#"{"token": "hunter2 more"#,
+            "TOKEN='hunter2 more",
+        ] {
+            for padding in [8130, 8140, 8150, 8160, 8170, 8180] {
+                let text = format!(
+                    "{}{tail} and the rest after the cut",
+                    "w ".repeat(padding / 2)
+                );
+                let masked = redact(&text);
+                assert!(!masked.contains("hunter2"), "{padding} {tail}");
+            }
+            assert!(!redact(tail).contains("hunter2"), "{tail}");
         }
     }
 

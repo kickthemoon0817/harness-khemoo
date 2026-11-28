@@ -70,14 +70,14 @@ pub const FLEET_OUTPUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 const PID_LOOKUPS_PER_CYCLE: usize = 3;
 const SMALL_FILE_BYTES: u64 = 1024 * 1024;
 
-/// A URL with a password in its userinfo.
-static URL_WITH_PASSWORD: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]*:[^/\s@]*@")
+/// A URL carrying userinfo or a query string, where credentials ride.
+static URL_WITH_CREDENTIALS: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^/\s@]*@|[^\s?#]*\?)")
         .expect("a constant pattern compiles")
 });
 
 /// Name parts that mark a secret, matched whole or as a part's end (`APIKEY`, `MYTOKEN`).
-const SECRET_PART_ENDS: [&str; 16] = [
+const SECRET_PART_ENDS: [&str; 18] = [
     "KEY",
     "AUTH",
     "PASS",
@@ -94,6 +94,8 @@ const SECRET_PART_ENDS: [&str; 16] = [
     "CREDENTIALS",
     "PAT",
     "DSN",
+    "BEARER",
+    "WEBHOOK",
 ];
 /// Name parts that mark a secret at a part's start too (`SESSIONID`); short words such as `KEY`
 /// and `PAT` only whole, so `KEYBOARD` and `PATH` stay.
@@ -120,7 +122,7 @@ fn secret_variable(name: &str, value: &str) -> bool {
             SECRET_PART_ENDS.iter().any(|word| part.ends_with(word))
                 || SECRET_PART_STARTS.iter().any(|word| part.starts_with(word))
         });
-    secret_name || URL_WITH_PASSWORD.is_match(value)
+    secret_name || URL_WITH_CREDENTIALS.is_match(value)
 }
 
 /// Where each usage window cuts the pool (lib/usage.sh defaults).
@@ -1682,5 +1684,12 @@ mod tests {
             "postgres://user:pw@db.example.com/app"
         ));
         assert!(!secret_variable("SITE", "https://example.com/a:b"));
+        assert!(secret_variable("KUBE_BEARER", "x"));
+        assert!(secret_variable(
+            "SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/T/B/x"
+        ));
+        assert!(secret_variable("PUSH", "https://user@example.com/hook"));
+        assert!(secret_variable("PUSH", "https://example.com/hook?sig=abc"));
     }
 }
