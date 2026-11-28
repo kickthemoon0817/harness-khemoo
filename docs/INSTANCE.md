@@ -296,7 +296,12 @@ and the dashboard behave as if none of it existed, and a `state/directive.json` 
 | `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
 | `SUPERVISOR_MAX_DIRECTIVE_S` | 21600 | the latest a directive's `expires_at` may be; a later one is clamped |
 | `SUPERVISOR_STOP_GRACE_S` | 1200 | how long a tick named in `stop` has to wind down before TERM: a tick reads its notice when it next runs `usage-ok.sh`, at least every 15 minutes |
-| `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments wake the supervisor; empty, the repository's owner, members and collaborators |
+| `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments bind a tick (`libexec/usage-ok.sh`) and wake the supervisor; empty, the repository's owner, members and collaborators |
+
+Ticks post as the account `GH_TOKEN` belongs to. When that is an operator's own account, a tick's
+comment that opens with `Operator` would read as that operator's ruling to a later tick. The lint
+blocks such a body (`operator-voice`), but a tick that skips the lint is not stopped: only ticks
+posting as an account of their own, left out of `OPERATOR_LOGINS`, rule it out.
 
 `harness directive`, `harness supervisor` and `harness health` read these keys, the model list and
 widths (`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH`), the budgets and the label keys
@@ -479,8 +484,10 @@ recognises a lane or landing tick by its slot file's `kind`.
 
 `"$HARNESS_BIN" lint` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
-`harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
-the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these
+`harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, `operator-voice` (a body that opens
+with `Operator`, which a later tick would read as the operator's ruling, since ticks post with the
+operator's token), and the `label-mention` warning for the harness labels (`WIP_LABEL` through
+`LOW_LABEL`, as set in the environment). It reads these
 settings from its environment, not from `harness.env`.
 
 The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else from

@@ -29,6 +29,8 @@ enum Command {
     Directive(harness::directive::Args),
     /// Decide when the supervisor runs, and record its runs.
     Supervisor(harness::supervisor::Args),
+    /// Pick an operator's comments out of an issue's.
+    Operator(harness::operator::Args),
 }
 
 fn main() -> ExitCode {
@@ -42,5 +44,6 @@ fn main() -> ExitCode {
         Command::Health(args) => harness::health::run(&args),
         Command::Directive(args) => harness::directive::run(&args),
         Command::Supervisor(args) => harness::supervisor::run(&args),
+        Command::Operator(args) => harness::operator::run(&args),
     }
 }
