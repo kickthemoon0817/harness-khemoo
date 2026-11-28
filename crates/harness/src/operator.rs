@@ -109,8 +109,8 @@ pub fn operator_comments(
 }
 
 /// The most read on stdin. usage-ok.sh cuts each comment to its first line before this reads it,
-/// so this holds thousands; input cut short loses only its newest comments, which GitHub lists
-/// last and the next run reads from the time of the last one named.
+/// so this holds over a thousand; input cut short loses only its newest comments, which GitHub
+/// lists last. The next run reads past them only once an operator comment before the cut is named.
 const INPUT_LIMIT: u64 = 4 << 20;
 
 #[derive(clap::Args)]

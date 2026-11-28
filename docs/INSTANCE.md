@@ -214,6 +214,11 @@ and the dashboard behave as if none of it existed, and a `state/directive.json` 
 | `SUPERVISOR_STOP_GRACE_S` | 1200 | how long a tick named in `stop` has to wind down before TERM: a tick reads its notice when it next runs `usage-ok.sh`, at least every 15 minutes |
 | `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments bind a tick (`libexec/usage-ok.sh`) and wake the supervisor; empty, the repository's owner, members and collaborators |
 
+Ticks post as the account `GH_TOKEN` belongs to. When that is an operator's own account, a tick's
+comment that opens with `Operator` would read as that operator's ruling to a later tick. The lint
+blocks such a body (`operator-voice`), but a tick that skips the lint is not stopped: only ticks
+posting as an account of their own, left out of `OPERATOR_LOGINS`, rule it out.
+
 `harness directive`, `harness supervisor` and `harness health` read these keys, the model list and
 widths (`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH`), the budgets and the label keys
 from `harness.env` only: a process of this user that sets one in its environment cannot loosen a
