@@ -373,15 +373,19 @@ directive_lane() {
 
 # Whether the agy at path $1 is the Antigravity CLI: its --help names --input-format. The answer is
 # kept in $HARNESS_STATE/agy-cli for that path and modification time, since the launcher asks at
-# every firing and --help may take seconds.
+# every firing and --help may take seconds. Only an answer --help gave is kept: one that timed out or
+# printed nothing is asked again, so a slow first probe never refuses the CLI until it changes.
 agy_is_cli() {
-    local key kept="$HARNESS_STATE/agy-cli" verdict=no
+    local key kept="$HARNESS_STATE/agy-cli" verdict=no help rc
     key="$1 $(stat -L -c %Y -- "$1" 2>/dev/null)"
     if [ -s "$kept" ] && [ "$(head -c 4096 "$kept" | sed -n 1p)" = "$key" ]; then
         verdict=$(sed -n 2p "$kept")
     else
-        timeout 20 "$1" --help </dev/null 2>&1 | grep -q -- --input-format && verdict=yes
-        printf '%s\n%s\n' "$key" "$verdict" >"$kept.$$" && mv -f "$kept.$$" "$kept"
+        help=$(timeout 20 "$1" --help </dev/null 2>&1); rc=$?
+        grep -q -- --input-format <<<"$help" && verdict=yes
+        if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && [ -n "$help" ]; then
+            printf '%s\n%s\n' "$key" "$verdict" >"$kept.$$" && mv -f "$kept.$$" "$kept"
+        fi
     fi
     [ "$verdict" = yes ]
 }

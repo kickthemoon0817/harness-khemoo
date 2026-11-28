@@ -259,6 +259,17 @@ check "agy's --help is asked once for one binary, kept in the state" \
 touch -d "@$(( $(date +%s) - 60 ))" "$H/fakebin/count-agy"
 "$H/bin/tick.sh" check >/dev/null 2>&1
 check "and again once the binary changes" '[ "$(wc -l < "$FAKE_AGENTS/count-agy.help")" = 2 ]' "$(cat "$FAKE_AGENTS/count-agy.help" 2>/dev/null)"
+# A --help that failed to answer is no verdict: the next check asks again.
+cat > "$H/fakebin/mute-agy" <<'EOF'
+#!/usr/bin/env bash
+echo x >> "$FAKE_AGENTS/mute-agy.help"
+exit 1
+EOF
+chmod +x "$H/fakebin/mute-agy"; rm -f "$FAKE_AGENTS/mute-agy.help"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/mute-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "an agy whose --help says nothing is refused, and asked again at the next check" \
+    '[ "$rc" -eq 1 ] && [ "$(wc -l < "$FAKE_AGENTS/mute-agy.help")" = 2 ]' "rc=$rc $(cat "$FAKE_AGENTS/mute-agy.help" 2>/dev/null)"
 check_with "CLAUDE_FLAGS=" "WEEK_HALF_AT=64" "TICK_AGENT_EXES=claude:-p"
 check "check names each key it does not read, and the key to set instead" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*CLAUDE_FLAGS is not read; set AGENT_FLAGS_claude instead" "$H/check.txt" && grep -q "WEEK_HALF_AT is not read; set USAGE_STEPS_LONG instead" "$H/check.txt" && grep -q "TICK_AGENT_EXES is not read; remove it" "$H/check.txt"' \
