@@ -50,7 +50,7 @@ query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
-        number title url headRefName
+        number title url headRefName isCrossRepository
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       }
     }
@@ -256,7 +256,8 @@ impl GitHubClient {
                         "number": node["number"],
                         "title": node["title"],
                         "url": node["url"],
-                        "head": node["headRefName"],
+                        "head": node["headRefName"].as_str().unwrap_or_default(),
+                        "fork": node["isCrossRepository"].as_bool().unwrap_or(true),
                         "checks": state,
                     })
                 })

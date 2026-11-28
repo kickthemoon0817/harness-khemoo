@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::dashboard::files;
 use crate::dashboard::text::{iso, parse_iso};
 use crate::home::harness_home;
+use crate::operator::{Authors, OperatorComment, operator_comments};
 use crate::usage::{self, Entry, Lookup};
 
 /// A failed run waits the minimum interval doubled this many times at most.
@@ -37,13 +38,16 @@ const CLAIMS_TAIL: u64 = 64 * 1024;
 /// The runs log keeps this many lines.
 const RUNS_KEPT: usize = 100;
 const SMALL_FILE: u64 = 4096;
+/// The operators' comments kept for `harness health`.
+const OPERATOR_COMMENTS_KEPT: usize = 10;
 
 /// The keys the supervisor's and the directive's commands read from harness.env when the
 /// environment does not set them: harness.env is sourced, not exported, so a supervisor tick that
 /// runs `harness directive apply` has none of it in its environment.
-const CONFIG_KEYS: [&str; 19] = [
+const CONFIG_KEYS: [&str; 20] = [
     "HARNESS_STATE",
     "GH_REPO",
+    "OPERATOR_LOGINS",
     "WORKTREE_ROOT",
     "TICK_MODELS",
     "TICK_AGENT",
@@ -616,8 +620,7 @@ pub fn gather(paths: &Paths, since: u64) -> Inputs {
         .filter(|tick| tick.kind != crate::ticks::Kind::Supervisor)
         .map(|tick| tick.age_s)
         .collect();
-    let mut operator = modified_in(&state.join("operator-seen"));
-    operator.extend(read_number(&paths.file("operator")));
+    let operator = read_number(&paths.file("operator")).into_iter().collect();
     Inputs {
         tick_ends: tick_ends(&state.join("logs"), since),
         limits: modified_in(&state.join("model-cooldown")),
@@ -657,10 +660,27 @@ fn room(env: Lookup, paths: &Paths, entry: &Entry) -> Result<(), String> {
     }
 }
 
-/// Looks for an Operator comment on the repository since the last look, at most once a minimum
-/// interval, and stamps `operator` with the newest one's time. A failed look is left for the next.
+/// The operators' comments the last looks found, newest last, for `harness health`.
+pub fn read_operator_comments(paths: &Paths) -> Vec<OperatorComment> {
+    files::read_text_limited(&paths.file("operator-comments.json"), 1 << 16)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Looks for an operator's Operator comment on the repository since the last look, at most once a
+/// minimum interval: stamps `operator` with the newest one's time and keeps the newest few for
+/// `harness health`. A failed look is left for the next; an `OPERATOR_LOGINS` that names no logins
+/// reads none.
 fn look_for_operator(env: Lookup, settings: &Settings, paths: &Paths, now: u64) {
     let Some(repo) = env("GH_REPO") else { return };
+    let authors = match Authors::from_env(env) {
+        Ok(authors) => authors,
+        Err(message) => {
+            eprintln!("harness supervisor: {message}; no Operator comment read");
+            return;
+        }
+    };
     let checked = read_number(&paths.file("github_checked"));
     if checked.is_some_and(|at| now < at.saturating_add(settings.min_interval_s)) {
         return;
@@ -689,18 +709,14 @@ fn look_for_operator(env: Lookup, settings: &Settings, paths: &Paths, now: u64) 
     let Ok(Value::Array(comments)) = serde_json::from_slice::<Value>(&output.stdout) else {
         return;
     };
-    let newest = comments
-        .iter()
-        .filter(|comment| {
-            comment["body"]
-                .as_str()
-                .is_some_and(|body| body.starts_with("Operator"))
-        })
-        .filter_map(|comment| epoch_of(comment["created_at"].as_str()?))
-        .filter(|at| *at > since)
-        .max();
-    if let Some(at) = newest {
-        let _ = write_value(&paths.file("operator"), &at.to_string());
+    let found = operator_comments(&comments, &authors, since);
+    let Some(newest) = found.last() else { return };
+    let _ = write_value(&paths.file("operator"), &newest.at.to_string());
+    let mut kept = read_operator_comments(paths);
+    kept.extend(found);
+    let kept = &kept[kept.len().saturating_sub(OPERATOR_COMMENTS_KEPT)..];
+    if let Ok(text) = serde_json::to_string(kept) {
+        let _ = files::write_replacing(&paths.file("operator-comments.json"), &text);
     }
 }
 
@@ -730,13 +746,16 @@ fn due_command(env: Lookup, settings: &Settings, paths: &Paths) -> Result<ExitCo
     }
 }
 
-/// The earliest numeric window reset still ahead, across every agent of the model list.
+/// The earliest window reset still ahead, a number of Unix seconds or an ISO time, across every agent of the model list.
 fn next_reset(env: Lookup, now: u64) -> Option<u64> {
     let pool = usage::pool(env, false).ok()?;
     pool.agents
         .iter()
         .flat_map(|agent| agent.windows.iter())
-        .filter_map(|window| window.resets_at.as_ref()?.as_u64())
+        .filter_map(|window| match window.resets_at.as_ref()? {
+            Value::String(text) => epoch_of(text),
+            other => other.as_u64(),
+        })
         .filter(|at| *at > now)
         .min()
 }
