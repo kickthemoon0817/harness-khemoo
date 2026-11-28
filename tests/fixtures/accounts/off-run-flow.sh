@@ -86,9 +86,12 @@ SUPERVISOR_MIN_INTERVAL_S=86400
 SUPERVISOR_INTERVAL_S=86400
 ANTHROPIC_API_KEY=sk-ant-fixture
 ENV
+# Every inherited name under a prefix this prints goes, so a host's own (a CI runner's
+# AGENT_TOOLSDIRECTORY) never reaches the output.
 # shellcheck disable=SC2046 # one name a word
-unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR CLAUDE_CONFIG_DIR CODEX_HOME GEMINI_CLI_HOME \
-    AGENT_ACCOUNTS_DIR $(compgen -v USAGE_) $(compgen -v ANTHROPIC_) $(compgen -v CLAUDE_CODE_) $(compgen -v OPENAI_) $(compgen -v SUPERVISOR_)
+unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR \
+    $(compgen -v AGENT_) $(compgen -v CLAUDE_) $(compgen -v CODEX_) $(compgen -v GEMINI_) $(compgen -v TICK_) \
+    $(compgen -v USAGE_) $(compgen -v ANTHROPIC_) $(compgen -v OPENAI_) $(compgen -v SUPERVISOR_)
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 20}}\n' "$(date +%s)" > "$H/usage-cache.json"
 printf '{"timestamp":"2026-11-28T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":30,"window_minutes":10080,"resets_at":%s},"secondary":null}}}\n' \
