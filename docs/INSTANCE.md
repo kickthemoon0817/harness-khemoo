@@ -247,17 +247,40 @@ applies to each of the agent's accounts.
 
 | Agent | Source | Fetch command, and what it runs with |
 |---|---|---|
-| `claude` | `claude-cache:<folder>/usage-cache.json` | claude's (`USAGE_FETCH_claude`, else `USAGE_FETCH`, else the default script), with `CLAUDE_CONFIG_DIR` the folder, `USAGE_CACHE` that cache and `USAGE_CREDENTIALS_FILE` the folder's `.credentials.json` when there is one, else unset |
+| `claude` | `claude-cache:<folder>/usage-cache.json` | only its own `USAGE_FETCH_claude_<account>` (below); without one, none |
 | `codex` | `codex-sessions:<folder>/sessions` | `USAGE_FETCH_codex`, with `CODEX_HOME` the folder |
 | `gemini` | `USAGE_SOURCE_gemini` | `USAGE_FETCH_gemini`, with `GEMINI_CLI_HOME` the folder |
 
 `USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>` replace one account's, a `-`
 of the name written `_` (`claude@client-2` reads `USAGE_SOURCE_claude_client_2`); a bare
-`codex-sessions` there names the folder's own sessions. A fetch script must read the account's own
-login: on Linux Claude Code keeps a folder's in `<folder>/.credentials.json`; on macOS it keeps it in
-the Keychain under `Claude Code-credentials-<the first 8 hex digits of the SHA-256 of the folder's
-path>`, as Claude Code 2.1.332's code names it, while the default folder's entry is
-`Claude Code-credentials`.
+`codex-sessions` there names the folder's own sessions.
+
+A claude account fails closed. Claude's own fetch command (`USAGE_FETCH_claude`, `USAGE_FETCH` or
+the default script) reads the default account's login, and run for an account it would fill that
+account's cache with the default account's usage, letting its ticks run past its real limit. So a
+claude account runs only its own `USAGE_FETCH_claude_<account>`. Without one, its Claude cache is
+read as no reading at all, even a fresh one, and its cap is 0: the launcher logs `<agent>@<name>: no
+usage fetch for this account: set USAGE_FETCH_claude_<account>; none of its ticks start` once, and
+`harness accounts`, `check` and the dashboard show it as the reason. An account that names its own
+`json:` source needs no fetch. A codex account reads its own folder's sessions and needs none; the
+default entry, without `@`, keeps claude's fetch as before.
+
+*Writing a per-account fetch.* It runs as any fetch command does (no input or output, killed after
+60 s), with these set:
+
+| Variable | Value |
+|---|---|
+| `CLAUDE_CONFIG_DIR` | the account's folder |
+| `USAGE_CACHE` | the cache to write, `<folder>/usage-cache.json`, in Claude Code's cache shape (the `claude-cache` row above) |
+| `USAGE_CREDENTIALS_FILE` | `<folder>/.credentials.json`, only when that file exists; otherwise unset, even if the environment set one for the default account |
+
+It must read the account's own login and no other. On Linux Claude Code keeps a folder's login in
+`<folder>/.credentials.json`. On macOS it keeps it in the Keychain, under the service
+`Claude Code-credentials-<first 8 hex digits of the SHA-256 of the folder's path>`; the default
+folder's is `Claude Code-credentials`. That name was read from the Claude Code 2.1.332 binary and
+is unconfirmed: no account was signed in to check it, and a later release may change it. Verify it
+(`security find-generic-password -s '<service>'` lists the entry without printing its secret) before
+relying on it.
 
 **Sign-in.** `harness accounts [--json]` lists each account folder found under the root: its agent
 and name, whether it is signed in and how, when the sign-in ends where the CLI says, and its cap

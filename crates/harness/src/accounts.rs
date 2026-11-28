@@ -345,6 +345,21 @@ fn kept(state: &Path, key: &str) -> Option<Kept> {
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
+/// Whether `what` holds of the account `key` now and did not at the last call, so the launcher
+/// logs a lasting state once: `<state>/accounts/<key>.<what>` stands while it holds.
+pub fn first_time(state: &Path, key: &str, what: &str, holds: bool) -> bool {
+    let dir = status_dir(state);
+    let mark = dir.join(format!("{key}.{what}"));
+    if !holds {
+        let _ = std::fs::remove_file(&mark);
+        return false;
+    }
+    if mark.exists() || files::prepare_private_dir(&dir).is_err() {
+        return false;
+    }
+    files::write_private(&mark, "").is_ok()
+}
+
 /// The last check of the account `key`, when one was made.
 pub fn cached(state: &Path, key: &str) -> Option<SignIn> {
     kept(state, key).map(|kept| kept.sign_in)

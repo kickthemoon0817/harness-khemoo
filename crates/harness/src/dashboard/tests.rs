@@ -3290,7 +3290,7 @@ fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_whi
 fn accounts_show_their_sign_in_and_count_on_their_own() {
     let harness = FixtureHarness::new();
     let root = harness.home.join("agent-accounts");
-    for name in ["work", "home"] {
+    for name in ["work", "home", "bare"] {
         let dir = root.join("claude").join(format!("claude-{name}"));
         std::fs::create_dir_all(&dir).ok();
         write_usage_cache(&dir.join("usage-cache.json"), 10, 20);
@@ -3322,6 +3322,8 @@ fn accounts_show_their_sign_in_and_count_on_their_own() {
         ),
         ("MAX_SLOTS".to_owned(), "4".to_owned()),
         ("AGENT_ACCOUNTS_DIR".to_owned(), root.display().to_string()),
+        ("USAGE_FETCH_claude_work".to_owned(), "/no-fetch".to_owned()),
+        ("USAGE_FETCH_claude_home".to_owned(), "/no-fetch".to_owned()),
     ];
     let snapshot = harness.collector_with(config, pinned()).snapshot();
     let caps: Vec<(Value, Value, Value)> = snapshot["usage"]["agents"]
@@ -3357,7 +3359,11 @@ fn accounts_show_their_sign_in_and_count_on_their_own() {
         .collect();
     assert_eq!(
         listed,
-        [(json!("home"), json!(null)), (json!("work"), json!(2))]
+        [
+            (json!("bare"), json!(null)),
+            (json!("home"), json!(null)),
+            (json!("work"), json!(2))
+        ]
     );
     let rendered = page(&snapshot);
     for text in [
@@ -3366,6 +3372,7 @@ fn accounts_show_their_sign_in_and_count_on_their_own() {
         "signed in (claude.ai)",
         "under 3 days",
         "signed out",
+        "no usage fetch for this account: set USAGE_FETCH_claude_bare",
     ] {
         assert!(rendered.contains(text), "{text}");
     }

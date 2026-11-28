@@ -89,6 +89,8 @@ MAX_SLOTS=1
 STAGGER_SECONDS=0
 CLAIM_GRACE_S=0
 USAGE_FETCH=$H/no-fetch
+USAGE_FETCH_claude_work=$H/no-fetch
+USAGE_FETCH_claude_home=$H/no-fetch
 USAGE_SOURCE_gemini=none
 EOF
     [ $# -gt 0 ] && printf '%s\n' "$@" >> "$H/instance/harness.env"
@@ -228,11 +230,25 @@ check "a gemini account runs with GEMINI_CLI_HOME" '[ "$(cat "$H/seen/gemini.tic
 
 # --- usage per account -------------------------------------------------------------------------------
 echo '{}' > "$A/claude/claude-work/.credentials.json"
-write_env "USAGE_FETCH=$H/fakebin/fetch" "USAGE_REFRESH_AFTER=0"
+write_env "USAGE_FETCH_claude_work=$H/fakebin/fetch" "USAGE_FETCH_claude_home=$H/fakebin/fetch" "USAGE_REFRESH_AFTER=0"
 export USAGE_CREDENTIALS_FILE="$H/home/.claude/.credentials.json"; launch; unset USAGE_CREDENTIALS_FILE
 check "each account's fetch runs with its folder, its cache and its own credentials file only" \
     'grep -qx "$A/claude/claude-work $A/claude/claude-work/usage-cache.json $A/claude/claude-work/.credentials.json" "$H/seen/fetch" && grep -qx "$A/claude/claude-home $A/claude/claude-home/usage-cache.json unset" "$H/seen/fetch"' \
     "$(sort -u "$H/seen/fetch")"
+mkdir -p "$A/claude/claude-bare"; cache "$A/claude/claude-bare" 10
+rm -f "$H/seen/fetch"
+write_env "USAGE_FETCH=$H/fakebin/fetch" "USAGE_REFRESH_AFTER=0" "TICK_MODELS='claude@bare:model-a codex@work:model-x'"
+launch
+check "a claude account without its own fetch runs none, reads as no reading and is logged once" \
+    '[ ! -e "$H/seen/fetch" ] && grep -qx "dir=$A/codex/codex-work" "$H/seen/codex.ticks" && [ ! -e "$H/seen/claude.ticks" ]' \
+    "fetch=$(cat "$H/seen/fetch" 2>/dev/null) codex=$(cat "$H/seen/codex.ticks" 2>/dev/null)"
+"$H/bin/tick.sh"; settle
+check "the launcher logs it once, and the pool counts it as cap 0" \
+    '[ "$(grep -c "claude@bare: no usage fetch for this account: set USAGE_FETCH_claude_bare; none of its ticks start" "$LOG")" = 1 ] && grep -q "claude@bare=0\[unknown\]" "$LOG"' "$(cat "$LOG")"
+out=$(AGENT_ACCOUNTS_DIR="$A" HARNESS_STATE="$S" AGENT_BIN_claude="$H/fakebin/claude" "$HARNESS_BIN" accounts)
+check "harness accounts says why the account allows nothing" \
+    'grep -q "^claude@bare: signed in (claude.ai), ends .*; cap 0, no reading (no usage fetch for this account: set USAGE_FETCH_claude_bare)$" <<<"$out"' "$out"
+rm -rf "$A/claude/claude-bare"
 write_env "USAGE_SOURCE_claude_work=json:$H/work.json"
 printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 75, "window_minutes": 60}]}\n' "$(date +%s)" > "$H/work.json"
 out=$(set -a; . "$H/instance/harness.env"; set +a; HARNESS_STATE="$S" "$HARNESS_BIN" usage --json | jq -c '[.agents[] | [.agent, .account, .source, .cap]]')

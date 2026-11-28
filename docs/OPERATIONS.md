@@ -123,6 +123,10 @@ CLAUDE_CONFIG_DIR="$HOME/.agents-accounts/claude/claude-work" claude auth login
 target/release/harness accounts            # each folder: signed in or out, how, until when, its cap
 ```
 
+A claude account also needs its own `USAGE_FETCH_claude_<account>`, a script that reads that
+account's login ([`docs/INSTANCE.md`](INSTANCE.md#accounts) gives what it runs with); until it has
+one, `no usage fetch for this account` in the log and on the dashboard says why it starts nothing.
+
 `signed out` in `allocator.log`, the `account:` lines of `tick.sh check` or the dashboard's Accounts
 panel means that account's ticks start no more: sign in to its folder again, and the first
 launcher firing after its last check is five minutes old notices. The other accounts and agents run on meanwhile. A sign-in ending in

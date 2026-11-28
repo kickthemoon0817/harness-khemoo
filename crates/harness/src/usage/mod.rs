@@ -363,8 +363,10 @@ impl AgentSource {
 
     /// An account's: `USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>`, a `-` of
     /// the name read as `_`. Without its own source claude reads `<folder>/usage-cache.json` and codex
-    /// `<folder>/sessions`, and any other agent takes `USAGE_SOURCE_<agent>`; without its own fetch
-    /// command the agent's runs, with the account's folder ([`AgentSource::fetch_env`]).
+    /// `<folder>/sessions`, and any other agent takes `USAGE_SOURCE_<agent>`. A claude account runs
+    /// only its own fetch command: claude's would read the default account's login and fill this
+    /// account's cache with another account's usage. Any other agent's account falls back to the
+    /// agent's command, run with the account's folder ([`AgentSource::fetch_env`]).
     pub fn for_account(env: Lookup, account: Account) -> Result<Self, String> {
         let agent = account.agent.clone();
         let own = format!("{agent}_{}", crate::accounts::key_name(&account.name));
@@ -384,14 +386,29 @@ impl AgentSource {
                 None => Source::Unset,
             },
         };
-        let fetch = env(&format!("USAGE_FETCH_{own}"))
-            .map(PathBuf::from)
-            .or_else(|| agent_fetch(env, &agent));
+        let fetch = match env(&format!("USAGE_FETCH_{own}")) {
+            Some(path) => Some(PathBuf::from(path)),
+            None if agent == "claude" => None,
+            None => agent_fetch(env, &agent),
+        };
         Ok(Self {
             agent,
             account: Some(account),
             source,
             fetch,
+        })
+    }
+
+    /// A Claude cache of an account that has no fetch command of its own: nothing would refresh it
+    /// but a command that reads another account's login, so it is read as no reading at all.
+    pub fn missing_fetch(&self) -> Option<String> {
+        let account = self.account.as_ref()?;
+        (matches!(self.source, Source::ClaudeCache(_)) && self.fetch.is_none()).then(|| {
+            format!(
+                "no usage fetch for this account: set USAGE_FETCH_{}_{}",
+                account.agent,
+                crate::accounts::key_name(&account.name)
+            )
         })
     }
 
@@ -678,17 +695,21 @@ pub fn agent_usage(
             }
         },
     };
-    let reading = match (&source.source, account) {
-        (Source::None, _) => Err(String::new()),
-        (Source::Unset, Some(name)) => Err(format!(
-            "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent} is set: name its source, or none",
-            crate::accounts::key_name(name)
-        )),
-        (Source::Unset, None) => Err(format!(
-            "USAGE_SOURCE_{agent} is not set: name its source, or none"
-        )),
-        _ if refresh => read_refreshed(settings, &source),
-        _ => sources::read(&source.source),
+    let reading = if let Some(why) = source.missing_fetch() {
+        Err(why)
+    } else {
+        match (&source.source, account) {
+            (Source::None, _) => Err(String::new()),
+            (Source::Unset, Some(name)) => Err(format!(
+                "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent} is set: name its source, or none",
+                crate::accounts::key_name(name)
+            )),
+            (Source::Unset, None) => Err(format!(
+                "USAGE_SOURCE_{agent} is not set: name its source, or none"
+            )),
+            _ if refresh => read_refreshed(settings, &source),
+            _ => sources::read(&source.source),
+        }
     };
     let mut usage = assess(env, settings, &source, reading, now_ms())?;
     if let (Some(account), Some(state)) = (&source.account, state_dir(env)) {
@@ -825,6 +846,16 @@ fn refresh(env: Lookup) -> Result<ExitCode, String> {
                 Err(_) => continue,
             },
         };
+        if let (Some(account), Some(state)) = (&source.account, state_dir(env)) {
+            let missing = source.missing_fetch();
+            if crate::accounts::first_time(&state, &account.key(), "no-fetch", missing.is_some()) {
+                println!(
+                    "{}: {}; none of its ticks start",
+                    account.key(),
+                    missing.unwrap_or_default()
+                );
+            }
+        }
         if !matches!(source.source, Source::None | Source::Unset) {
             let _ = read_refreshed(&settings, &source);
         }
@@ -1667,10 +1698,24 @@ mod tests {
             of(&claude).source,
             Source::ClaudeCache(claude.dir.join("usage-cache.json"))
         );
-        assert_eq!(of(&claude).fetch, Some("/f.sh".into()));
+        assert_eq!(
+            of(&claude).fetch,
+            None,
+            "claude's own fetch would read another account's login"
+        );
+        assert_eq!(
+            of(&claude).missing_fetch().as_deref(),
+            Some("no usage fetch for this account: set USAGE_FETCH_claude_work")
+        );
         assert_eq!(
             of(&codex).source,
             Source::CodexSessions(codex.dir.join("sessions"))
+        );
+        assert_eq!(of(&codex).missing_fetch(), None);
+        assert_eq!(
+            AgentSource::from_env(&env, "claude").unwrap().fetch,
+            Some("/f.sh".into()),
+            "the default account keeps claude's fetch"
         );
         assert_eq!(of(&gemini).source, Source::None);
         let own = env_of(&[
@@ -1767,6 +1812,8 @@ mod tests {
                 "claude@work:opus claude@home:opus claude@home:sonnet codex@gone:gpt",
             ),
             ("AGENT_ACCOUNTS_DIR", &root_text),
+            ("USAGE_FETCH_claude_work", "/no-fetch"),
+            ("USAGE_FETCH_claude_home", "/no-fetch"),
             ("HARNESS_STATE", &state),
             ("MAX_SLOTS", "8"),
         ]);
@@ -1848,6 +1895,66 @@ mod tests {
             Some("claude@home:opus".to_owned()),
             "a signed-out account is passed over for the next"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_claude_account_without_its_own_fetch_allows_nothing() {
+        let dir = std::env::temp_dir().join(format!("usage-no-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("accounts");
+        let work = account_dir(&root, "claude", "work");
+        std::fs::write(
+            work.dir.join("usage-cache.json"),
+            format!(
+                r#"{{"timestamp": {}, "data": {{"fiveHourPercent": 10, "weeklyPercent": 10}}}}"#,
+                now_ms()
+            ),
+        )
+        .unwrap();
+        let root_text = root.display().to_string();
+        let state = dir.join("state").display().to_string();
+        let env = env_of(&[
+            ("AGENT_ACCOUNTS_DIR", &root_text),
+            ("HARNESS_STATE", &state),
+            ("USAGE_FETCH", "/f.sh"),
+        ]);
+        let usage = agent_usage(&env, &settings(&[]), "claude", Some("work"), false).unwrap();
+        assert_eq!(
+            (usage.cap, usage.reading),
+            (
+                0,
+                Freshness::Unreadable(
+                    "no usage fetch for this account: set USAGE_FETCH_claude_work".to_owned()
+                )
+            ),
+            "even a fresh cache is not trusted: nothing of this account's wrote it"
+        );
+        let state = dir.join("state");
+        assert!(crate::accounts::first_time(
+            &state,
+            "claude@work",
+            "no-fetch",
+            true
+        ));
+        assert!(!crate::accounts::first_time(
+            &state,
+            "claude@work",
+            "no-fetch",
+            true
+        ));
+        assert!(!crate::accounts::first_time(
+            &state,
+            "claude@work",
+            "no-fetch",
+            false
+        ));
+        assert!(crate::accounts::first_time(
+            &state,
+            "claude@work",
+            "no-fetch",
+            true
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
