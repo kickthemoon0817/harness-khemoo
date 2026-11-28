@@ -45,6 +45,18 @@ query($search: String!) {
   }
 }
 ";
+const PULLS_QUERY: &str = "
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title url headRefName isCrossRepository
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}
+";
 const MAX_ISSUE_PAGES: usize = 5;
 const STATES_PER_QUERY: usize = 60;
 
@@ -222,6 +234,35 @@ impl GitHubClient {
             }
         }
         Ok(states)
+    }
+
+    /// The open PRs whose last commit's checks failed or errored, most recently updated first.
+    pub fn fetch_failing_pulls(&self) -> Result<Vec<Value>, GitHubError> {
+        let data = self.graphql(
+            PULLS_QUERY,
+            &[("owner", self.owner.clone()), ("name", self.name.clone())],
+            false,
+        )?;
+        let nodes = data["repository"]["pullRequests"]["nodes"]
+            .as_array()
+            .ok_or_else(|| shape("repository.pullRequests.nodes"))?;
+        Ok(nodes
+            .iter()
+            .filter_map(|node| {
+                let state =
+                    node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"].as_str()?;
+                matches!(state, "FAILURE" | "ERROR").then(|| {
+                    serde_json::json!({
+                        "number": node["number"],
+                        "title": node["title"],
+                        "url": node["url"],
+                        "head": node["headRefName"].as_str().unwrap_or_default(),
+                        "fork": node["isCrossRepository"].as_bool().unwrap_or(true),
+                        "checks": state,
+                    })
+                })
+            })
+            .collect())
     }
 
     /// PRs merged since a time, newest merge first.

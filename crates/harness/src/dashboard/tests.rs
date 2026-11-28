@@ -3222,3 +3222,66 @@ fn the_model_list_and_usage_keys_come_from_the_env_file_expanded() {
     }
     assert!(!super::wanted_key("OTHER_SECRET"));
 }
+
+#[test]
+fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_while_off() {
+    let directory = TempDir::new();
+    let home = directory.path();
+    let state = home.join("state");
+    std::fs::create_dir_all(state.join("logs")).ok();
+    let mut config = Config::new(home.to_path_buf(), home.join("data"));
+    config.remote_interval_s = 0.0;
+    config.crontab_command = strings(&["true"]);
+    config.usage_settings = vec![("TICK_MODELS".to_owned(), "claude:opus codex:gpt".to_owned())];
+    let collector = Collector::new(config.clone(), None, pinned());
+    let snapshot = collector.snapshot();
+    assert!(snapshot.get("supervisor").is_none());
+    let off = render::sections(&snapshot, ACCESS_TOKEN);
+    assert!(
+        off.iter()
+            .any(|(name, body)| name == "supervisor" && body.is_empty())
+    );
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let now = PINNED_EPOCH as u64;
+    let at = |offset: u64| crate::supervisor::iso_of(now + offset);
+    let directive = json!({
+        "version": 1, "reason": "one vendor <b>at a time</b>", "applied_at": at(0), "expires_at": at(3600),
+        "width": 2, "models": ["codex:gpt"],
+        "stop": [{"pid": 4242, "reason": "loops on #7", "start": 1, "named_at": at(0), "due_at": at(1200)}]
+    });
+    std::fs::write(state.join("directive.json"), directive.to_string()).ok();
+    std::fs::create_dir_all(state.join("supervisor")).ok();
+    std::fs::write(
+        state.join("supervisor/runs.log"),
+        format!("{} exit=0 duration=40s reason=first\n", at(0)),
+    )
+    .ok();
+    std::fs::write(
+        state.join("logs/directive.log"),
+        format!("{} apply: one vendor at a time\n", at(0)),
+    )
+    .ok();
+    config
+        .usage_settings
+        .push(("SUPERVISOR".to_owned(), "1".to_owned()));
+    let collector = Collector::new(config, None, pinned());
+    let snapshot = collector.snapshot();
+    let view = &snapshot["supervisor"];
+    assert_eq!(view["enabled"], true);
+    assert_eq!(view["directive"]["status"], "active");
+    assert_eq!(view["directive"]["stops"][0]["sent"], false);
+    assert_eq!(view["runs"].as_array().map(Vec::len), Some(1));
+    let sections = render::sections(&snapshot, ACCESS_TOKEN);
+    let panel = &sections
+        .iter()
+        .find(|(name, _)| name == "supervisor")
+        .map(|(_, body)| body.clone())
+        .unwrap_or_default();
+    assert!(panel.contains("<h2>Supervisor <span class=\"sub\">on, next due between"));
+    assert!(panel.contains("one vendor &lt;b&gt;at a time&lt;/b&gt;"));
+    assert!(panel.contains("width=2 models=codex:gpt"));
+    assert!(panel.contains("pid 4242</td><td>pending loops on #7"));
+    assert!(panel.contains("exit=0 duration=40s reason=first"));
+    assert!(panel.contains("apply: one vendor at a time"));
+}

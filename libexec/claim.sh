@@ -7,7 +7,8 @@
 #   claim.sh status <issue>   -> free, HELD <issue> <pid> <since> or ORPHAN <...>
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-L="${HARNESS_STATE:-$H/state}/locks"
+S="${HARNESS_STATE:-$H/state}"
+L="$S/locks"
 cmd="${1:-}"; issue="${2:-}"
 [[ "$issue" =~ ^[0-9]+$ ]] || { echo "usage: claim.sh acquire|status <issue>" >&2; exit 2; }
 F="$L/claim.$issue"
@@ -29,7 +30,16 @@ case "$cmd" in
       hp=$(awk '{print $2}' "$F")
       if [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null; then echo "BUSY $(cat "$F")"; exit 1; fi
     fi
-    echo "$issue $pid $(date -u +%FT%TZ)" > "$F"
+    now=$(date -u +%FT%TZ)
+    echo "$issue $pid $now" > "$F"
+    # Every claim, for the supervisor's loop signal: an issue claimed by tick after tick. Cut to
+    # its newest lines past a MiB.
+    if [ "${HARNESS_SUPERVISOR:-}" = 1 ]; then
+      echo "$issue $pid $now" >> "$S/claims.log"
+      if [ "$(stat -c %s "$S/claims.log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+        tail -n 2000 "$S/claims.log" > "$S/claims.log.new" && mv "$S/claims.log.new" "$S/claims.log"
+      fi
+    fi
     echo "ACQUIRED"
     ;;
   status)

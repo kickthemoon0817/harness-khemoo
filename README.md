@@ -26,6 +26,12 @@ infrastructure live in an instance directory that you own.
 - When a tick ends with work still queued, the runner starts the next tick at once on a fresh
   context. It stops after a short tick, after `MAX_CHAIN` ticks, or when the harness is paused,
   held or out of usage.
+- With `SUPERVISOR=1`, a supervisor tick starts on events (a failed tick, a usage limit, a reset,
+  a loop, an operator's comment) or every half hour. Run with no tools, it reads `harness health`
+  and answers with a directive (`harness directive`) that pauses the harness, narrows its width,
+  reorders its models, focuses ticks or stops a looping one, and a few comments and labels. The
+  harness applies them itself, inside the configuration and the usage caps. With no
+  directive, an expired or an invalid one, the harness runs on its own formulas.
 - A claim is held only while its PID lives. A tick that dies leaves an issue that the next tick
   resumes.
 
@@ -61,11 +67,11 @@ elsewhere, and `0 * * * * ~/harness/bin/worktree-gc.sh --apply` removes worktree
 | `bin/` (core) | what cron and operators run: `tick.sh`, `pr-sweep.sh`, `worktree-gc.sh`, `dashboard.sh` |
 | `libexec/` (core) | what the launcher and ticks call: claims, the merge lock, the usage check, the lint, the dashboard server |
 | `lib/` (core) | shell sourced by the scripts: loading the instance |
-| `prompts/` (core) | the rules every tick follows |
-| `crates/` (core) | the Rust workspace: `harness` (the lint, the queue count, live ticks, usage windows, the dashboard), and `fleet`, `fleetd` and their protocol ([`docs/FLEET.md`](docs/FLEET.md)) |
+| `prompts/` (core) | the rules every tick follows and the supervisor's |
+| `crates/` (core) | the Rust workspace: `harness` (the lint, the queue count, live ticks, usage windows, the supervisor's health and directive, the dashboard), and `fleet`, `fleetd` and their protocol ([`docs/FLEET.md`](docs/FLEET.md)) |
 | `instance/harness.env` | required: paths, labels, pool sizing, models, the dashboard's optional sources |
 | `instance/prompts/tick.md` | required: the installation's mission, appended to the core prompt |
-| `instance/prompts/` | optional: `runbook.md`, `glossary.md`, `public-record.md`, which the tick reads |
+| `instance/prompts/` | optional: `runbook.md`, `glossary.md`, `public-record.md`, which the tick reads, and `supervisor.md` for the supervisor |
 | `instance/lint_rules.json` | optional: the project's own lint rules |
 | `instance/bin/`, `instance/tests/` | optional: the project's scripts (first on PATH) and its suites |
 | `hooks/env.sh` | sourced before ticks run; what it exports reaches every tick |

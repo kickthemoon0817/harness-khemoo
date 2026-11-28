@@ -2,9 +2,11 @@
 //!
 //! The runner starts each tick, a local agent CLI or `fleet dispatch`, as its own child and records
 //! it in `<state>/locks/slot<n>.tick` as `pid starttime bootid agent model kind` until it ends, so a
-//! slot holds one tick at most. A tick is live while this boot's `/proc/<pid>/stat` gives the same
-//! start time, which a reused pid does not. Only `stat` is read, never the process's environment or descriptors: an
-//! agent CLI that marks itself non-dumpable, as the release Codex CLI does, keeps both private.
+//! slot holds one tick at most; the supervisor records its own in `<state>/locks/supervisor.tick`,
+//! read as slot 0. A tick is live while this boot's `/proc/<pid>/stat` gives the same start time,
+//! which a reused pid does not. Only `stat` is read, never the process's environment or
+//! descriptors: an agent CLI that marks itself non-dumpable, as the release Codex CLI does, keeps
+//! both private.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -24,8 +26,8 @@ const LOCKS_LIMIT: usize = 4096;
 
 #[derive(clap::Args)]
 #[command(after_help = "\
-Prints one tick a line, oldest first: pid, age in seconds, slot, agent, model and kind (work, lane
-or landing). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
+Prints one tick a line, oldest first: pid, age in seconds, slot, agent, model and kind (work, lane,
+landing or supervisor). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
 pub struct Args {
     /// Print a JSON document instead of lines.
     #[arg(long)]
@@ -41,6 +43,8 @@ pub enum Kind {
     Work,
     Lane,
     Landing,
+    /// The supervisor: it holds no slot and claims nothing.
+    Supervisor,
 }
 
 impl Kind {
@@ -49,6 +53,7 @@ impl Kind {
             "work" => Some(Self::Work),
             "lane" => Some(Self::Lane),
             "landing" => Some(Self::Landing),
+            "supervisor" => Some(Self::Supervisor),
             _ => None,
         }
     }
@@ -58,6 +63,7 @@ impl Kind {
             Self::Work => "work",
             Self::Lane => "lane",
             Self::Landing => "landing",
+            Self::Supervisor => "supervisor",
         }
     }
 }
@@ -160,11 +166,15 @@ fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
     let mut found = Vec::new();
     for entry in entries.take(LOCKS_LIMIT).flatten() {
         let name = entry.file_name();
-        let Some(slot) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix("slot")?.strip_suffix(".tick"))
-            .and_then(|slot| slot.parse::<u32>().ok())
-        else {
+        // The supervisor, which holds no slot, records its tick beside them as slot 0.
+        let Some(slot) = name.to_str().and_then(|name| match name {
+            "supervisor.tick" => Some(0),
+            _ => name
+                .strip_prefix("slot")?
+                .strip_suffix(".tick")?
+                .parse::<u32>()
+                .ok(),
+        }) else {
             continue;
         };
         // The runner writes it 0600 in this user's state directory; any other file is not its.

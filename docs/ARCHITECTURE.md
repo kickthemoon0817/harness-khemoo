@@ -26,9 +26,12 @@ Ordered cheapest-first because it runs every couple of minutes:
 1. Exit if the harness is paused (`state/paused`, or no live cron line) or the instance's
    `hooks/hold` says it is held.
 2. Exit if the instance is incomplete (`docs/INSTANCE.md`), logging it at most hourly.
+   With `SUPERVISOR=1`, send TERM to a stopped tick whose grace ended, start a supervisor tick
+   when one is due, and exit inside the directive's pause or before its `wake_at`.
 3. Count held slot locks. If none are free, exit — no API calls at all.
 4. Refresh each agent's usage reading only if it is older than `USAGE_REFRESH_AFTER`.
-5. Map each agent's windows to its cap, and sum the caps into the pool's.
+5. Map each agent's windows to its cap, and sum the caps into the pool's. A directive's `width` lowers it.
+   With every cap at 0 and a reset ahead, nothing starts before it; the launcher says so once.
 6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `$HARNESS_BIN claimable`).
 7. `spawn = clamp(allowed − busy, 0, unclaimed)`, plus a rate-limited heartbeat when the queue
    is empty.
@@ -69,6 +72,89 @@ be another agent's.
 The stagger exists because two ticks starting in the same second will read the same unclaimed
 issue list and claim the same issue. Staggering is cheaper and more robust than a distributed
 lock for this.
+
+### Supervisor (`tick.sh supervisor`, with `SUPERVISOR=1`)
+
+An agent decides the harness's direction and rhythm; the script keeps every hard rule. The
+supervisor proposes and the harness disposes. The supervisor is a tick, not a daemon: the
+launcher starts one when it is due, it reads one snapshot, answers, and ends. Nothing must stay up,
+so the "no daemon" rule below stands, and a supervisor that is absent, late, wrong or dead leaves
+the harness on its own formulas.
+
+It is due when an event happened since its last run, or when `SUPERVISOR_INTERVAL_S` passed. The
+events are:
+- a tick ended non-zero, or a model hit its limit;
+- a usage window reset;
+- the queue changed: the open issues carrying `ISSUE_LABEL`, claimed ones included, from the same
+  listing as the claimable count, so a claim and its label change nothing;
+- a tick ran past the longest budget, or the instance logged a stall;
+- an issue loops: claimed by three ticks in six hours with no label change, no PR naming it and no
+  commit referencing it between the first and the third claim;
+- an operator's `Operator` comment landed (a login in `OPERATOR_LOGINS`, else the repository's
+  owner, a member or a collaborator: anyone can comment on a public repository);
+- the human lifted a pause, or the directive expires within ten minutes.
+
+It never starts sooner than `SUPERVISOR_MIN_INTERVAL_S` after its last start, waits that interval
+doubled for each failed run in a row, and starts only while its entry is not cooling down and every
+window of its agent is under the point where a running tick stands down. It needs no room under the
+agent's cap: it is one short run outside the slots, and it is counted toward its agent as soon as it
+starts. That exception covers the cap only: the stand-down point, a fresh reading and the cooldown
+still hold, and the agent runs at most one tick past its cap, for one budget. At most one runs, under `state/locks/supervisor.lock`, recorded in
+`state/locks/supervisor.tick`, within `SUPERVISOR_BUDGET_MIN`.
+
+**Confinement.** The supervisor's agent runs with no tools:
+- no shell, no file access, no web and no MCP server (the flags `docs/INSTANCE.md` lists per agent);
+- an empty temporary working directory, and an environment that holds only what its CLI needs to
+  sign in, nothing of `harness.env`;
+- an agent whose CLI cannot be confined this way, gemini today, is refused as `SUPERVISOR_MODEL`.
+
+Its prompt is `prompts/supervisor-core.md` and the instance's `prompts/supervisor.md`, then the
+output of `harness health --json`, all on stdin. The snapshot is bounded and holds usage, live
+ticks, recent tick outcomes, the signals above, the queue, failing PRs of this repository's own
+branches, this host, the directive and the supervisor's own runs, every string clipped and masked.
+It answers with one JSON document, `{"directive": … | null, "github": […]}`, and `harness supervisor
+answer` applies it:
+- the directive through `harness directive apply`'s validation;
+- at most five GitHub actions (a comment, a label change, a parked question), performed by the
+  harness with `gh`, only on open issues carrying `ISSUE_LABEL`;
+- a `label` action adds or removes only `FIRST_LABEL` and `LOW_LABEL`; `OPERATOR_LABEL` goes on only
+  through `park`, with a question, and never comes off by the supervisor's hand: it is the human's hold;
+  the lane, long-budget, sign-off, ready, claim and queue labels are never the supervisor's;
+- every body masked, linted as a tick's comment is, and headed as the supervisor's, and none with a
+  mention, a link, an image, HTML, an address or a closing keyword;
+- at most `SUPERVISOR_MAX_PARKS_PER_DAY` parks a day;
+- nothing at all when the answer's directive is refused.
+
+A directive narrows or reorders what the configuration allows, never widens it:
+
+| Field | Effect | Rail |
+|---|---|---|
+| `pause` | no tick starts and no runner chains until `until` | ends at the directive's expiry; only an operator's comment or the human lifting a pause ends it sooner |
+| `wake_at` | the launcher starts nothing until then | a window reset, an operator's comment or the human lifting a pause ends it sooner, once and for good for that directive |
+| `width` | at most this many ticks; 0 starts nothing new, a landing tick included | clamped to the configured width, then to what the usage windows allow |
+| `models` | the entries to try, in this order | a subset or reordering of the configured list; any other entry is refused |
+| `focus`, `avoid` | a sentence on each tick's lane line | changes what a tick prefers, never what it may claim |
+| `notes` | one line to the tick working an issue, through `libexec/usage-ok.sh`, as `SUPERVISOR (advisory) on #N: …` | shown once per tick; refused if it names an operator or starts as the harness's own notice |
+| `stop` | TERM to the tick's own process group `SUPERVISOR_STOP_GRACE_S` after a directive first named it, which naming it again does not put off; its runner writes the trailer (`exit=143`) and chains as usual; its issue is avoided while the directive lasts | only a live tick of this installation whose start time still matches and that leads its own group; any other is refused and logged |
+
+The usage ceiling and caps, claims, the merge lock, the token's handling, the lint and the human's
+pause stay in the script, and the human's pause (`state/paused`, the cron line, `hooks/hold`)
+always beats a directive. Every rail key (`SUPERVISOR_*`, the model list and widths, the labels,
+`OPERATOR_LOGINS`) is read from `harness.env` alone, never from the environment. With no
+directive, an expired one, or one that no longer validates against the configuration, the launcher
+runs exactly its own formulas; an expired or invalid directive is logged once. A stored directive
+no longer validates when:
+- a model was removed from the list;
+- its `applied_at` lies more than five minutes ahead;
+- its expiry is past the longest directive;
+- a stop's grace is shorter than `SUPERVISOR_STOP_GRACE_S`.
+
+The directive is a plain file, `state/directive.json`, and every change to it, every GitHub action
+and every refusal is a line in `state/logs/directive.log`, written before the directive is.
+
+What remains: a tick runs as the same user as the harness, so a tick that ignored its prompt could
+write `state/` itself, the directive included. The core prompt forbids it, and the directive's own
+checks bound what such a file could do; only a separate user for ticks would close it.
 
 ### Slots
 
@@ -136,6 +222,8 @@ entire history in the GitHub UI, and any tick can resume any other tick's work f
 | Claim orphaned | The next tick sees a dead claimant PID and resumes from the recorded state |
 | Something every tick needs is down | `hooks/hold` holds the harness; nothing spawns or chains until it recovers |
 | Launcher missed | Stateless recompute; the next firing catches up |
+| Supervisor crashes, hangs or errs | Its budget's timeout ends it; the run counts as failed and backs off; the directive in force runs to its expiry, then the defaults hold |
+| Directive malformed or out of date | Ignored and logged once; the defaults hold |
 
 What the design leaves open, knowingly:
 
@@ -151,7 +239,8 @@ What the design leaves open, knowingly:
 
 ## What is deliberately absent
 
-**No daemon** — cron plus flock is more robust than a supervisor process that can itself die.
+**No daemon** — cron plus flock is more robust than a process that must stay up and can itself die;
+the supervisor is one more tick that cron's launcher starts and that ends.
 **No queue database** — GitHub already is one, and it is auditable.
 **No inter-tick messaging** — ticks coordinate through issue labels; anything richer would
 create states a human cannot inspect.

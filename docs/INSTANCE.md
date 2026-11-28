@@ -53,6 +53,7 @@ and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 | `harness.env` | required, with `TARGET_REPO` and `WORKTREE_ROOT` set | the config; `templates/instance/harness.env.example` lists every key |
 | `prompts/tick.md` | required | the installation's section of every tick prompt |
 | `prompts/runbook.md`, `prompts/glossary.md`, `prompts/public-record.md` | optional | read by the tick when `tick.md` or the core prompt tells it to |
+| `prompts/supervisor.md` | optional | the installation's section of the supervisor's prompt (below) |
 | `lint_rules.json` | optional | the project's lint rules (below) |
 | `hooks/env.sh`, `hooks/hold`, `hooks/worktree-busy`, `hooks/worktree-remove` | optional | the hooks (below) |
 | `bin/` | optional | the instance's scripts, first on PATH |
@@ -122,13 +123,16 @@ marks itself non-dumpable (the release Codex CLI does) keeps private. `harness t
 the live ticks of `$HARNESS_STATE` as pid, age in seconds, slot, agent, model and kind; the launcher
 counts young, lane and landing ticks and each agent's running ticks with it. A tool child that
 outlives its tick, `nohup`'d or backgrounded, is no tick: no slot file records it.
+The supervisor's tick is recorded the same way in `$HARNESS_STATE/locks/supervisor.tick`, with
+`kind` `supervisor`, and listed as slot 0.
 
 `libexec/tick-pid.sh` gives a claim and the merge lock to the first ancestor of the calling shell
 whose pid and start time a tick file records: a slot file of this state directory, or, on a fleet
 device, the session's `tick` file that fleetd writes for the agent it starts and names in
 `FLEET_SESSION_TICK`. A tick file counts only when it is a regular file of this user, not a
 symlink. An operator's own agent CLI is recorded nowhere, so it never
-takes a claim or the merge lock. The tick also carries `HARNESS_TICK="state=<HARNESS_STATE>
+takes a claim or the merge lock. Neither does the supervisor: no slot file records it. The tick
+also carries `HARNESS_TICK="state=<HARNESS_STATE>
 slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool shells, and
 `libexec/usage-ok.sh` among them, which agent they run under; nothing counts or identifies ticks by it.
 The runner starts the agent, or `fleet dispatch`, in a session and process group of its own, so
@@ -191,6 +195,88 @@ full. A running tick
 stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
 `USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
 
+## Supervisor
+
+Off unless `SUPERVISOR=1`. While it is off, the launcher, the runners, `claim.sh`, `usage-ok.sh`
+and the dashboard behave as if none of it existed, and a `state/directive.json` is not read.
+`docs/ARCHITECTURE.md` says when it runs, how it is confined and what a directive may do.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
+| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
+| `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; held to an allowlist (below) |
+| `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log's last 64 KiB; a park past it, or one when the log cannot be read, is refused |
+| `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
+| `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while its agent's windows allow it |
+| `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
+| `SUPERVISOR_MAX_DIRECTIVE_S` | 21600 | the latest a directive's `expires_at` may be; a later one is clamped |
+| `SUPERVISOR_STOP_GRACE_S` | 1200 | how long a tick named in `stop` has to wind down before TERM: a tick reads its notice when it next runs `usage-ok.sh`, at least every 15 minutes |
+| `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments wake the supervisor; empty, the repository's owner, members and collaborators |
+
+`harness directive`, `harness supervisor` and `harness health` read these keys, the model list and
+widths (`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH`), the budgets and the label keys
+from `harness.env` only: a process of this user that sets one in its environment cannot loosen a
+rail. `HARNESS_STATE`, `GH_REPO` and `WORKTREE_ROOT` come from the environment first, as the
+scripts read them.
+
+The supervisor's agent runs in an empty temporary directory, its environment cut down to `HOME`,
+`PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM` and what its CLI signs in with
+(`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `CODEX_HOME`, `XDG_CONFIG_HOME`)
+when they are set. GitHub's token never reaches it. Its flags by default, checked against each CLI's
+`--help`:
+
+| Agent | Flags | What they guarantee |
+|---|---|---|
+| `claude` | `-p --tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence`, no `--dangerously-skip-permissions` | no built-in tool at all (`--tools ""`), no MCP server, no user, project or local settings and so no hooks or plugins (`--restricted`), no skills, nothing saved |
+| `codex` | `exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled -` | no shell or exec tool, no apps, plugins, browser or web search, no MCP servers from `config.toml`; whatever else it runs is sandboxed read-only and offline |
+| `gemini` | refused | its headless mode keeps file reading and web fetching whatever `--approval-mode` says, so it cannot run without tools |
+
+`SUPERVISOR_FLAGS_<agent>` is held to an allowlist, not weighed: every flag in it must be one of
+the defaults above, given once, and the confining ones must all be there. For claude that is
+`--tools` with an empty value (written `--tools=`, since the value is split on whitespace),
+`--restricted` and `--strict-mcp-config`; `--disable-slash-commands` and
+`--no-session-persistence` may be left out. For codex it is `--sandbox read-only`, every
+`--disable` of the defaults and `-c web_search=disabled`, the only `-c` taken; `--skip-git-repo-check`,
+`--ephemeral` and `--ignore-user-config` may be left out. So an override can only drop
+an optional flag: anything else, such as tools named to `--tools`, `--mcp-config`, `--settings`,
+`--permission-mode`, `--enable`, `--full-auto` or another sandbox, is refused, and the supervisor
+does not run, which the allocator log says once. `tick.sh check` prints the supervisor's command
+line, or why it cannot run.
+
+The supervisor's comments and parked questions are held to more than the lint. Each body is parsed
+as GitHub parses Markdown, extensions included, and refused if it yields a link, an autolink, an
+image or HTML, however it is written: a link whose reference is defined in a block quote or a list
+item, at any depth, or whose URL is escaped, is found where it is used. The text itself is then
+refused, wherever these stand (GitHub finds them in emphasis, a table cell or a task item too), if
+it holds any `@` (a mention, an address, a ref at a commit), `www.` in any case, `://`, a `//`
+starting a word, a cross-reference (`owner/repo#N`, `owner/repo@...`, `owner/repo/issues/N` and
+its `pull`, `discussions` and `commit` forms, or `/` and 7 to 40 hex digits, a commit), `]:` (a link reference's definition), a backslash before `/` or `:`, an HTML
+character reference (`&#...;`, `&name;`, which GitHub renders as the character), or a closing
+keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
+`owner/repo#N`). Each would reach past the issue: notify someone, send readers or their browsers
+elsewhere, hide text, or close an issue when a PR merges. Plain `#N` references and code spans
+pass. A refused action is logged and the rest go on; a refused directive refuses every action of
+its answer.
+
+Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
+`$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the
+output of `harness health --json`, all on stdin. The same `{{KEY}}` substitution applies, with
+`FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S`,
+`SUPERVISOR_STOP_GRACE_S` and `SUPERVISOR_MAX_PARKS_PER_DAY` added. The token reaches `harness health` and `harness supervisor answer`
+as it reaches the queue count, never the agent; `hooks/hold`, which health runs, gets no token
+either.
+
+What it keeps, all plain files:
+
+| Path | What |
+|---|---|
+| `state/directive.json` | the directive in force, owner-only, written by `harness directive apply` |
+| `state/logs/directive.log` | every apply (the reason, each changed field, each clamp), refusal, clear, expiry, invalid directive, stop and GitHub action |
+| `state/supervisor/` | `last_start`, `last_end`, `last_exit`, `failures`, `last_reason`, `runs.log`, the event stamps, `woken.json` (the wake events that ended a directive's quiet), `loops.json` (each looping candidate's progress as GitHub gave it), and the marks of notes shown and stops sent, pruned after two days |
+| `state/logs/supervisor-<UTC>.log` | each run's output, its answer and exit trailer; the newest 20 are kept |
+| `state/claims.log` | `<issue> <pid> <UTC>` for every claim `libexec/claim.sh` takes while the supervisor is on, for the loop signal; cut to its newest 2000 lines past a MiB |
+
 ## Fleet
 
 [`docs/FLEET.md`](FLEET.md) describes fleet. With `FLEET_DISPATCH=1` the runner runs each tick as
@@ -234,6 +320,10 @@ It runs with `GH_REPO`, `ISSUE_LABEL` (the label being counted), `WIP_LABEL`, `S
 its environment. The value is a command line that `tick.sh` splits on whitespace, without quoting, so
 no path in it may contain a space. Unset, the launcher counts the open `ISSUE_LABEL` issues without
 `WIP_LABEL` with `gh issue list`, run in `TARGET_REPO`, and the model lane and landing ticks stay off.
+With the supervisor on, the count of `ISSUE_LABEL` also gets `QUEUE_TOTAL_FILE`, a path where it may
+write how many open `ISSUE_LABEL` issues it listed, claimed ones included, as one integer; the
+supervisor's queue event compares that number, which a claim never moves. `$HARNESS_BIN claimable`
+and the `gh issue list` fallback write it; a count that does not leaves the event off.
 
 A count that fails or prints anything but an integer is an error, logged to `allocator.log` as
 `ERROR queue count failed (label <l>: exit <n>, output '...', stderr '...')`. The launcher then counts
@@ -293,6 +383,9 @@ The prompt's first line tells the tick which issues it may claim:
 | `This tick runs on <LANE_MODEL>, the model lane: claim only an issue labelled <LANE_LABEL>. ...` | claimable lane issues outnumber the young lane ticks |
 | `This tick runs on <model>. <LANE_MODEL> cannot run now, on its usage limit or windows, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down, or its agent's windows allow no tick |
 | `This tick is the merge slot's landing tick: claim only an issue labelled <READY_LABEL>. ...` | a landing tick started past the usage width while every allowed slot is held |
+
+A directive's `focus` and `avoid` append `The supervisor asks: among the issues you may claim,
+prefer #<n>, ...` and `The supervisor asks: do not claim #<n>, ...` to whichever line applies.
 
 The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, it needs `QUEUE_DEPTH_CMD`
 to count lane issues, and the lane's agent needs room under its usage windows. The launcher

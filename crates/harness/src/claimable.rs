@@ -24,7 +24,8 @@ use crate::home::{env_nonempty, harness_home};
 #[derive(clap::Args)]
 #[command(after_help = "\
 Reads GH_REPO (required), ISSUE_LABEL, WIP_LABEL, SIGNOFF_LABEL, OPERATOR_LABEL, FIRST_LABEL, LOW_LABEL
-and LANE_LABEL, and the local claims under $HARNESS_STATE/locks (else $HARNESS_HOME/state/locks).")]
+and LANE_LABEL, and the local claims under $HARNESS_STATE/locks (else $HARNESS_HOME/state/locks). With
+QUEUE_TOTAL_FILE set, it also writes there how many open ISSUE_LABEL issues it listed, claimed ones included.")]
 pub struct Args {}
 
 static CLAIMED: LazyLock<Regex> =
@@ -122,6 +123,13 @@ fn count() -> Result<usize, String> {
     let issues: Vec<Issue> = serde_json::from_slice(&listed.stdout)
         .map_err(|error| format!("gh issue list: {error}"))?;
     queue.open = issues.iter().map(|issue| issue.number).collect();
+    // The supervisor's queue event weighs the open issues of the queue, claimed ones included, from
+    // this same listing: a claim and its label move an issue out of the claimable count, never out
+    // of this one.
+    if let Some(path) = env_nonempty("QUEUE_TOTAL_FILE") {
+        std::fs::write(PathBuf::from(path), format!("{}\n", issues.len()))
+            .map_err(|error| format!("QUEUE_TOTAL_FILE: {error}"))?;
+    }
     queue.count(&issues)
 }
 

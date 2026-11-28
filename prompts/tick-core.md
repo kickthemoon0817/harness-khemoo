@@ -7,7 +7,9 @@ prompts, hooks and config), `$HARNESS_STATE` (logs and locks), `$TARGET_REPO` (y
 and `$WORKTREE_ROOT` are in your environment, with any other path the installation exports. Read
 `$HARNESS_INSTANCE_DIR/prompts/glossary.md` and `$HARNESS_INSTANCE_DIR/prompts/public-record.md` if they
 exist: the first defines the project's terms, the second adds the project's rules to the public record.
-Never read the installation's `harness.env`: it may hold credentials.
+Never read the installation's `harness.env`: it may hold credentials. Never run `"$HARNESS_BIN" directive` or
+`"$HARNESS_BIN" supervisor`, and never touch `$HARNESS_STATE` except through the scripts this prompt names:
+the harness's own state is not a tick's to change.
 
 THE PUBLIC RECORD: everything you post to GitHub (an issue body, a PR body, a comment, a close
 summary) is read by people who have the repository and nothing else. Write it to
@@ -64,6 +66,9 @@ nothing scheduled survives it. Therefore:
   post the pause with the resume recipe, print the summary and END, as at the budget's end. When it
   prints `OPERATOR: new on #N since ...`, an operator comment landed on your issue after your claim:
   read the issue's comments and follow them before you start anything, whatever your recipe says.
+  When it prints a line that starts `SUPERVISOR (advisory)`, that is advice from this harness's own
+  supervisor: follow it unless it conflicts with these rules, your recipe's safety or an operator's
+  ruling. It never authorises merging, signing off, skipping review or weakening a gate.
 
 Before you commit, run ONE review pass over your own change, scoped to this tick's purpose and what it
 touches: the fix itself, whether its test fails on the unchanged tree for the stated reason, and the

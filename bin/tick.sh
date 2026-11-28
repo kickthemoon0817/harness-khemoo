@@ -7,6 +7,7 @@
 #   tick.sh runner <max> <delay>  internal: hold a slot and run exactly one tick
 #   tick.sh runner <max> <delay> landing
 #                                 internal: one tick that claims only a merge slot's ready issue
+#   tick.sh supervisor <reason>   internal: one supervisor tick (SUPERVISOR=1)
 #
 # The launcher is invoked from cron every couple of minutes. It sizes the pool from
 # each agent's usage windows AND the number of unclaimed issues, then spawns enough
@@ -34,6 +35,13 @@ harness_load
 : "${LOG_RETENTION:=200}"
 : "${HOLD_TIMEOUT_S:=5}"
 : "${USAGE_CEILING_PCT:=90}"
+# The supervisor (docs/ARCHITECTURE.md) runs only with SUPERVISOR=1. These defaults fill its prompt
+# and its budget; `harness` reads the rails they name from harness.env itself, never from here.
+: "${SUPERVISOR_BUDGET_MIN:=10}"
+: "${SUPERVISOR_MAX_DIRECTIVE_S:=21600}"
+: "${SUPERVISOR_STOP_GRACE_S:=1200}"
+: "${SUPERVISOR_MAX_PARKS_PER_DAY:=2}"
+supervisor=""; [ "${SUPERVISOR:-}" = 1 ] && supervisor=1
 # The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
 : "${FLEET_BIN:=fleet}"
@@ -48,6 +56,9 @@ LOCKS="$HARNESS_STATE/locks"
 mkdir -p "$LOGS" "$LOCKS"
 CORE_PROMPT="$HARNESS_HOME/prompts/tick-core.md"
 INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
+SUPERVISOR_CORE="$HARNESS_HOME/prompts/supervisor-core.md"
+SUPERVISOR_PROMPT="$HARNESS_INSTANCE_DIR/prompts/supervisor.md"
+SUP="$HARNESS_STATE/supervisor"
 
 # The agent CLIs a tick runs on this host, each reading its prompt from stdin, never argv, which ps
 # shows. AGENT_BIN_<agent> names the executable (default: the agent's name), AGENT_FLAGS_<agent> its
@@ -114,9 +125,15 @@ log_changed() {  # $1 = message
 : "${TICK_MODELS:=claude-opus-5-5}"
 : "${MODEL_COOLDOWN_S:=1800}"
 MODEL_COOL="$HARNESS_STATE/model-cooldown"
-model_list() {
+configured_models() {
     if [ -s "$HARNESS_STATE/tick-model" ]; then tr -s '[:space:]' ' ' < "$HARNESS_STATE/tick-model"
     else printf '%s' "$TICK_MODELS"; fi
+}
+# A directive's models, a subset or reordering of the configured list, replace it while it holds.
+# directive_read sets these; empty, the configuration's own formulas hold.
+d_quiet=""; d_until=""; d_why=""; d_woken=""; d_width=""; d_models=""; d_focus=""; d_avoid=""
+model_list() {
+    if [ -n "$d_models" ]; then printf '%s' "$d_models"; else configured_models; fi
 }
 entry_of() {  # $1 = a list entry; prints it as agent:model
     case $1 in *:*) printf '%s' "$1" ;; *) printf '%s' "$TICK_AGENT:$1" ;; esac
@@ -165,6 +182,148 @@ usage_refresh() {
     lane_on && pool_lane=$lane_entry
     harness_usage refresh >/dev/null 2>&1
     pool_lane=$was
+}
+
+# Runs `harness <subcommand>` for the supervisor and the directive with what they read; --gh passes
+# GH_TOKEN, as the queue count gets it, to `supervisor due`'s look for Operator comments. The model
+# list is the configured one: a directive is checked against it.
+harness_supervisor() {
+    local gh=""
+    [ "$1" = --gh ] && { gh=1; shift; }
+    (
+        vars=$(compgen -v USAGE_; compgen -v SUPERVISOR_)
+        # shellcheck disable=SC2086,SC2163
+        [ -n "$vars" ] && export $vars
+        [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
+        [ -n "$gh" ] && [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        export MAX_SLOTS MODEL_COOLDOWN_S TICK_MODELS TICK_AGENT LONG_TICK_BUDGET_MIN
+        exec "$HARNESS_BIN" "$@"
+    )
+}
+
+# The supervisor's entry: SUPERVISOR_MODEL, else the configured list's last.
+supervisor_entry() {
+    local m=${SUPERVISOR_MODEL:-}
+    [ -n "$m" ] || m=$(configured_models | awk '{print $NF}')
+    entry_of "$m"
+}
+
+# Sets argv to the supervisor's command line, agent $1 on model $2 with no tools, or sets refusal
+# to why it cannot run so and returns 1. SUPERVISOR_FLAGS_<agent> replaces the defaults (split on
+# whitespace) and is held to an allowlist (supervisor_flags_ok): it may drop the optional flags,
+# never add one. What the defaults guarantee (docs/INSTANCE.md): claude has no built-in tool
+# (--tools ""), no MCP server (--strict-mcp-config) and no settings, hooks or plugins
+# (--restricted); codex runs read-only and offline with its shell, exec, apps, plugins, browser and
+# web search off. Gemini has no flag that takes its file and web tools away in headless mode, so it
+# never supervises.
+SUPERVISOR_CODEX_DISABLED="shell_tool unified_exec apps plugins browser_use computer_use in_app_browser image_generation"
+supervisor_argv() {
+    local name="SUPERVISOR_FLAGS_$1" word f
+    local -a flags=() words
+    refusal=""
+    if [ -n "${!name+x}" ]; then
+        # An empty value cannot be written in a whitespace-split setting: `--tools=` stands for `--tools ""`.
+        read -ra words <<<"${!name}"
+        for word in "${words[@]}"; do
+            if [ "$word" = --tools= ]; then flags+=(--tools ""); else flags+=("$word"); fi
+        done
+    else
+        case $1 in
+            claude) flags=(--tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence) ;;
+            codex)
+                flags=(--sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config)
+                for f in $SUPERVISOR_CODEX_DISABLED; do flags+=(--disable "$f"); done
+                flags+=(-c web_search=disabled) ;;
+        esac
+    fi
+    case $1 in
+        claude|codex) supervisor_flags_ok "$1" "${flags[@]}" || { refusal="$name: $refusal"; return 1; } ;;
+        gemini) refusal="gemini cannot supervise: no flag of its CLI takes its file and web tools away in headless mode"; return 1 ;;
+        *) refusal="$1 cannot supervise: only claude and codex run here without tools"; return 1 ;;
+    esac
+    case $1 in
+        claude) argv=("$(agent_bin claude)" -p --model "$2" "${flags[@]}") ;;
+        codex) argv=("$(agent_bin codex)" exec --model "$2" "${flags[@]}" -) ;;
+    esac
+}
+# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. Each flag is
+# one the defaults use, given once, and the confining ones are all there: claude's --tools with an
+# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox, every --disable of
+# SUPERVISOR_CODEX_DISABLED and -c web_search=disabled, its only -c. A flag outside this list,
+# such as one that names tools, loads settings or MCP servers, enables a feature or lifts the
+# sandbox, is refused, not weighed.
+supervisor_flags_ok() {
+    local agent=$1 word seen=" " f
+    shift
+    while [ $# -gt 0 ]; do
+        word=$1; shift
+        case "$agent:$word" in
+            claude:--tools)
+                [ $# -gt 0 ] && [ -z "$1" ] || { refusal="--tools must be given empty"; return 1; }
+                shift ;;
+            claude:--restricted|claude:--strict-mcp-config|claude:--disable-slash-commands|claude:--no-session-persistence) ;;
+            codex:--sandbox)
+                [ "${1:-}" = read-only ] || { refusal="--sandbox must be read-only"; return 1; }
+                shift ;;
+            codex:--disable)
+                [[ " $SUPERVISOR_CODEX_DISABLED " == *" ${1:-} "* ]] || { refusal="--disable ${1:-} is not one of the supervisor's"; return 1; }
+                word="--disable $1"; shift ;;
+            codex:-c)
+                [ "${1:-}" = web_search=disabled ] || { refusal="-c ${1:-} is not the supervisor's"; return 1; }
+                word="-c $1"; shift ;;
+            codex:--skip-git-repo-check|codex:--ephemeral|codex:--ignore-user-config) ;;
+            *) refusal="$word is not one of the supervisor's flags"; return 1 ;;
+        esac
+        [[ "$seen" == *" $word "* ]] && { refusal="$word is given twice"; return 1; }
+        seen+="$word "
+    done
+    case $agent in
+        claude)
+            for f in --tools --restricted --strict-mcp-config; do
+                [[ "$seen" == *" $f "* ]] || { refusal="$f is missing"; return 1; }
+            done ;;
+        codex)
+            [[ "$seen" == *" --sandbox "* ]] || { refusal="--sandbox read-only is missing"; return 1; }
+            for f in $SUPERVISOR_CODEX_DISABLED; do
+                [[ "$seen" == *" --disable $f "* ]] || { refusal="--disable $f is missing"; return 1; }
+            done
+            [[ "$seen" == *" -c web_search=disabled "* ]] || { refusal="-c web_search=disabled is missing"; return 1; } ;;
+    esac
+}
+
+# Sets d_* from the directive (`harness directive effective`): its quiet (a pause, or a wake_at not
+# reached) unless a wake event ended it, its width, models, focus and avoid. Without SUPERVISOR=1,
+# or with no directive, an expired one or one that no longer validates, none is set and the
+# configuration's own formulas hold; `effective` logs an expired or invalid one once.
+directive_read() {
+    local out k v
+    d_quiet=""; d_until=""; d_why=""; d_woken=""; d_width=""; d_models=""; d_focus=""; d_avoid=""
+    [ -n "$supervisor" ] || return 0
+    if ! out=$(harness_supervisor directive effective 2>/dev/null); then
+        log_changed "ERROR harness directive effective failed; defaults in force"
+        return 0
+    fi
+    while IFS='=' read -r k v; do
+        case $k in
+            quiet) d_quiet=$v ;;
+            until) d_until=$v ;;
+            quiet_reason) d_why=$v ;;
+            woken) d_woken=$v ;;
+            width) [[ "$v" =~ ^[0-9]+$ ]] && d_width=$v ;;
+            models) d_models=$v ;;
+            focus) d_focus=$v ;;
+            avoid) d_avoid=$v ;;
+        esac
+    done <<<"$out"
+}
+# The directive's focus and avoid, as sentences for the lane line.
+directive_lane() {
+    local n f="" a=""
+    for n in $d_focus; do f+="${f:+, }#$n"; done
+    for n in $d_avoid; do a+="${a:+, }#$n"; done
+    [ -n "$f" ] && printf ' The supervisor asks: among the issues you may claim, prefer %s.' "$f"
+    [ -n "$a" ] && printf ' The supervisor asks: do not claim %s.' "$a"
+    return 0
 }
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
@@ -233,6 +392,15 @@ instance_missing() {
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
+    if [ -n "$supervisor" ]; then
+        [ -r "$SUPERVISOR_CORE" ] || echo "$SUPERVISOR_CORE"
+        a=$(supervisor_entry); a=${a%%:*}
+        if supervisor_argv "$a" '<model>'; then
+            type -P -- "${argv[0]}" >/dev/null || echo "an executable AGENT_BIN_$a (${argv[0]}) for the supervisor"
+        else
+            echo "$HARNESS_ENV_FILE: SUPERVISOR_MODEL: $refusal"
+        fi
+    fi
 }
 
 if [ "${1:-}" != check ]; then
@@ -246,6 +414,9 @@ export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SE
     ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
     TICK_AGENT FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG HARNESS_BIN
 export -n GH_TOKEN GITHUB_TOKEN
+# What libexec/claim.sh needs to keep claims.log, the supervisor's loop signal; a tick sees it only
+# while the supervisor is on.
+[ -n "$supervisor" ] && export HARNESS_SUPERVISOR=1
 
 # The width the usage steps scale from. Slots past it and up to MAX_SLOTS are left for the landing tick.
 width=${TICK_WIDTH:-$MAX_SLOTS}
@@ -289,7 +460,8 @@ read_ticks() {
 }
 # How many of the live ticks of kind $1 (any when empty) are younger than CLAIM_GRACE_S.
 young_ticks() {
-    awk -v grace="${CLAIM_GRACE_S:-360}" -v kind="$1" 'NF && $2 < grace && (kind == "" || $6 == kind)' <<<"$ticks" | wc -l
+    # The supervisor claims nothing, so it never stands for a queued issue.
+    awk -v grace="${CLAIM_GRACE_S:-360}" -v kind="$1" 'NF && $2 < grace && (kind == "" ? $6 != "supervisor" : $6 == kind)' <<<"$ticks" | wc -l
 }
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
@@ -305,6 +477,9 @@ compute_want() {
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     read_ticks
+    # The supervisor's queue event compares the open queue issues the count left with those at its
+    # last run.
+    [ -n "$supervisor" ] && [ -s "$SUP/queue.new" ] && mv -f "$SUP/queue.new" "$SUP/queue"
     young=$(young_ticks "")
     want=$(( claimable - young ))
     [ "$want" -lt 0 ] && want=0
@@ -348,20 +523,34 @@ harness_paused() {
 # number sets queue_error instead and returns 1, so no caller mistakes it for a count.
 # QUEUE_DEPTH_CMD is a command line split on whitespace, without quoting: no path in it may hold a space.
 queue_depth() {  # $1 = the label to count
-    local out rc err
+    local out rc err total=""
     err=$(mktemp)
+    # With the supervisor on, the queue's count also leaves the open queue issues, claimed ones
+    # included, in $SUP/queue.new: its queue event weighs that number, which a claim never moves.
+    if [ -n "$supervisor" ] && [ "$1" = "$ISSUE_LABEL" ]; then
+        mkdir -p "$SUP" && total="$SUP/queue.new" && rm -f "$total"
+    fi
     # gh reads the config's token, so the count gets it, through its environment only: a token in
     # argv shows in /proc/<pid>/cmdline, which ps and the dashboard read. A tick never gets it.
     out=$(
         exec 2>"$err"
         [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        [ -n "$total" ] && export QUEUE_TOTAL_FILE="$total"
         if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
             # shellcheck disable=SC2086
             GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" SIGNOFF_LABEL="$SIGNOFF_LABEL" \
                 OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" LOW_LABEL="${LOW_LABEL:-}" \
                 LANE_LABEL="${LANE_LABEL:-}" exec $QUEUE_DEPTH_CMD
         fi
-        cd "$TARGET_REPO" && exec gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 \
+        cd "$TARGET_REPO" || exit 1
+        if [ -n "$total" ]; then
+            both=$(gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 --json labels \
+                --jq "\"\([.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length) \(length)\"") || exit
+            printf '%s\n' "${both#* }" > "$total"
+            printf '%s\n' "${both%% *}"
+            exit 0
+        fi
+        exec gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 \
             --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length"
     )
     rc=$?
@@ -413,16 +602,40 @@ LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If n
 # The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
 # the key's value through a sed escape, never eval, so a value cannot run as code.
 PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
-compose_prompt() {  # $1 = the lane line
-    local k v subst=()
-    for k in $PROMPT_KEYS; do
+SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S SUPERVISOR_MAX_PARKS_PER_DAY"
+prompt_subst() {  # sets subst to the sed expressions for the keys $@
+    local k v
+    subst=()
+    for k in "$@"; do
         v=$(printf '%s' "${!k:-}" | tr '\n' ' ' | sed 's/[\\&|]/\\&/g')
         subst+=(-e "s|{{$k}}|$v|g")
     done
+}
+compose_prompt() {  # $1 = the lane line
+    local subst
+    # shellcheck disable=SC2086
+    prompt_subst $PROMPT_KEYS
     printf '%s\n\n' "$1"
     sed "${subst[@]}" "$CORE_PROMPT"
     printf '\n## This installation\n\n'
     sed "${subst[@]}" "$INSTANCE_PROMPT"
+}
+# The supervisor's prompt: its core rules, this installation's own when it has them, then the health
+# snapshot. GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
+compose_supervisor_prompt() {
+    local subst doc
+    # shellcheck disable=SC2086
+    prompt_subst $PROMPT_KEYS $SUPERVISOR_PROMPT_KEYS
+    sed "${subst[@]}" "$SUPERVISOR_CORE"
+    if [ -r "$SUPERVISOR_PROMPT" ]; then
+        printf '\n## This installation\n\n'
+        sed "${subst[@]}" "$SUPERVISOR_PROMPT"
+    fi
+    printf '\n## Health snapshot\n\n'
+    if ! doc=$( [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN; "$HARNESS_BIN" health --json 2>&1 ); then
+        doc=$(jq -nc --arg e "$(printf '%s' "$doc" | tail -n 1 | cut -c1-300)" '{error: ("harness health failed: " + $e)}')
+    fi
+    printf '%s\n' "$doc"
 }
 
 # Records process $1 as this slot's tick, running agent $2 on model $3 as a tick of kind $4: its
@@ -531,6 +744,13 @@ if [ "${1:-}" = check ]; then
     done
     echo "models:        $(model_list)"
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; pool_lane=$lane_entry; else echo "model lane:    off"; fi
+    if [ -n "$supervisor" ]; then
+        echo "supervisor:    $(supervisor_entry), budget $SUPERVISOR_BUDGET_MIN min, at least ${SUPERVISOR_MIN_INTERVAL_S:-600}s apart, at most ${SUPERVISOR_INTERVAL_S:-1800}s"
+        e=$(supervisor_entry)
+        if supervisor_argv "${e%%:*}" "${e#*:}"; then echo "supervisor:    runs with no tools: ${argv[*]} < prompt"
+        else echo "supervisor:    cannot run: $refusal"; fi
+        echo "directive:     $(harness_supervisor directive show 2>&1 | head -1)"
+    fi
     # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
     for h in env.sh hold worktree-busy worktree-remove; do
         f="$HARNESS_INSTANCE_DIR/hooks/$h"
@@ -587,6 +807,8 @@ if [ "${1:-}" = "runner" ]; then
     [ "$stagger" -gt 0 ] && sleep "$stagger"
     # A pause set while the launcher staggered its runners still stops the ones not yet started.
     harness_paused && exit 0
+    directive_read
+    [ -n "$d_quiet" ] && exit 0
 
     slot=""
     s=1
@@ -635,6 +857,7 @@ if [ "${1:-}" = "runner" ]; then
                     lane="This tick runs on ${entry#*:}: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
                 fi
             fi
+            lane+=$(directive_lane)
             if [ -z "$entry" ]; then
                 # Logged once, not as a tick log of its own: those would push real ones out.
                 log_changed "no entry of '$(model_list)' can run: each cools down or its agent is at its usage cap; nothing run"
@@ -687,7 +910,8 @@ if [ "${1:-}" = "runner" ]; then
             break
         done
 
-        ls -1t "$LOGS" | tail -n +$(( LOG_RETENTION + 1 )) | while read -r old; do rm -f "$LOGS/$old"; done
+        # Only tick logs: the allocator's, the directive's and the supervisor's own logs live beside them.
+        ls -1t "$LOGS"/tick-* 2>/dev/null | tail -n +$(( LOG_RETENTION + 1 )) | while read -r old; do rm -f "$old"; done
         chain=$(( chain + 1 ))
         dur=$(( $(date +%s) - start_s ))
         # A short tick found nothing to claim or failed: leave the retry to cron.
@@ -695,6 +919,10 @@ if [ "${1:-}" = "runner" ]; then
         [ -n "$landing" ] && break
         [ "$chain" -ge "${MAX_CHAIN:-24}" ] && break
         harness_paused && break
+        directive_read
+        [ -n "$d_quiet" ] && break
+        # A directive's width only narrows the slots in use.
+        [ -n "$d_width" ] && [ "$slot" -gt "$d_width" ] && break
         usage_refresh; lane_known=""
         compute_pool
         # The slot goes on only while the agent it ran can still run here: another agent's room is
@@ -708,9 +936,67 @@ if [ "${1:-}" = "runner" ]; then
     exit 0
 fi
 
+# ------------------------------------------------------------ supervisor mode
+# One supervisor tick, outside the slots. The agent runs with no tools (supervisor_argv), in an
+# empty directory, with an environment that holds only what its CLI needs to sign in: it can only
+# answer. Its prompt and the health snapshot come on stdin; its answer, one JSON document at the
+# end of its output, is what `harness supervisor answer` applies, the directive through its
+# validation and each GitHub action through gh, every body linted. It holds supervisor.lock, so at
+# most one runs, and its run is recorded under $HARNESS_STATE/supervisor/ for the next `due`.
+if [ "${1:-}" = supervisor ]; then
+    exec {sfd}>"$LOCKS/supervisor.lock"
+    flock -n "$sfd" || exit 0
+    entry=$(supervisor_entry); agent=${entry%%:*}; model=${entry#*:}
+    # Recorded at once, as this shell, so the launcher that started it counts it toward its agent
+    # before it sizes the pool; the agent's own record replaces it once it runs. libexec/tick-pid.sh
+    # reads only the slots' files, so the record gives no claim.
+    slot_file="$LOCKS/supervisor.tick"
+    record_tick "$$" "$agent" "$model" supervisor
+    trap 'rm -f "$slot_file"' EXIT
+    harness_paused && exit 0
+    if ! supervisor_argv "$agent" "$model"; then
+        log_changed "supervisor not run: $refusal"
+        exit 0
+    fi
+    log="$LOGS/supervisor-$(date -u +%Y%m%dT%H%M%SZ).log"
+    work=$(mktemp -d) && answer=$(mktemp) || exit 0
+    trap 'rm -f "$slot_file" "$answer"; rm -rf "$work"' EXIT
+    harness_supervisor supervisor begin --reason "${2:-}" >/dev/null 2>>"$log"
+    run_s=$(date +%s)
+    sup_env=("HOME=$HOME" "PATH=$PATH")
+    for k in USER LOGNAME LANG LC_ALL TMPDIR TERM ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR OPENAI_API_KEY CODEX_HOME XDG_CONFIG_HOME; do
+        [ -n "${!k:-}" ] && sup_env+=("$k=${!k}")
+    done
+    # In a session and process group of its own, as a tick runs; the lock stays this shell's alone.
+    ( exec {sfd}>&-; cd "$work" && exec setsid env -i --default-signal=INT,QUIT "${sup_env[@]}" \
+        timeout -k 30 "$(( SUPERVISOR_BUDGET_MIN * 60 ))" "${argv[@]}" ) \
+        < <(compose_supervisor_prompt) >"$answer" 2>>"$log" &
+    tick_pid=$!
+    record_tick "$tick_pid" "$agent" "$model" supervisor
+    wait "$tick_pid"; rc=$?
+    dur=$(( $(date +%s) - run_s ))
+    cat "$answer" >>"$log"
+    echo "[tick.sh] exit=$rc duration=${dur}s agent=$agent model=$model" >>"$log"
+    if [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" && tail -n 40 "$log" | grep -qE -- "$(agent_limit_re "$agent")"; then
+        mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
+        echo "$(date -u +%Y%m%dT%H%M%SZ) supervisor $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
+    fi
+    # The answer is applied only from a run that ended well; one that finds none counts as failed.
+    if [ "$rc" -eq 0 ]; then
+        harness_supervisor --gh supervisor answer "$answer" >>"$log" 2>&1; rc=$?
+    fi
+    harness_supervisor supervisor end --exit "$rc" --duration "$dur" >/dev/null 2>>"$log"
+    ls -1t "$LOGS"/supervisor-* 2>/dev/null | tail -n +21 | while read -r old; do rm -f "$old"; done
+    exit 0
+fi
+
 # -------------------------------------------------------------- launcher mode
 
-harness_paused && exit 0
+if harness_paused; then
+    # The supervisor's unpause event is the first firing that no longer finds this.
+    [ -n "$supervisor" ] && mkdir -p "$SUP" && touch "$SUP/paused"
+    exit 0
+fi
 missing=$(instance_missing)
 if [ -n "$missing" ]; then
     # Say so at most hourly; `tick.sh check` names everything that is missing.
@@ -720,6 +1006,33 @@ if [ -n "$missing" ]; then
         echo "$(date -u +%Y%m%dT%H%M%SZ) instance incomplete: $(printf '%s\n' "$missing" | head -1)" >>"$LOGS/allocator.log"
     fi
     exit 0
+fi
+
+# The supervisor runs outside the slots, so it is weighed before them: a stop whose grace ended is
+# sent, a supervisor tick starts when one is due, and a directive's quiet ends the firing here.
+if [ -n "$supervisor" ]; then
+    harness_supervisor directive enforce >/dev/null 2>&1 || log_changed "ERROR harness directive enforce failed"
+    err=$(mktemp)
+    due=$(harness_supervisor --gh supervisor due 2>"$err"); rc=$?
+    if [ "$rc" -eq 0 ]; then
+        setsid "$0" supervisor "${due#due }" >/dev/null 2>&1 & sup_pid=$!
+        # Counted before the pool is sized below: the supervisor records itself as it starts.
+        n=0
+        while [ ! -s "$LOCKS/supervisor.tick" ] && kill -0 "$sup_pid" 2>/dev/null && [ "$n" -lt 100 ]; do
+            sleep 0.05; n=$(( n + 1 ))
+        done
+    elif [ "$rc" -ne 1 ]; then
+        log_changed "ERROR harness supervisor due failed ($(tail -n 1 "$err" | cut -c1-200)); no supervisor tick"
+    fi
+    rm -f "$err"
+    directive_read
+    if [ -n "$d_quiet" ]; then
+        log_changed "directive: quiet ($d_quiet) until $d_until: $d_why"
+        exit 0
+    fi
+    [ -n "$d_woken" ] && log_changed "directive: its quiet ended early on $d_woken"
+    # A directive's width only narrows the slots the launcher fills; the windows still bound each agent.
+    [ -n "$d_width" ] && [ "$width" -gt "$d_width" ] && width=$d_width
 fi
 
 # 1. Cheapest gate: if every slot is held there is nothing to decide.
@@ -741,6 +1054,18 @@ done
 
 usage_refresh
 compute_pool
+if [ -n "$supervisor" ] && [ "$pool_cap" -eq 0 ]; then
+    # Every cap at 0 with a reset ahead stays so until then: said once, not at each firing.
+    at=$(harness_usage --json 2>/dev/null | jq -r '[.agents[]] as $a
+        | if ($a | length) > 0 and all($a[]; .cap == 0)
+          then [$a[].windows[] | select(.cap == 0) | .resets_at
+                | if type == "number" then . elif type == "string"
+                  then sub("\\.[0-9]+"; "") | sub("(\\+00:00|Z)$"; "Z") | (try fromdateiso8601 catch empty)
+                  else empty end | select(. > now)] | min // empty
+          else empty end' 2>/dev/null)
+    [[ "$at" =~ ^[0-9]+$ ]] \
+        && log_changed "every agent is at its usage cap; nothing starts before the earliest reset, $(date -u -d "@$at" +%Y%m%dT%H%M%SZ)"
+fi
 if [ -n "$unknown" ]; then
     # Say so at most hourly: the launcher fires every couple of minutes.
     stamp="$LOCKS/usage-unknown.stamp"
@@ -766,7 +1091,8 @@ spawn=$(( width - busy ))
 # which can outlast the merge slot. With the pool full (no slot inside the width, or no agent with
 # room) and no young tick about to claim, one landing tick starts past the width for an issue
 # waiting for the slot.
-if [ "$spawn" -eq 0 ] && [ "$pool_cap" -gt 0 ] && { [ "$busy" -ge "$width" ] || [ "$room" -eq 0 ]; } && [ "$free" -gt 0 ] \
+# A directive's width 0 starts nothing new, a landing tick included.
+if [ "$spawn" -eq 0 ] && [ "$pool_cap" -gt 0 ] && [ "$d_width" != 0 ] && { [ "$busy" -ge "$width" ] || [ "$room" -eq 0 ]; } && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
     && ! awk '$6 == "landing" { found = 1 } END { exit !found }' <<<"$ticks"; then
     ready=0

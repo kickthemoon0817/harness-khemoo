@@ -83,6 +83,18 @@ reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan)"
 mkdir -p "$H/st/locks"; echo "2 $$ 2026-09-28T00:00:00Z" > "$H/st/locks/claim.2"
 out=$(HARNESS_STATE="$H/st" count); check "a live local claim under HARNESS_STATE is left out" '[ "$out" = 1 ]' "$out"
 
+# The open queue issues, for the supervisor's queue event: a claim and its label leave the number
+# as it was, though the claimable count falls.
+reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan)" "$(issue 3 ai,ai:plan)"
+before=$(QUEUE_TOTAL_FILE="$H/total" count); total_before=$(cat "$H/total")
+plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan,ai:wip)" "$(issue 3 ai,ai:plan)"
+echo "2 $$ 2026-09-28T00:00:00Z" > "$H/st/locks/claim.2"
+after=$(HARNESS_STATE="$H/st" QUEUE_TOTAL_FILE="$H/total" count); total_after=$(cat "$H/total")
+check "QUEUE_TOTAL_FILE counts the open issues, a claimed and labelled one included" \
+    '[ "$before $total_before" = "3 3" ] && [ "$after $total_after" = "2 3" ]' "before=$before/$total_before after=$after/$total_after"
+rm -f "$H/st/locks/claim.2" "$H/total"
+out=$(count); check "without QUEUE_TOTAL_FILE nothing else is written" '[ ! -e "$H/total" ]' "$(ls "$H")"
+
 reset; touch "$FX/fail"
 out=$(count 2>/dev/null); rc=$?
 check "a failed issue list prints no count and exits non-zero" '[ -z "$out" ] && [ "$rc" -ne 0 ]' "rc=$rc out=$out"

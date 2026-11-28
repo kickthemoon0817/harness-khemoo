@@ -223,3 +223,22 @@ fn a_tool_child_that_outlives_its_parent_is_never_a_second_tick() {
     procs.0[0].wait().unwrap();
     assert_eq!(until(&state_of(&dir), <[Tick]>::is_empty), []);
 }
+
+#[test]
+fn the_supervisor_is_read_from_its_own_file_as_slot_0() {
+    let dir = scratch("supervisor");
+    let mut procs = Procs(Vec::new());
+    let pid = procs.spawn(&mut sleeper());
+    std::fs::write(
+        dir.join("state/locks/supervisor.tick"),
+        format!(
+            "{pid} {} {} claude model-s supervisor\n",
+            start_ticks(pid),
+            boot_id()
+        ),
+    )
+    .unwrap();
+    let ticks = scan(&state_of(&dir)).unwrap();
+    assert_eq!(pids(&ticks), [pid]);
+    assert_eq!((ticks[0].slot, ticks[0].kind), (0, Kind::Supervisor));
+}

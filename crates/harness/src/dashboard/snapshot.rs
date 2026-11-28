@@ -276,7 +276,7 @@ impl Collector {
             })
             .collect::<Vec<_>>()
         });
-        json!({
+        let mut snapshot = json!({
             "generated_at": iso(now),
             "generated_epoch": now,
             "title": self.config.title,
@@ -322,7 +322,12 @@ impl Collector {
             "fleet": if self.config.fleet_status_command.is_empty() { Value::Null } else { self.fleet_view(&issue_titles, now) },
             "flow": flow,
             "sources": self.sources_view(now),
-        })
+        });
+        // Left out while the supervisor is off, so the snapshot is what it was without one.
+        if self.usage_setting("SUPERVISOR").as_deref() == Some("1") {
+            snapshot["supervisor"] = self.supervisor_view(now);
+        }
+        snapshot
     }
 
     fn fleet_view(&self, issue_titles: &HashMap<i64, (String, String)>, now: f64) -> Value {
@@ -721,6 +726,16 @@ impl Collector {
             }
         }
         view
+    }
+
+    /// The supervisor's runs and the directive, as `harness health` gives them.
+    fn supervisor_view(&self, now: f64) -> Value {
+        let lookup = |key: &str| self.usage_setting(key);
+        let paths = crate::supervisor::Paths {
+            state: self.config.state_dir(),
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        crate::supervisor::view(&lookup, &paths, now.max(0.0) as u64)
     }
 
     /// Every source's age, last error and cadence, in the page's order.

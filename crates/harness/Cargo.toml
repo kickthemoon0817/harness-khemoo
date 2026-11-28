@@ -19,6 +19,8 @@ glob = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# A body the supervisor posts is parsed as GitHub would, so no link or HTML hides in it.
+pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1.13.2"
 rustix = { workspace = true, features = ["param", "system"] }
 serde.workspace = true

@@ -34,6 +34,10 @@ libexec/merge-lock.sh status                   # who holds the merge slot
 gh issue list --label ai:wip               # what is claimed right now
 ```
 
+Runners keep the newest `LOG_RETENTION` (default 200) tick logs, `tick-*`, and remove older ones;
+they never remove `allocator.log`, `directive.log` or `pr-sweep.log`, whatever their age. Supervisor
+runs keep their newest 20 logs, `supervisor-*`.
+
 `allocator.log` is the fastest health check. A line reads:
 
 ```
@@ -47,6 +51,51 @@ Other lines name a state the launcher noticed, logged once rather than at every 
 hit its usage limit, or no fresh usage reading. A line with `ERROR queue count failed` means the
 queue count could not be read (a GitHub outage, or a broken `QUEUE_DEPTH_CMD`); the launcher then
 counts one claimable issue so a tick still runs.
+
+## The supervisor
+
+With `SUPERVISOR=1` a supervisor tick, run with no tools, answers with a directive and a few GitHub
+actions, which the harness applies. Read what it did:
+
+```bash
+target/release/harness directive show      # the directive in force, or why none is
+target/release/harness health              # what the supervisor last read, in short (--json in full)
+tail -20 state/logs/directive.log          # every change to the directive, newest last
+cat state/supervisor/runs.log              # each run: time, exit, duration, what made it due
+ls -t state/logs/supervisor-* | head -1    # the newest run's own output
+```
+
+A `directive.log` entry starts with a line naming what happened, then one indented line per field
+that changed:
+
+```
+2026-11-28T10:02:11Z apply: codex windows fill; claude first (until 2026-11-28T16:02:11Z)
+2026-11-28T10:02:11Z   models: none -> ["claude:claude-opus-5-5","codex:gpt-5.5"]
+2026-11-28T10:02:11Z   clamped width to 4 (the configured width)
+2026-11-28T10:30:02Z stop: the supervisor stopped pid 4242, TERM to its own process group 4242 after its grace: loops on #7
+2026-11-28T16:02:13Z expired at 2026-11-28T16:02:11Z, defaults in force
+```
+
+Other first lines are `refused: <why>` (the directive in force stays), `clear: <reason>`,
+`ignored, defaults in force: <why>` (a directive that no longer validates, logged once) and
+`stop: pid <n> skipped: <why>` (no longer a live tick, its pid reused, or not leading a process
+group of its own). A stopped tick's log ends with an `exit=143` trailer. The supervisor's answer
+adds `answer: no directive` (it left the directive as it was), `answer: none found` (a failed run),
+`answer refused: <why>` (an unknown key or a wrong type; nothing applied), `answer refused: its
+directive was refused; no GitHub action taken`,
+`github: commented on #N`, `github: labelled #N +<label> -<label>`, `github: parked #N for the
+operator` and `github: refused <action> on #N: <why>`.
+
+The allocator log says `directive: quiet (pause|wake) until ...` once while a directive keeps the
+launcher quiet, and `its quiet ended early on <event>` when a wake event ended it.
+
+To clear a directive, so the configuration's own formulas hold at once:
+`target/release/harness directive clear --reason "<why>"`. To turn the supervisor off, set
+`SUPERVISOR=` in `harness.env`: the next firing reads no directive and starts no supervisor tick, and
+one already running finishes its budget. Clear the directive too, or it applies again the day the
+supervisor is turned back on, until its expiry. `touch state/paused` still pauses everything,
+supervisor included. To make it run at the next firing, inside its backoff too, remove `state/supervisor/last_start`
+and `state/supervisor/failures`.
 
 ## Is it stuck?
 
