@@ -691,7 +691,7 @@ pub fn pick<'a>(candidates: &'a [Candidate], tried: &[Entry], landing: bool) -> 
 
 /// Whether `entry` hit its usage limit less than `MODEL_COOLDOWN_S` ago: the runner touches
 /// `<state>/model-cooldown/<agent>:<model>` when it does.
-fn cooling(state: &Path, entry: &Entry, cooldown: Duration) -> bool {
+pub fn cooling(state: &Path, entry: &Entry, cooldown: Duration) -> bool {
     std::fs::metadata(state.join("model-cooldown").join(entry.to_string()))
         .and_then(|meta| meta.modified())
         .is_ok_and(|at| at.elapsed().unwrap_or_default() < cooldown)

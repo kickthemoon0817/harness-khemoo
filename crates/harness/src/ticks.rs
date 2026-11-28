@@ -32,8 +32,8 @@ const FD_LIMIT: usize = 4096;
 
 #[derive(clap::Args)]
 #[command(after_help = "\
-Prints one tick a line, oldest first: pid, age in seconds, slot, agent, model and kind (work, lane
-or landing). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
+Prints one tick a line, oldest first: pid, age in seconds, slot, agent, model and kind (work, lane,
+landing or supervisor). Reads the ticks of --state, else $HARNESS_STATE, else $HARNESS_HOME/state.")]
 pub struct Args {
     /// Print a JSON document instead of lines.
     #[arg(long)]
@@ -49,6 +49,8 @@ pub enum Kind {
     Work,
     Lane,
     Landing,
+    /// The supervisor: it holds no slot and claims nothing.
+    Supervisor,
 }
 
 impl Kind {
@@ -57,6 +59,7 @@ impl Kind {
             "work" => Some(Self::Work),
             "lane" => Some(Self::Lane),
             "landing" => Some(Self::Landing),
+            "supervisor" => Some(Self::Supervisor),
             _ => None,
         }
     }
@@ -66,6 +69,7 @@ impl Kind {
             Self::Work => "work",
             Self::Lane => "lane",
             Self::Landing => "landing",
+            Self::Supervisor => "supervisor",
         }
     }
 }
@@ -219,7 +223,11 @@ fn scan_in(proc_root: &Path, state: &str) -> io::Result<Vec<Tick>> {
             let parent_marked = processes
                 .get(&process.ppid)
                 .is_some_and(|parent| parent.marker.is_some());
-            let lock = locks.join(format!("slot{}.lock", marker.slot));
+            let lock = if marker.kind == Kind::Supervisor {
+                locks.join("supervisor.lock")
+            } else {
+                locks.join(format!("slot{}.lock", marker.slot))
+            };
             if parent_marked || !holds(proc_root, *pid, &lock) {
                 return None;
             }

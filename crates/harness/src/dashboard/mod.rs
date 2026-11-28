@@ -15,8 +15,8 @@
 mod buildlocks;
 mod collector;
 mod command;
-mod env;
-mod files;
+pub(crate) mod env;
+pub(crate) mod files;
 mod fleet;
 mod flow;
 mod flowtrack;
@@ -25,17 +25,17 @@ mod models;
 mod parsers;
 mod procs;
 mod queue;
-mod redact;
+pub(crate) mod redact;
 mod render;
 mod runqueue;
 mod server;
 mod shlex;
 mod snapshot;
 #[cfg(test)]
-mod testkit;
+pub(crate) mod testkit;
 #[cfg(test)]
 mod tests;
-mod text;
+pub(crate) mod text;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -663,5 +663,38 @@ fn serve(
         collector.stop();
         std::fs::remove_file(&url_path).ok();
         Ok(())
+    })
+}
+
+/// What `harness health` builds on: one snapshot taken as `--once` takes it, without the remote
+/// probes, fleet and the queue count; the open PRs whose checks fail; and the values no output may
+/// carry.
+pub struct Local {
+    pub snapshot: serde_json::Value,
+    pub failing_pulls: Result<Vec<serde_json::Value>, String>,
+    pub secrets: Vec<String>,
+}
+
+pub fn local_snapshot(lookup: Lookup<'_>) -> Result<Local, String> {
+    use clap::{Args as _, FromArgMatches as _};
+    let matches = Args::augment_args(clap::Command::new("dashboard"))
+        .try_get_matches_from(["dashboard"])
+        .map_err(|error| error.to_string())?;
+    let args = Args::from_arg_matches(&matches).map_err(|error| error.to_string())?;
+    let app = App::new(&args, lookup)?;
+    let collector = app.collector(&args.gh)?;
+    files::prepare_private_dir(&collector.config.data_dir)?;
+    collector.refresh_local_sample_in_place();
+    collector.refresh_github_in_place();
+    let failing_pulls = match &collector.github {
+        Some(github) => github
+            .fetch_failing_pulls()
+            .map_err(|error| error.0.clone()),
+        None => Err("no repository".to_owned()),
+    };
+    Ok(Local {
+        snapshot: collector.snapshot(),
+        failing_pulls,
+        secrets: app.secret_values(),
     })
 }

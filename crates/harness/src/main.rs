@@ -21,6 +21,12 @@ enum Command {
     Ticks(harness::ticks::Args),
     /// Print the usage windows of each agent, and the ticks they allow.
     Usage(harness::usage::Args),
+    /// Print one bounded, redacted snapshot of the harness for the supervisor.
+    Health(harness::health::Args),
+    /// Apply, show or clear the supervisor's directive.
+    Directive(harness::directive::Args),
+    /// Decide when the supervisor runs, and record its runs.
+    Supervisor(harness::supervisor::Args),
 }
 
 fn main() -> ExitCode {
@@ -30,5 +36,8 @@ fn main() -> ExitCode {
         Command::Dashboard(args) => harness::dashboard::run(&args),
         Command::Ticks(args) => harness::ticks::run(&args),
         Command::Usage(args) => harness::usage::run(&args),
+        Command::Health(args) => harness::health::run(&args),
+        Command::Directive(args) => harness::directive::run(&args),
+        Command::Supervisor(args) => harness::supervisor::run(&args),
     }
 }
