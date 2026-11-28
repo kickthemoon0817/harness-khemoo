@@ -46,6 +46,9 @@ EOF
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
 case "$ISSUE_LABEL" in ai) echo 5 ;; ai:ready) cat "$FAKE_READY" 2>/dev/null || echo 0 ;; *) echo 0 ;; esac
+# Six open queue issues, one of them claimed, for the supervisor's queue event.
+[ -n "${QUEUE_TOTAL_FILE:-}" ] && echo 6 > "$QUEUE_TOTAL_FILE"
+exit 0
 EOF
 cat > "$H/fakebin/crontab" <<'EOF'
 #!/usr/bin/env bash
@@ -57,6 +60,7 @@ cat > "$H/fakebin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s ' "$@" | tr '\n' ' ' >> "$FAKE_GH_LOG"; echo >> "$FAKE_GH_LOG"
 case " $* " in
+    *" -X POST "*"/labels "*) [ -e "$FAKE_GH_LABEL_FAIL" ] && rm -f "$FAKE_GH_LABEL_FAIL" && exit 1; echo '{}' ;;
     *" -X POST "*|*" -X DELETE "*) echo '{}' ;;
     *" repos/example-org/example-repo/issues/7 ") echo '{"state": "open", "labels": [{"name": "ai"}]}' ;;
     *" repos/example-org/example-repo/issues/8 ") echo '{"state": "closed", "labels": [{"name": "ai"}]}' ;;
@@ -95,7 +99,7 @@ write_env 1
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN $(compgen -v SUPERVISOR)
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" \
     FAKE_LANES="$H/lanes.txt" FAKE_ARGS="$H/args.txt" FAKE_READY="$H/ready.txt" FAKE_LONG="$H/long" \
-    FAKE_CLAIM="$H/claim" FAKE_GH_LOG="$H/gh.txt"
+    FAKE_CLAIM="$H/claim" FAKE_GH_LOG="$H/gh.txt" FAKE_GH_LABEL_FAIL="$H/label-fails"
 S="$H/state"; L="$S/locks"; LOG="$S/logs/allocator.log"; DLOG="$S/logs/directive.log"; SUP="$S/supervisor"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -166,6 +170,7 @@ check "models: the tick runs on the directive's entry" 'grep -q -- "--model mode
 check "focus and avoid reach the lane line" \
     'grep -q "prefer #12, #15\." "$FAKE_LANES" && grep -q "do not claim #7\." "$FAKE_LANES"' "$(cat "$FAKE_LANES")"
 check "with the supervisor on, a tick's claim is logged for the loop signal" 'grep -qE "^7 [0-9]+ " "$S/claims.log"' "$(cat "$S/claims.log" 2>/dev/null)"
+check "the launcher keeps the open queue issues the count left, for the queue event" '[ "$(cat "$SUP/queue")" = 6 ] && [ ! -e "$SUP/queue.new" ]' "$(ls "$SUP")"
 
 apply "{\"version\": 1, \"reason\": \"wide\", \"expires_at\": \"$(at 3600)\", \"width\": 3}"
 usage 65
@@ -217,6 +222,7 @@ check "a refused directive refuses its answer's GitHub actions too" \
     '! grep -q -- "-X POST" "$FAKE_GH_LOG" && [ "$(grep -c "answer refused: its directive was refused; no GitHub action taken" "$DLOG")" -eq 1 ] && jq -e ".width == 3" "$S/directive.json" >/dev/null' \
     "gh=$(cat "$FAKE_GH_LOG") dlog=$(tail -n 3 "$DLOG")"
 # Three parks: the first two go, the question before the label, and the third is past the day's cap.
+# The first one's label fails: its question was asked, so it counts all the same.
 cat > "$H/answer.json" <<'EOF'
 {"directive": null, "github": [
   {"park": {"issue": 7, "question": "Should this wait for the new API?"}},
@@ -224,13 +230,15 @@ cat > "$H/answer.json" <<'EOF'
   {"park": {"issue": 7, "question": "A third question."}}
 ]}
 EOF
-: > "$FAKE_GH_LOG"
+: > "$FAKE_GH_LOG"; touch "$FAKE_GH_LABEL_FAIL"
 "$H/bin/tick.sh" supervisor manual
 check "a park posts its question before it adds the operator's label" \
     '[ "$(grep -n -- "-X POST" "$FAKE_GH_LOG" | head -2 | cut -d: -f1 | tr "\n" " ")" = "$(grep -n -- "issues/7/comments" "$FAKE_GH_LOG" | head -1 | cut -d: -f1) $(grep -n -- "labels\[\]=ai:operator" "$FAKE_GH_LOG" | head -1 | cut -d: -f1) " ]' \
     "$(cat "$FAKE_GH_LOG")"
 check "at most two parks a day (SUPERVISOR_MAX_PARKS_PER_DAY)" \
     '[ "$(grep -c "issues/7/comments" "$FAKE_GH_LOG")" -eq 2 ] && grep -q "refused park on #7: 2 issues parked in 24 h already" "$DLOG"' "$(grep github: "$DLOG" | tail -n 3)"
+check "a park whose label failed is logged as such, and still counts toward the cap" \
+    'grep -q "github: parked #7 for the operator, but its label failed" "$DLOG" && grep -q "github: parked #7 for the operator$" "$DLOG"' "$(grep github: "$DLOG" | tail -n 3)"
 echo '{"directive": null, "github": [{"comment": {"issue": 7, "body": "ping @owner-a, see https://example.com"}}]}' > "$H/answer.json"
 : > "$FAKE_GH_LOG"
 "$H/bin/tick.sh" supervisor manual
@@ -270,6 +278,7 @@ codex|$codex_d --full-auto|--full-auto is not one of the supervisor's flags
 codex|$codex_d -c sandbox_mode=danger-full-access|-c sandbox_mode=danger-full-access is not the supervisor's
 codex|$codex_d --dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-approvals-and-sandbox is not one of the supervisor's flags
 codex|--sandbox read-only --disable shell_tool|--disable unified_exec is missing
+codex|$codex_d|-c web_search=disabled is missing
 EOF
 write_env 1 "SUPERVISOR_FLAGS_claude=\"--tools Bash --restricted --strict-mcp-config\""
 rm -f "$H/sup-argv.txt"; : > "$LOG"
@@ -475,30 +484,34 @@ write_env 1
 reset_supervisor
 touch "$H/sup-crash"
 printf '{"version": 1, "reason": "never applied", "expires_at": "%s", "width": 1}\n' "$(at 3600)" > "$H/directive-in.json"
-# A minimum interval of 1 s and a fresh event before each look, so only the backoff can explain
-# a supervisor tick that does not start.
-MIN_INTERVAL=1 write_env 1
+# A fresh event before each look, so only the backoff can explain a supervisor tick that does
+# not start. Times count in whole seconds, so the minimum interval (3 s), the backoffs (6 s, then
+# 12 s) and the sleeps between them keep a second of room either way.
+MIN_INTERVAL=3 write_env 1
 due() { USAGE_CACHE="$H/usage-cache.json" USAGE_FETCH="$H/no-fetch" "$HARNESS_BIN" supervisor due 2>&1; }
 event() { mkdir -p "$S/model-cooldown"; touch "$S/model-cooldown/claude:elsewhere-$1"; }
+spawned() { sed -n 's/.*-> spawning \([0-9]*\)$/\1/p' "$LOG" | tail -n 1; }
 usage 10
 launch
+# The supervisor counts toward its agent's cap while it runs, so the pool is the room the launcher
+# found, two or three ticks.
 check "a crashed supervisor's run is recorded as a failure, and the defaults hold" \
-    'grep -q "exit=3 " "$SUP/runs.log" && [ "$(cat "$SUP/failures")" = 1 ] && [ ! -e "$S/directive.json" ] && [ "$(ticks_run)" = 3 ]' \
-    "runs=$(cat "$SUP/runs.log" 2>/dev/null) lanes=$(cat "$FAKE_LANES")"
-sleep 1.1; event 1
-check "one failure backs off twice the minimum interval" '[[ "$(due)" == "not due: backing off 2s after 1 failed runs" ]]' "$(due)"
+    'grep -q "exit=3 " "$SUP/runs.log" && [ "$(cat "$SUP/failures")" = 1 ] && [ ! -e "$S/directive.json" ] && [ "$(ticks_run)" = "$(spawned)" ] && [ "$(spawned)" -ge 2 ]' \
+    "runs=$(cat "$SUP/runs.log" 2>/dev/null) lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+sleep 3.5; event 1
+check "one failure backs off twice the minimum interval" '[[ "$(due)" == "not due: backing off 6s after 1 failed runs" ]]' "$(due)"
 launch
 check "no supervisor tick starts within that backoff" '[ "$(wc -l < "$SUP/runs.log")" -eq 1 ]' "$(cat "$SUP/runs.log")"
-sleep 1.5; event 2
+sleep 4; event 2
 launch
 check "past the backoff it runs again, and fails again" '[ "$(wc -l < "$SUP/runs.log")" -eq 2 ] && [ "$(cat "$SUP/failures")" = 2 ]' "$(cat "$SUP/runs.log")"
-sleep 1.1; event 3
-check "two failures in a row double it" '[[ "$(due)" == "not due: backing off 4s after 2 failed runs" ]]' "$(due)"
+sleep 3.5; event 3
+check "two failures in a row double it" '[[ "$(due)" == "not due: backing off 12s after 2 failed runs" ]]' "$(due)"
 rm -f "$H/sup-crash"
-sleep 3.5; event 4
+sleep 10; event 4
 launch
 check "a run that ends well resets the failures" '[ "$(cat "$SUP/failures")" = 0 ] && tail -n 1 "$SUP/runs.log" | grep -q "exit=0 "' "$(cat "$SUP/runs.log")"
-sleep 1.1; event 5
+sleep 3.5; event 5
 check "and with them the backoff: the next event is due after the minimum interval alone" '[[ "$(due)" == "due "* ]]' "$(due)"
 
 echo "pass=$pass fail=$fail"

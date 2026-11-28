@@ -248,8 +248,8 @@ supervisor_argv() {
 }
 # True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. Each flag is
 # one the defaults use, given once, and the confining ones are all there: claude's --tools with an
-# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox and every --disable
-# of SUPERVISOR_CODEX_DISABLED, with -c only for web_search=disabled. A flag outside this list,
+# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox, every --disable of
+# SUPERVISOR_CODEX_DISABLED and -c web_search=disabled, its only -c. A flag outside this list,
 # such as one that names tools, loads settings or MCP servers, enables a feature or lifts the
 # sandbox, is refused, not weighed.
 supervisor_flags_ok() {
@@ -286,7 +286,8 @@ supervisor_flags_ok() {
             [[ "$seen" == *" --sandbox "* ]] || { refusal="--sandbox read-only is missing"; return 1; }
             for f in $SUPERVISOR_CODEX_DISABLED; do
                 [[ "$seen" == *" --disable $f "* ]] || { refusal="--disable $f is missing"; return 1; }
-            done ;;
+            done
+            [[ "$seen" == *" -c web_search=disabled "* ]] || { refusal="-c web_search=disabled is missing"; return 1; } ;;
     esac
 }
 
@@ -457,16 +458,6 @@ read_ticks() {
     fi
     rm -f "$err"
 }
-# How many local claims a live tick holds: claim files whose pid is one of $ticks'.
-held_claims() {
-    local f cpid n=0
-    for f in "$LOCKS"/claim.*; do
-        [ -s "$f" ] || continue
-        read -r _ cpid _ < "$f" || continue
-        awk -v pid="$cpid" '$1 == pid { found = 1 } END { exit !found }' <<<"$ticks" && n=$(( n + 1 ))
-    done
-    echo "$n"
-}
 # How many of the live ticks of kind $1 (any when empty) are younger than CLAIM_GRACE_S.
 young_ticks() {
     # The supervisor claims nothing, so it never stands for a queued issue.
@@ -486,9 +477,9 @@ compute_want() {
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     read_ticks
-    # The supervisor's queue event compares this with the queue at its last run: the claimable
-    # issues and those a live tick's claim holds, counted together, so a claim alone changes nothing.
-    [ -n "$supervisor" ] && mkdir -p "$SUP" && echo "$claimable $(held_claims)" > "$SUP/queue"
+    # The supervisor's queue event compares the open queue issues the count left with those at its
+    # last run.
+    [ -n "$supervisor" ] && [ -s "$SUP/queue.new" ] && mv -f "$SUP/queue.new" "$SUP/queue"
     young=$(young_ticks "")
     want=$(( claimable - young ))
     [ "$want" -lt 0 ] && want=0
@@ -532,20 +523,34 @@ harness_paused() {
 # number sets queue_error instead and returns 1, so no caller mistakes it for a count.
 # QUEUE_DEPTH_CMD is a command line split on whitespace, without quoting: no path in it may hold a space.
 queue_depth() {  # $1 = the label to count
-    local out rc err
+    local out rc err total=""
     err=$(mktemp)
+    # With the supervisor on, the queue's count also leaves the open queue issues, claimed ones
+    # included, in $SUP/queue.new: its queue event weighs that number, which a claim never moves.
+    if [ -n "$supervisor" ] && [ "$1" = "$ISSUE_LABEL" ]; then
+        mkdir -p "$SUP" && total="$SUP/queue.new" && rm -f "$total"
+    fi
     # gh reads the config's token, so the count gets it, through its environment only: a token in
     # argv shows in /proc/<pid>/cmdline, which ps and the dashboard read. A tick never gets it.
     out=$(
         exec 2>"$err"
         [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        [ -n "$total" ] && export QUEUE_TOTAL_FILE="$total"
         if [ -n "${QUEUE_DEPTH_CMD:-}" ]; then
             # shellcheck disable=SC2086
             GH_REPO="${GH_REPO:-}" ISSUE_LABEL="$1" WIP_LABEL="$WIP_LABEL" SIGNOFF_LABEL="$SIGNOFF_LABEL" \
                 OPERATOR_LABEL="$OPERATOR_LABEL" FIRST_LABEL="${FIRST_LABEL:-}" LOW_LABEL="${LOW_LABEL:-}" \
                 LANE_LABEL="${LANE_LABEL:-}" exec $QUEUE_DEPTH_CMD
         fi
-        cd "$TARGET_REPO" && exec gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 \
+        cd "$TARGET_REPO" || exit 1
+        if [ -n "$total" ]; then
+            both=$(gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 --json labels \
+                --jq "\"\([.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length) \(length)\"") || exit
+            printf '%s\n' "${both#* }" > "$total"
+            printf '%s\n' "${both%% *}"
+            exit 0
+        fi
+        exec gh issue list --repo "${GH_REPO:-}" --label "$1" --state open --limit 100 \
             --json labels --jq "[.[] | select(([.labels[].name] | index(\"$WIP_LABEL\")) | not)] | length"
     )
     rc=$?

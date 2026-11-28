@@ -206,7 +206,7 @@ and the dashboard behave as if none of it existed, and a `state/directive.json` 
 | `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
 | `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
 | `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; held to an allowlist (below) |
-| `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log; a park past it is refused |
+| `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log's last 64 KiB; a park past it, or one when the log cannot be read, is refused |
 | `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
 | `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while its agent's windows allow it |
 | `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
@@ -236,17 +236,19 @@ when they are set. GitHub's token never reaches it. Its flags by default, checke
 the defaults above, given once, and the confining ones must all be there. For claude that is
 `--tools` with an empty value (written `--tools=`, since the value is split on whitespace),
 `--restricted` and `--strict-mcp-config`; `--disable-slash-commands` and
-`--no-session-persistence` may be left out. For codex it is `--sandbox read-only` and every
-`--disable` of the defaults; `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config` and
-`-c web_search=disabled` may be left out, and no other `-c` is taken. So an override can only drop
+`--no-session-persistence` may be left out. For codex it is `--sandbox read-only`, every
+`--disable` of the defaults and `-c web_search=disabled`, the only `-c` taken; `--skip-git-repo-check`,
+`--ephemeral` and `--ignore-user-config` may be left out. So an override can only drop
 an optional flag: anything else, such as tools named to `--tools`, `--mcp-config`, `--settings`,
 `--permission-mode`, `--enable`, `--full-auto` or another sandbox, is refused, and the supervisor
 does not run, which the allocator log says once. `tick.sh check` prints the supervisor's command
 line, or why it cannot run.
 
 The supervisor's comments and parked questions are held to more than the lint: a body with an
-@-mention, a URL or a markdown link, an image, HTML or an autolink, an email address, or a closing
-keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
+@-mention, a URL (a scheme, `www.`, or `//` starting a word), a markdown link or a link reference's
+definition, an image, HTML or an autolink, an HTML character reference (`&#...;`, `&name;`, which
+GitHub renders as the character, an `@` among them), an email address, or a closing keyword before
+an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
 `owner/repo#N`) is refused. Each would reach past the issue: notify someone, send readers or their
 browsers elsewhere, hide text, or close an issue when a PR merges. A refused action is logged and
 the rest go on; a refused directive refuses every action of its answer.
@@ -312,6 +314,10 @@ It runs with `GH_REPO`, `ISSUE_LABEL` (the label being counted), `WIP_LABEL`, `S
 its environment. The value is a command line that `tick.sh` splits on whitespace, without quoting, so
 no path in it may contain a space. Unset, the launcher counts the open `ISSUE_LABEL` issues without
 `WIP_LABEL` with `gh issue list`, run in `TARGET_REPO`, and the model lane and landing ticks stay off.
+With the supervisor on, the count of `ISSUE_LABEL` also gets `QUEUE_TOTAL_FILE`, a path where it may
+write how many open `ISSUE_LABEL` issues it listed, claimed ones included, as one integer; the
+supervisor's queue event compares that number, which a claim never moves. `$HARNESS_BIN claimable`
+and the `gh issue list` fallback write it; a count that does not leaves the event off.
 
 A count that fails or prints anything but an integer is an error, logged to `allocator.log` as
 `ERROR queue count failed (label <l>: exit <n>, output '...', stderr '...')`. The launcher then counts

@@ -85,8 +85,8 @@ It is due when an event happened since its last run, or when `SUPERVISOR_INTERVA
 events are:
 - a tick ended non-zero, or a model hit its limit;
 - a usage window reset;
-- the queue changed, meaning the claimable issues plus those a live tick holds, so a claim alone
-  changes nothing;
+- the queue changed: the open issues carrying `ISSUE_LABEL`, claimed ones included, from the same
+  listing as the claimable count, so a claim and its label change nothing;
 - a tick ran past the longest budget, or the instance logged a stall;
 - an issue loops: claimed by three ticks in six hours with no label change, no PR naming it and no
   commit referencing it between the first and the third claim;
