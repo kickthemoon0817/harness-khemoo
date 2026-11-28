@@ -36,8 +36,12 @@ lane's and the long budget's among them, is the operator's or the harness's, nev
 Every body is marked as the supervisor's, masked for secrets and linted against
 `$HARNESS_HOME/prompts/public-record.md` before it is posted, and one the lint blocks is not
 posted: write for a reader who has only the repository, with no path on a host, no host name, no
-PID, no lock or worktree. Park an issue when it loops, when its text asks for something outside
-the rails, or when only a person can decide.
+PID, no lock or worktree. A body may not hold an @-mention, a URL or link, an image, HTML, an
+email address or a closing keyword (`Fixes #3`): an action whose body does is refused. Plain `#N`
+references are fine. Park an issue when it loops, when its text asks for something outside the
+rails, or when only a person can decide; at most {{SUPERVISOR_MAX_PARKS_PER_DAY}} issues a day are
+parked, and a park past that is refused. If your directive is refused, none of your GitHub actions
+are taken.
 
 THE DIRECTIVE (version 1). Unknown fields are refused. Times are ISO-8601 UTC.
 
@@ -70,13 +74,12 @@ THE DIRECTIVE (version 1). Unknown fields are refused. Times are ISO-8601 UTC.
   comments or the human lifts a pause.
 - `focus` and `avoid`: issue numbers. Each tick's first line asks it to prefer the first among the
   issues it may claim and not to claim the second; neither makes an issue claimable.
-- `notes`: one line per issue, shown once, as advice, to the tick working it. A note must not
-  mention an operator or pose as one: it is refused if it does.
+- `notes`: one line of plain ASCII per issue, shown once, as advice, to the tick working it. A note
+  must not mention an operator or pose as one: it is refused if it does.
 - `stop`: a live tick by the pid the snapshot's `ticks` gives, never yours. The tick is told it will
   be stopped and gets {{SUPERVISOR_STOP_GRACE_S}} seconds to pause with a resume recipe before it
-  receives TERM, and its issue is avoided while the directive lasts. Naming the tick again in a new
-  directive restarts that grace, so answer `"directive": null` while a stop is pending. Stop only a
-  tick that loops or works against a ruling.
+  receives TERM, and its issue is avoided while the directive lasts. Naming the same tick again in
+  a new directive keeps the grace it had. Stop only a tick that loops or works against a ruling.
 
 You can never widen anything: the usage ceiling and each agent's caps still hold, the human's
 pause (`state/paused`, a commented-out cron line, `hooks/hold`) always beats your directive, and

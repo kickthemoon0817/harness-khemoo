@@ -84,13 +84,14 @@ CLAIM_GRACE_S=0
 FIRST_LABEL=ai:first
 LOW_LABEL=ai:low
 SUPERVISOR=$1
-SUPERVISOR_MIN_INTERVAL_S=3600
+SUPERVISOR_MIN_INTERVAL_S=${MIN_INTERVAL:-3600}
 SUPERVISOR_INTERVAL_S=7200
 SUPERVISOR_STOP_GRACE_S=2
 EOF
     [ $# -gt 1 ] && printf '%s\n' "${@:2}" >> "$H/instance/harness.env"
 }
 write_env 1
+# shellcheck disable=SC2046 # one name a word
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN $(compgen -v SUPERVISOR)
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" \
     FAKE_LANES="$H/lanes.txt" FAKE_ARGS="$H/args.txt" FAKE_READY="$H/ready.txt" FAKE_LONG="$H/long" \
@@ -105,7 +106,7 @@ usage() {  # $1 = the 5-hour window's percent; $2, when given, its reset as Unix
 }
 until_ok() { local n=0; until "$@"; do [ "$n" -lt 400 ] || return 1; sleep 0.05; n=$((n + 1)); done; }
 # pgrep can miss a process mid-exec, so no runner means three empty looks in a row.
-no_runner() { local i; for i in 1 2 3; do pgrep -f "$H/bin/tick.sh" >/dev/null && return 1; sleep 0.05; done; }
+no_runner() { for _ in 1 2 3; do pgrep -f "$H/bin/tick.sh" >/dev/null && return 1; sleep 0.05; done; }
 launch() {
     : > "$FAKE_LANES"; : > "$FAKE_ARGS"; : > "$LOG"
     "$H/bin/tick.sh"
@@ -205,25 +206,76 @@ echo 'I would rather not answer.' > "$H/answer.json"
 "$H/bin/tick.sh" supervisor manual
 check "an output with no answer applies nothing and counts as a failed run" \
     'grep -q "answer: none found" "$DLOG" && tail -n 1 "$SUP/runs.log" | grep -q "exit=1 "' "$(tail -n 2 "$SUP/runs.log")"
+echo '{"directive": null, "github": [], "shell": "rm -rf /"}' > "$H/answer.json"
+"$H/bin/tick.sh" supervisor manual
+check "an answer with an unknown key is refused as such, nothing applied" \
+    'grep -q "answer refused: unknown field \`shell\`" "$DLOG" && tail -n 1 "$SUP/runs.log" | grep -q "exit=1 "' "$(tail -n 2 "$DLOG")"
+printf '{"directive": {"version": 1, "reason": "r", "expires_at": "%s", "models": ["claude:model-z"]}, "github": [{"comment": {"issue": 7, "body": "it goes with the directive"}}]}\n' "$(at 3600)" > "$H/answer.json"
+: > "$FAKE_GH_LOG"
+"$H/bin/tick.sh" supervisor manual
+check "a refused directive refuses its answer's GitHub actions too" \
+    '! grep -q -- "-X POST" "$FAKE_GH_LOG" && [ "$(grep -c "answer refused: its directive was refused; no GitHub action taken" "$DLOG")" -eq 1 ] && jq -e ".width == 3" "$S/directive.json" >/dev/null' \
+    "gh=$(cat "$FAKE_GH_LOG") dlog=$(tail -n 3 "$DLOG")"
+# Three parks: the first two go, the question before the label, and the third is past the day's cap.
+cat > "$H/answer.json" <<'EOF'
+{"directive": null, "github": [
+  {"park": {"issue": 7, "question": "Should this wait for the new API?"}},
+  {"park": {"issue": 7, "question": "Is the old behaviour still needed?"}},
+  {"park": {"issue": 7, "question": "A third question."}}
+]}
+EOF
+: > "$FAKE_GH_LOG"
+"$H/bin/tick.sh" supervisor manual
+check "a park posts its question before it adds the operator's label" \
+    '[ "$(grep -n -- "-X POST" "$FAKE_GH_LOG" | head -2 | cut -d: -f1 | tr "\n" " ")" = "$(grep -n -- "issues/7/comments" "$FAKE_GH_LOG" | head -1 | cut -d: -f1) $(grep -n -- "labels\[\]=ai:operator" "$FAKE_GH_LOG" | head -1 | cut -d: -f1) " ]' \
+    "$(cat "$FAKE_GH_LOG")"
+check "at most two parks a day (SUPERVISOR_MAX_PARKS_PER_DAY)" \
+    '[ "$(grep -c "issues/7/comments" "$FAKE_GH_LOG")" -eq 2 ] && grep -q "refused park on #7: 2 issues parked in 24 h already" "$DLOG"' "$(grep github: "$DLOG" | tail -n 3)"
+echo '{"directive": null, "github": [{"comment": {"issue": 7, "body": "ping @owner-a, see https://example.com"}}]}' > "$H/answer.json"
+: > "$FAKE_GH_LOG"
+"$H/bin/tick.sh" supervisor manual
+check "a body with a mention or a link is refused" \
+    '! grep -q -- "-X POST" "$FAKE_GH_LOG" && grep -q "refused comment on #7: body: holds an @-mention" "$DLOG"' "$(tail -n 1 "$DLOG")"
 rm -f "$H/answer.json" "$SUP/failures"
 
 flock -o "$L/supervisor.lock" sleep 30 >/dev/null 2>&1 & holders+=("$!")
 until_ok bash -c "! flock -n '$L/supervisor.lock' true"
 runs=$(wc -l < "$SUP/runs.log"); rm -f "$H/sup-prompt.txt"
 "$H/bin/tick.sh" supervisor manual
-check "a second supervisor is kept out by the lock" '[ "$(wc -l < "$SUP/runs.log")" = "$runs" ] && [ ! -e "$H/sup-prompt.txt" ]' "$(cat "$SUP/runs.log")"
+check "a second supervisor is kept out by the lock" '[ "$(wc -l < "$SUP/runs.log")" = "$runs" ] && [ ! -e "$H/sup-prompt.txt" ]' "runs=$runs $(cat "$SUP/runs.log")"
 kill "${holders[-1]}" 2>/dev/null; wait "${holders[-1]}" 2>/dev/null
 
 # --- agents that cannot run confined are refused -------------------------------------------------
 write_env 1 "SUPERVISOR_MODEL=gemini:pro"
 out=$("$H/bin/tick.sh" check 2>&1); rc=$?
 check "gemini is refused as the supervisor, saying why" '[ "$rc" -eq 1 ] && [[ "$out" == *"gemini cannot supervise"* ]]' "rc=$rc $(grep -i supervis <<<"$out")"
-write_env 1 'SUPERVISOR_FLAGS_claude="--tools= --restricted --dangerously-skip-permissions"'
-out=$("$H/bin/tick.sh" check 2>&1); rc=$?
-check "flags that would give the supervisor tools are refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"--dangerously-skip-permissions would give the supervisor tools"* ]]' "rc=$rc $(grep -i supervis <<<"$out")"
-write_env 1 'SUPERVISOR_FLAGS_claude="--restricted"'
-out=$("$H/bin/tick.sh" check 2>&1); rc=$?
-check "flags that leave claude its tools are refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"needs --tools and --restricted"* ]]' "rc=$rc $(grep -i supervis <<<"$out")"
+# The flags are held to an allowlist: each of these would give the supervisor a tool, a setting,
+# an MCP server or a looser sandbox, and is refused, so the supervisor does not run.
+confine="--tools= --restricted --strict-mcp-config"
+codex_d="--sandbox read-only --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation"
+while IFS='|' read -r agent flags why; do
+    write_env 1 "SUPERVISOR_MODEL=$agent:model-s" "SUPERVISOR_FLAGS_$agent=\"$flags\""
+    out=$("$H/bin/tick.sh" check 2>&1); rc=$?
+    check "SUPERVISOR_FLAGS_$agent=$flags is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"SUPERVISOR_FLAGS_$agent: $why"* ]]' "rc=$rc want=$why $(grep -i supervis <<<"$out")"
+done <<EOF
+claude|--tools= --restricted --dangerously-skip-permissions|--dangerously-skip-permissions is not one of the supervisor's flags
+claude|--tools Bash,Edit,Write --restricted --strict-mcp-config|--tools must be given empty
+claude|$confine --tools=|--tools is given twice
+claude|$confine --mcp-config servers.json|--mcp-config is not one of the supervisor's flags
+claude|$confine --settings extra.json|--settings is not one of the supervisor's flags
+claude|$confine --permission-mode bypassPermissions|--permission-mode is not one of the supervisor's flags
+claude|--tools= --restricted|--strict-mcp-config is missing
+codex|$codex_d --enable shell_tool|--enable is not one of the supervisor's flags
+codex|$codex_d --full-auto|--full-auto is not one of the supervisor's flags
+codex|$codex_d -c sandbox_mode=danger-full-access|-c sandbox_mode=danger-full-access is not the supervisor's
+codex|$codex_d --dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-approvals-and-sandbox is not one of the supervisor's flags
+codex|--sandbox read-only --disable shell_tool|--disable unified_exec is missing
+EOF
+write_env 1 "SUPERVISOR_FLAGS_claude=\"--tools Bash --restricted --strict-mcp-config\""
+rm -f "$H/sup-argv.txt"; : > "$LOG"
+"$H/bin/tick.sh" supervisor manual
+check "with refused flags the supervisor does not run, and the launcher says why" \
+    '[ ! -e "$H/sup-argv.txt" ] && grep -q "supervisor not run: SUPERVISOR_FLAGS_claude: --tools must be given empty" "$LOG"' "$(cat "$LOG")"
 write_env 1 'SUPERVISOR_FLAGS_claude="--tools= --restricted --strict-mcp-config"'
 rm -f "$H/sup-argv.txt"
 "$H/bin/tick.sh" supervisor manual
@@ -423,13 +475,31 @@ write_env 1
 reset_supervisor
 touch "$H/sup-crash"
 printf '{"version": 1, "reason": "never applied", "expires_at": "%s", "width": 1}\n' "$(at 3600)" > "$H/directive-in.json"
+# A minimum interval of 1 s and a fresh event before each look, so only the backoff can explain
+# a supervisor tick that does not start.
+MIN_INTERVAL=1 write_env 1
+due() { USAGE_CACHE="$H/usage-cache.json" USAGE_FETCH="$H/no-fetch" "$HARNESS_BIN" supervisor due 2>&1; }
+event() { mkdir -p "$S/model-cooldown"; touch "$S/model-cooldown/claude:elsewhere-$1"; }
+usage 10
 launch
-check "a crashed supervisor's run is recorded as a failure" \
-    'grep -q "exit=3 " "$SUP/runs.log" && [ "$(cat "$SUP/failures")" = 1 ] && [ ! -e "$S/directive.json" ]' \
-    "runs=$(cat "$SUP/runs.log" 2>/dev/null)"
+check "a crashed supervisor's run is recorded as a failure, and the defaults hold" \
+    'grep -q "exit=3 " "$SUP/runs.log" && [ "$(cat "$SUP/failures")" = 1 ] && [ ! -e "$S/directive.json" ] && [ "$(ticks_run)" = 3 ]' \
+    "runs=$(cat "$SUP/runs.log" 2>/dev/null) lanes=$(cat "$FAKE_LANES")"
+sleep 1.1; event 1
+check "one failure backs off twice the minimum interval" '[[ "$(due)" == "not due: backing off 2s after 1 failed runs" ]]' "$(due)"
 launch
-check "after a crash the defaults hold and no supervisor tick starts within its backoff" \
-    '[ "$(ticks_run)" = 3 ] && [ "$(wc -l < "$SUP/runs.log")" -eq 1 ]' "lanes=$(cat "$FAKE_LANES") runs=$(cat "$SUP/runs.log")"
+check "no supervisor tick starts within that backoff" '[ "$(wc -l < "$SUP/runs.log")" -eq 1 ]' "$(cat "$SUP/runs.log")"
+sleep 1.5; event 2
+launch
+check "past the backoff it runs again, and fails again" '[ "$(wc -l < "$SUP/runs.log")" -eq 2 ] && [ "$(cat "$SUP/failures")" = 2 ]' "$(cat "$SUP/runs.log")"
+sleep 1.1; event 3
+check "two failures in a row double it" '[[ "$(due)" == "not due: backing off 4s after 2 failed runs" ]]' "$(due)"
+rm -f "$H/sup-crash"
+sleep 3.5; event 4
+launch
+check "a run that ends well resets the failures" '[ "$(cat "$SUP/failures")" = 0 ] && tail -n 1 "$SUP/runs.log" | grep -q "exit=0 "' "$(cat "$SUP/runs.log")"
+sleep 1.1; event 5
+check "and with them the backoff: the next event is due after the minimum interval alone" '[[ "$(due)" == "due "* ]]' "$(due)"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

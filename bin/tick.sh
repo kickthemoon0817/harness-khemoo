@@ -40,6 +40,7 @@ harness_load
 : "${SUPERVISOR_BUDGET_MIN:=10}"
 : "${SUPERVISOR_MAX_DIRECTIVE_S:=21600}"
 : "${SUPERVISOR_STOP_GRACE_S:=1200}"
+: "${SUPERVISOR_MAX_PARKS_PER_DAY:=2}"
 supervisor=""; [ "${SUPERVISOR:-}" = 1 ] && supervisor=1
 # The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
@@ -209,13 +210,15 @@ supervisor_entry() {
 
 # Sets argv to the supervisor's command line, agent $1 on model $2 with no tools, or sets refusal
 # to why it cannot run so and returns 1. SUPERVISOR_FLAGS_<agent> replaces the defaults (split on
-# whitespace), and must still confine the agent. What the defaults guarantee (docs/INSTANCE.md):
-# claude has no built-in tool (--tools ""), no MCP server (--strict-mcp-config) and no settings,
-# hooks or plugins (--restricted); codex runs read-only and offline with its shell, exec, apps,
-# plugins, browser and web search off. Gemini has no flag that takes its file and web tools away in
-# headless mode, so it never supervises.
+# whitespace) and is held to an allowlist (supervisor_flags_ok): it may drop the optional flags,
+# never add one. What the defaults guarantee (docs/INSTANCE.md): claude has no built-in tool
+# (--tools ""), no MCP server (--strict-mcp-config) and no settings, hooks or plugins
+# (--restricted); codex runs read-only and offline with its shell, exec, apps, plugins, browser and
+# web search off. Gemini has no flag that takes its file and web tools away in headless mode, so it
+# never supervises.
+SUPERVISOR_CODEX_DISABLED="shell_tool unified_exec apps plugins browser_use computer_use in_app_browser image_generation"
 supervisor_argv() {
-    local name="SUPERVISOR_FLAGS_$1" word
+    local name="SUPERVISOR_FLAGS_$1" word f
     local -a flags=() words
     refusal=""
     if [ -n "${!name+x}" ]; then
@@ -227,28 +230,63 @@ supervisor_argv() {
     else
         case $1 in
             claude) flags=(--tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence) ;;
-            codex) flags=(--sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config
-                --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use
-                --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled) ;;
+            codex)
+                flags=(--sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config)
+                for f in $SUPERVISOR_CODEX_DISABLED; do flags+=(--disable "$f"); done
+                flags+=(-c web_search=disabled) ;;
         esac
     fi
-    for word in "${flags[@]}"; do
-        case $word in
-            --dangerously*|--allow-dangerously*|*bypass*|--yolo|-y|danger-full-access|workspace-write|--add-dir*|--allowed-tools*|--allowedTools*|--model|--model=*|-m)
-                refusal="$name: $word would give the supervisor tools, or another model"; return 1 ;;
-        esac
-    done
     case $1 in
-        claude)
-            [[ " ${flags[*]} " == *" --tools "* ]] && [[ " ${flags[*]} " == *" --restricted "* ]] \
-                || { refusal="$name: the supervisor's claude needs --tools and --restricted"; return 1; }
-            argv=("$(agent_bin claude)" -p --model "$2" "${flags[@]}") ;;
-        codex)
-            [[ " ${flags[*]} " == *" --sandbox read-only "* && " ${flags[*]} " == *" --disable shell_tool "* ]] \
-                || { refusal="$name: the supervisor's codex needs --sandbox read-only and --disable shell_tool"; return 1; }
-            argv=("$(agent_bin codex)" exec --model "$2" "${flags[@]}" -) ;;
+        claude|codex) supervisor_flags_ok "$1" "${flags[@]}" || { refusal="$name: $refusal"; return 1; } ;;
         gemini) refusal="gemini cannot supervise: no flag of its CLI takes its file and web tools away in headless mode"; return 1 ;;
         *) refusal="$1 cannot supervise: only claude and codex run here without tools"; return 1 ;;
+    esac
+    case $1 in
+        claude) argv=("$(agent_bin claude)" -p --model "$2" "${flags[@]}") ;;
+        codex) argv=("$(agent_bin codex)" exec --model "$2" "${flags[@]}" -) ;;
+    esac
+}
+# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. Each flag is
+# one the defaults use, given once, and the confining ones are all there: claude's --tools with an
+# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox and every --disable
+# of SUPERVISOR_CODEX_DISABLED, with -c only for web_search=disabled. A flag outside this list,
+# such as one that names tools, loads settings or MCP servers, enables a feature or lifts the
+# sandbox, is refused, not weighed.
+supervisor_flags_ok() {
+    local agent=$1 word seen=" " f
+    shift
+    while [ $# -gt 0 ]; do
+        word=$1; shift
+        case "$agent:$word" in
+            claude:--tools)
+                [ $# -gt 0 ] && [ -z "$1" ] || { refusal="--tools must be given empty"; return 1; }
+                shift ;;
+            claude:--restricted|claude:--strict-mcp-config|claude:--disable-slash-commands|claude:--no-session-persistence) ;;
+            codex:--sandbox)
+                [ "${1:-}" = read-only ] || { refusal="--sandbox must be read-only"; return 1; }
+                shift ;;
+            codex:--disable)
+                [[ " $SUPERVISOR_CODEX_DISABLED " == *" ${1:-} "* ]] || { refusal="--disable ${1:-} is not one of the supervisor's"; return 1; }
+                word="--disable $1"; shift ;;
+            codex:-c)
+                [ "${1:-}" = web_search=disabled ] || { refusal="-c ${1:-} is not the supervisor's"; return 1; }
+                word="-c $1"; shift ;;
+            codex:--skip-git-repo-check|codex:--ephemeral|codex:--ignore-user-config) ;;
+            *) refusal="$word is not one of the supervisor's flags"; return 1 ;;
+        esac
+        [[ "$seen" == *" $word "* ]] && { refusal="$word is given twice"; return 1; }
+        seen+="$word "
+    done
+    case $agent in
+        claude)
+            for f in --tools --restricted --strict-mcp-config; do
+                [[ "$seen" == *" $f "* ]] || { refusal="$f is missing"; return 1; }
+            done ;;
+        codex)
+            [[ "$seen" == *" --sandbox "* ]] || { refusal="--sandbox read-only is missing"; return 1; }
+            for f in $SUPERVISOR_CODEX_DISABLED; do
+                [[ "$seen" == *" --disable $f "* ]] || { refusal="--disable $f is missing"; return 1; }
+            done ;;
     esac
 }
 
@@ -419,6 +457,16 @@ read_ticks() {
     fi
     rm -f "$err"
 }
+# How many local claims a live tick holds: claim files whose pid is one of $ticks'.
+held_claims() {
+    local f cpid n=0
+    for f in "$LOCKS"/claim.*; do
+        [ -s "$f" ] || continue
+        read -r _ cpid _ < "$f" || continue
+        awk -v pid="$cpid" '$1 == pid { found = 1 } END { exit !found }' <<<"$ticks" && n=$(( n + 1 ))
+    done
+    echo "$n"
+}
 # How many of the live ticks of kind $1 (any when empty) are younger than CLAIM_GRACE_S.
 young_ticks() {
     # The supervisor claims nothing, so it never stands for a queued issue.
@@ -438,8 +486,9 @@ compute_want() {
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     read_ticks
-    # The supervisor's claimable-count event compares this with the count at its last run.
-    [ -n "$supervisor" ] && mkdir -p "$SUP" && echo "$claimable" > "$SUP/claimable"
+    # The supervisor's queue event compares this with the queue at its last run: the claimable
+    # issues and those a live tick's claim holds, counted together, so a claim alone changes nothing.
+    [ -n "$supervisor" ] && mkdir -p "$SUP" && echo "$claimable $(held_claims)" > "$SUP/queue"
     young=$(young_ticks "")
     want=$(( claimable - young ))
     [ "$want" -lt 0 ] && want=0
@@ -548,7 +597,7 @@ LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If n
 # The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
 # the key's value through a sed escape, never eval, so a value cannot run as code.
 PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
-SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S"
+SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S SUPERVISOR_MAX_PARKS_PER_DAY"
 prompt_subst() {  # sets subst to the sed expressions for the keys $@
     local k v
     subst=()
