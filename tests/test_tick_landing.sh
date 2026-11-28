@@ -73,7 +73,15 @@ live() {
 release_all() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); }
 # The launcher's detached runners and the forks that become them both carry its path.
 no_runner() { ! pgrep -f "$H/bin/tick.sh" >/dev/null; }
-settle() { until_ok no_runner; }
+# Three empty polls in a row: on Ubuntu 26.04 a poll right after the launcher exits has missed the
+# runner it had just started.
+settle() {
+    local n=0 quiet=0
+    while [ "$quiet" -lt 3 ] && [ "$n" -lt 400 ]; do
+        if no_runner; then quiet=$((quiet + 1)); else quiet=0; fi
+        sleep 0.05; n=$((n + 1))
+    done
+}
 launch() {  # run the launcher once and wait for any runner it started
     : > "$FAKE_LANES"; : > "$LOG" 2>/dev/null || true
     "$H/bin/tick.sh"

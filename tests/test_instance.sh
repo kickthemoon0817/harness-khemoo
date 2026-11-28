@@ -162,8 +162,13 @@ check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL
 # Waits until no tick.sh of this scratch home runs: the launcher's detached runners and the forks
 # that become them both carry its path. Gives up after 20 s, so a stuck runner fails its check.
 settle() {
-    local n=0
-    while pgrep -f "$H/bin/tick.sh" >/dev/null && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+    local n=0 quiet=0
+    # Three empty polls in a row: on Ubuntu 26.04 a poll right after the launcher exits has missed
+    # the runner it had just started.
+    while [ "$quiet" -lt 3 ] && [ "$n" -lt 400 ]; do
+        if pgrep -f "$H/bin/tick.sh" >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+        sleep 0.05; n=$((n + 1))
+    done
 }
 launch() {  # run the launcher once and wait for the runner it may start
     rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log "$FAKE_AGENTS"/*.argv; : > "$LOG"
@@ -569,33 +574,16 @@ launch
 check "a chained tick may run on another agent" \
     '[ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 1 ] && [ "$(wc -l < "$FAKE_AGENTS/claude.argv")" -eq 1 ] && grep -q "slot1 chains tick 2" "$LOG"' \
     "log=$(cat "$LOG")"
-# claude at 75 % has room for one tick; the codex tick starts a live claude tick in the other slot,
-# so the chained tick, picking past claude at its cap, runs on codex again.
+# claude at 75 % has room for one tick, which a live claude tick in the other slot takes, so the
+# chained tick, picking past claude at its cap once codex ends its cooldown, runs on codex again.
 usage 75; touch "$H/state/model-cooldown/claude:model-c"
-cat > "$FAKE_AGENTS/claude.fill.sh" <<EOF
-#!/usr/bin/env bash
-[ -e "$H/state/locks/slot2.tick" ] && exit 0
-# Not the runner's slot lock: the live tick this starts must not hold slot 1 past the test.
-for fd in \$(ls /proc/\$\$/fd); do [ "\$fd" -gt 2 ] && eval "exec \$fd>&-"; done 2>/dev/null
-flock -o "$H/state/locks/slot2.lock" sleep 60 >/dev/null 2>&1 & pid=\$!
-stat=\$(cat /proc/\$pid/stat); read -ra f <<<"\${stat##*) }"
-printf '%s %s %s claude m work\n' \$pid \${f[19]} \$(cat /proc/sys/kernel/random/boot_id) > "$H/state/locks/slot2.tick"
-echo \$pid > "$FAKE_AGENTS/filler"
-EOF
-chmod +x "$FAKE_AGENTS/claude.fill.sh"
-cat > "$H/fakebin/codex-fill" <<'EOF'
-#!/usr/bin/env bash
-"$FAKE_AGENTS/claude.fill.sh"
-exec "$(dirname "$0")/codex" "$@"
-EOF
-chmod +x "$H/fakebin/codex-fill"
-agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2" "AGENT_BIN_codex=$H/fakebin/codex-fill"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2"
+live 2 claude work
 launch
-filler=$(cat "$FAKE_AGENTS/filler" 2>/dev/null)
 check "a chained tick's pick respects the cap of the agent it picks" \
     '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 2 ] && grep -q "slot1 chains tick 2" "$LOG"' \
     "log=$(cat "$LOG") claude=$(cat "$FAKE_AGENTS/claude.argv" 2>/dev/null)"
-pkill -P "$filler" 2>/dev/null; kill "$filler" 2>/dev/null; rm -f "$H/state/locks/slot2.tick" "$FAKE_AGENTS"/codex.uncool "$FAKE_AGENTS/filler"
+release; rm -f "$FAKE_AGENTS"/codex.uncool
 rm -rf "$H/state/model-cooldown"; usage 10
 # A stale reading allows nothing, and the launcher says so rather than stopping silently.
 printf '{"timestamp": 1000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' > "$H/usage-cache.json"
