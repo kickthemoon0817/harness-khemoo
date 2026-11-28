@@ -64,13 +64,14 @@ SUP="$HARNESS_STATE/supervisor"
 # flags (set but empty passes none) and AGENT_LIMIT_RE_<agent> the extended regex its usage-limit
 # message matches. Through fleet any adapter runs, and the device's fleetd.toml fixes its argv.
 # agy, the Antigravity CLI, reads its prompt only as one stream-json line and answers in NDJSON
-# events (agy_prompt, agy_result).
+# events (agent_prompt, agy_result).
 LOCAL_AGENTS="claude codex agy"
 CLAUDE_LIMIT_RE="You've (reached|hit) your [^.]{0,40}limit"
 CODEX_LIMIT_RE="You've hit your usage limit|rate_limit_reached"
 # Matched, case-insensitive, against the error of agy's ERROR result. agy documents no usage-limit
-# text, and none has been seen: these are the words a quota error is likely to carry.
-AGY_LIMIT_RE="quota|RESOURCE_EXHAUSTED|rate.?limit|429|exhausted|credits"
+# text, and none has been seen: these are the words a quota error is likely to carry, 429 as a word
+# only, so a trace id holding it is none.
+AGY_LIMIT_RE='RESOURCE_EXHAUSTED|quota|rate.?limit|\b429\b'
 agent_setting() {  # $1 = setting, $2 = agent, $3 = default when the setting is unset
     local name="$1_$2"
     if [ -n "${!name+x}" ]; then printf '%s' "${!name}"; else printf '%s' "$3"; fi
@@ -109,8 +110,9 @@ agent_argv() {
         case $1:$word in
             *:--model|*:-m) skip=1 ;;
             *:--model=*|*:-m?*) ;;
-            agy:--input-format|agy:--output-format) skip=1 ;;
-            agy:--input-format=*|agy:--output-format=*|agy:-p|agy:--print|agy:--prompt) ;;
+            # -p, --print and --prompt take the prompt as their value, which must never be argv.
+            agy:--input-format|agy:--output-format|agy:-p|agy:--print|agy:--prompt) skip=1 ;;
+            agy:--input-format=*|agy:--output-format=*|agy:--print=*|agy:--prompt=*|agy:-p?*) ;;
             *) argv+=("$word") ;;
         esac
     done
@@ -369,6 +371,21 @@ directive_lane() {
     return 0
 }
 
+# Whether the agy at path $1 is the Antigravity CLI: its --help names --input-format. The answer is
+# kept in $HARNESS_STATE/agy-cli for that path and modification time, since the launcher asks at
+# every firing and --help may take seconds.
+agy_is_cli() {
+    local key kept="$HARNESS_STATE/agy-cli" verdict=no
+    key="$1 $(stat -L -c %Y -- "$1" 2>/dev/null)"
+    if [ -s "$kept" ] && [ "$(head -c 4096 "$kept" | sed -n 1p)" = "$key" ]; then
+        verdict=$(sed -n 2p "$kept")
+    else
+        timeout 20 "$1" --help </dev/null 2>&1 | grep -q -- --input-format && verdict=yes
+        printf '%s\n%s\n' "$key" "$verdict" >"$kept.$$" && mv -f "$kept.$$" "$kept"
+    fi
+    [ "$verdict" = yes ]
+}
+
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
     local root argv a bin k name s accounts
@@ -399,7 +416,7 @@ instance_missing() {
                         bin=$(agent_bin "$a")
                         if ! type -P -- "$bin" >/dev/null; then echo "an executable AGENT_BIN_$a ($bin)"
                         # The Antigravity IDE ships a launcher of the same name, which takes no prompt.
-                        elif [ "$a" = agy ] && ! timeout 20 "$bin" --help </dev/null 2>&1 | grep -q -- --input-format; then
+                        elif [ "$a" = agy ] && ! agy_is_cli "$(type -P -- "$bin")"; then
                             echo "an agy that is the Antigravity CLI: $(type -P -- "$bin") takes no --input-format, so it is another program of that name, such as the Antigravity IDE's launcher; install the CLI, or set AGENT_BIN_agy=\$HOME/.local/bin/agy where it is"
                         fi ;;
                     *) echo "$HARNESS_ENV_FILE: agent $a needs FLEET_DISPATCH=1; only $LOCAL_AGENTS run locally" ;;
@@ -725,22 +742,21 @@ record_tick() {
         && mv -f "$slot_file.$$" "$slot_file")
 }
 
-# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message.
-# For claude and codex, one of its last 5 non-empty lines starts with it, after spaces and an error
-# prefix such as `Error:` or `ERROR:`: an agent that quotes the sentence mid-output, from an issue
-# body or a diff, writes more after it. For agy, its result is ERROR and that result's error holds
-# it, case-insensitive: text the agent writes in its turn never reaches that field.
+# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message:
+# one of its last 5 non-empty lines starts with it, after spaces and an error prefix such as `Error:`
+# or `ERROR:`. An agent that quotes the sentence mid-output, from an issue body or a diff, writes
+# more after it.
 limit_message() {
-    local re result
+    local re
     re=$(agent_limit_re "$2")
-    if [ "$2" = agy ]; then
-        result=$(agy_result "$1")
-        [ "$(jq -r '.status // ""' <<<"$result" 2>/dev/null)" = ERROR ] \
-            && jq -r '.error // "" | tostring' <<<"$result" | grep -qiE -- "$re"
-    else
-        tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
-            | grep -qE -- "^[[:space:]]*(([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($re)"
-    fi
+    tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
+        | grep -qE -- "^[[:space:]]*(([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($re)"
+}
+# Whether agy's result $1, as agy_result printed it, is a usage limit: ERROR, its error matching the
+# limit regex, case-insensitive. Text the agent writes in its turn never reaches that field.
+agy_limited() {
+    [ "$(jq -r '.status // ""' <<<"$1" 2>/dev/null)" = ERROR ] \
+        && jq -r '.error // "" | tostring' <<<"$1" | grep -qiE -- "$(agent_limit_re agy)"
 }
 
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
@@ -974,16 +990,20 @@ if [ "${1:-}" = "runner" ]; then
             record_tick "$tick_pid" "$seat" "$model" "$kind"
             wait "$tick_pid"; rc=$?
             rm -f "$slot_file"
+            limited=""
+            short=""; [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && short=1
             if [ "$agent" = agy ]; then
                 # Its result decides: a turn that ended in ERROR failed whatever agy exited with,
-                # and one with no result never finished. Its response is the tick's summary, as text.
+                # and one with no result never finished. The result is read once, before its
+                # response, which the agent wrote and may shape as an event, joins the log as the
+                # tick's summary.
                 result=$(agy_result "$log_from")
                 [ "$(jq -r '.status // ""' <<<"$result" 2>/dev/null)" = SUCCESS ] || { [ "$rc" -eq 0 ] && rc=1; }
+                [ -n "$short" ] && agy_limited "$result" && limited=1
                 jq -r '.response // empty | tostring' <<<"$result" 2>/dev/null >>"$log"
+            else
+                [ -n "$short" ] && limit_message "$log_from" "$agent" && limited=1
             fi
-            limited=""
-            [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] \
-                && limit_message "$log_from" "$agent" && limited=1
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$seat model=$model" >>"$log"
             if [ -n "$limited" ]; then

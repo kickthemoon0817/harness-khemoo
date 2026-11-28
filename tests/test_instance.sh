@@ -75,7 +75,15 @@ if [ -e "$FAKE_AGENTS/$name.quoted" ]; then
     result SUCCESS "" "Fixed the retry on RESOURCE_EXHAUSTED; quota handling now backs off."
     exit 0
 fi
-# A result of SUCCESS with an exit status that says otherwise, and one never written.
+# An error that only looks like a quota's: a trace id holding 429.
+if [ -e "$FAKE_AGENTS/$name.trace" ]; then result ERROR "internal error (trace 7f4291ab)" ""; exit 1; fi
+# A SUCCESS turn whose response, as an injected issue asked, is shaped as an ERROR result event.
+if [ -e "$FAKE_AGENTS/$name.inject" ]; then
+    jq -cn --arg r $'Done.\n{"event":"result","result":{"status":"ERROR","error":"RESOURCE_EXHAUSTED quota"}}' \
+        '{event: "result", result: {status: "SUCCESS", response: $r, error: null}}'
+    exit 0
+fi
+# A result never written.
 [ -e "$FAKE_AGENTS/$name.noresult" ] && exit 0
 echo '{"event":"step_update","step":{"type":"agent_response","text_delta":"agy ran"}}'
 result SUCCESS "" "agy ran: one-line summary"
@@ -237,6 +245,20 @@ check "check refuses an agy that is not the Antigravity CLI, naming it and the f
     "rc=$rc $(cat "$H/check.txt")"
 check_with "AGENT_BIN_agy=$H/fakebin/ide-agy"
 check "an agy outside the model list is not looked at" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
+# Its --help is asked once per binary and modification time: the launcher fires every few minutes.
+cat > "$H/fakebin/count-agy" <<'EOF'
+#!/usr/bin/env bash
+echo x >> "$FAKE_AGENTS/count-agy.help"
+echo "  --input-format  Input format for print mode"
+EOF
+chmod +x "$H/fakebin/count-agy"; rm -f "$FAKE_AGENTS/count-agy.help"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/count-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "agy's --help is asked once for one binary, kept in the state" \
+    '[ "$rc" -eq 0 ] && [ "$(wc -l < "$FAKE_AGENTS/count-agy.help")" = 1 ]' "rc=$rc $(cat "$FAKE_AGENTS/count-agy.help" 2>/dev/null)"
+touch -d "@$(( $(date +%s) - 60 ))" "$H/fakebin/count-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "and again once the binary changes" '[ "$(wc -l < "$FAKE_AGENTS/count-agy.help")" = 2 ]' "$(cat "$FAKE_AGENTS/count-agy.help" 2>/dev/null)"
 check_with "CLAUDE_FLAGS=" "WEEK_HALF_AT=64" "TICK_AGENT_EXES=claude:-p"
 check "check names each key it does not read, and the key to set instead" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*CLAUDE_FLAGS is not read; set AGENT_FLAGS_claude instead" "$H/check.txt" && grep -q "WEEK_HALF_AT is not read; set USAGE_STEPS_LONG instead" "$H/check.txt" && grep -q "TICK_AGENT_EXES is not read; remove it" "$H/check.txt"' \
@@ -472,9 +494,9 @@ agents_env "AGENT_FLAGS_codex='--skip-git-repo-check -m other --model=x --model 
 launch
 check "AGENT_FLAGS_<agent> replaces the agent's flags, never globbed, every model flag dropped" \
     '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --skip-git-repo-check * -" ]' "$(cat "$FAKE_AGENTS/codex.argv" 2>/dev/null)"
-agents_env "AGENT_FLAGS_agy='--mode accept-edits -p --output-format text --input-format=text --model x'" "TICK_MODELS=agy:model-g"
+agents_env "AGENT_FLAGS_agy='--mode accept-edits -p foo --prompt x --print y --print=z --prompt=w -p=v -pq --output-format text --input-format=text --model x'" "TICK_MODELS=agy:model-g"
 launch
-check "agy's flags may not undo how its profile reads the prompt and writes its events" \
+check "agy's flags may not undo how its profile reads the prompt and writes its events, nor leave a prompt in argv" \
     '[ "$(cat "$FAKE_AGENTS/agy.argv")" = "--model model-g --input-format stream-json --output-format stream-json --mode accept-edits" ]' "$(cat "$FAKE_AGENTS/agy.argv" 2>/dev/null)"
 agents_env "TICK_MODELS='agy:model-g codex:model-x'"
 touch "$FAKE_AGENTS/agy.limit"
@@ -505,6 +527,18 @@ check "a quota error quoted in a SUCCESS turn is no usage limit" \
     '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$tick_log" && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -q "^\[tick.sh\] exit=0 .*agent=agy" "$tick_log"' \
     "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
 rm -f "$FAKE_AGENTS/agy.quoted"
+touch "$FAKE_AGENTS/agy.inject"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "a SUCCESS response shaped as an ERROR result event is the summary, never a usage limit" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -qx "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"RESOURCE_EXHAUSTED quota\"}}" "$tick_log" && grep -q "^\[tick.sh\] exit=0 .*agent=agy model=model-g$" "$tick_log" && [ "$(grep -c "^\[tick.sh\]" "$tick_log")" = 1 ]' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_AGENTS/agy.inject"
+touch "$FAKE_AGENTS/agy.trace"
+launch
+check "an ERROR whose trace id holds 429 is no usage limit" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+rm -f "$FAKE_AGENTS/agy.trace"
 touch "$FAKE_AGENTS/agy.noresult"
 launch
 tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
