@@ -35,7 +35,11 @@ operator_notes() {
     since=$ctime
     [ -s "$seen" ] && since=$(cat "$seen")
     [[ "$iss" =~ ^[0-9]+$ ]] && [[ "$since" =~ ^[0-9T:Z-]+$ ]] || return 0
-    page=$(GH_TOKEN="${GH_TOKEN:-}" timeout 15 gh api "repos/$GH_REPO/issues/$iss/comments?since=$since&per_page=100" 2>/dev/null < /dev/null) || return 0
+    # Every page: a run of comments from anyone must not push a ruling off the first. Each comment is
+    # cut to its first line here, so huge ones cannot crowd the others out of what is read.
+    page=$(GH_TOKEN="${GH_TOKEN:-}" timeout 15 gh api --paginate "repos/$GH_REPO/issues/$iss/comments?since=$since&per_page=100" \
+        -q '.[] | {created_at, author_association, issue_url, user: {login: .user.login}, body: ((.body // "") | split("\n")[0] | .[0:400])}' \
+        2>/dev/null < /dev/null) || return 0
     out=$(printf '%s' "$page" | OPERATOR_LOGINS="${OPERATOR_LOGINS:-}" "$HARNESS_BIN" operator notes --since "$since") || return 0
     [ -n "$out" ] || return 0
     mkdir -p "$state/operator-seen" && printf '%s\n' "$out" | tail -1 | cut -d' ' -f1 > "$seen"

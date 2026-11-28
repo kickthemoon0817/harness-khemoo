@@ -108,8 +108,10 @@ pub fn operator_comments(
     found
 }
 
-/// The most a comment page read on stdin may hold: 100 comments of GitHub's 65536-character limit.
-const INPUT_LIMIT: u64 = 8 << 20;
+/// The most read on stdin. usage-ok.sh cuts each comment to its first line before this reads it,
+/// so this holds thousands; input cut short loses only its newest comments, which GitHub lists
+/// last and the next run reads from the time of the last one named.
+const INPUT_LIMIT: u64 = 4 << 20;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -119,8 +121,9 @@ pub struct Args {
 
 #[derive(clap::Subcommand)]
 enum Sub {
-    /// Read a page of an issue's comments (GitHub's REST JSON) on stdin, and print each operator's
-    /// `Operator` comment made after --since, oldest first, as `<time> @<login>: <first line>`.
+    /// Read an issue's comments (GitHub's REST objects, as arrays or one after another) on stdin, and
+    /// print each operator's `Operator` comment made after --since, oldest first, as
+    /// `<time> @<login>: <first line>`.
     Notes {
         /// An ISO-8601 UTC time, such as a tick's claim.
         #[arg(long)]
@@ -131,15 +134,13 @@ enum Sub {
 pub fn run(args: &Args) -> ExitCode {
     let Sub::Notes { since } = &args.command;
     let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let mut input = String::new();
-    if let Err(error) = std::io::stdin()
-        .take(INPUT_LIMIT)
-        .read_to_string(&mut input)
-    {
+    let mut input = Vec::new();
+    if let Err(error) = std::io::stdin().take(INPUT_LIMIT).read_to_end(&mut input) {
         eprintln!("harness operator notes: {error}");
         return ExitCode::from(2);
     }
-    match notes(&input, &env, since) {
+    // The limit may cut a character in two; only the comment it falls in is lost.
+    match notes(&String::from_utf8_lossy(&input), &env, since) {
         Ok(lines) => {
             for line in lines {
                 println!("{line}");
@@ -156,8 +157,15 @@ pub fn run(args: &Args) -> ExitCode {
 fn notes(input: &str, env: Lookup, since: &str) -> Result<Vec<String>, String> {
     let authors = Authors::from_env(env)?;
     let since = epoch_of(since).ok_or_else(|| format!("--since {since:?} is not an ISO time"))?;
-    let comments: Vec<Value> =
-        serde_json::from_str(input).map_err(|error| format!("not a list of comments: {error}"))?;
+    // What parses up to the first fault counts: a stream cut short at the limit keeps its oldest.
+    let mut comments = Vec::new();
+    for value in serde_json::Deserializer::from_str(input).into_iter::<Value>() {
+        match value {
+            Ok(Value::Array(page)) => comments.extend(page),
+            Ok(comment) => comments.push(comment),
+            Err(_) => break,
+        }
+    }
     Ok(operator_comments(&comments, &authors, since)
         .iter()
         .map(|comment| {
@@ -293,20 +301,30 @@ mod tests {
     }
 
     #[test]
-    fn notes_refuse_bad_logins_a_bad_time_and_input_that_is_not_comments() {
+    fn notes_refuse_bad_logins_and_a_bad_time() {
         let input = serde_json::to_string(&comments()).unwrap();
         let unset = |_: &str| None;
         let injected =
             |key: &str| (key == "OPERATOR_LOGINS").then(|| "x\") or true or (\"".to_owned());
         assert!(notes(&input, &injected, "2026-11-01T00:00:00Z").is_err());
         assert!(notes(&input, &unset, "yesterday").is_err());
-        assert!(
-            notes(
-                "{\"message\": \"Not Found\"}",
-                &unset,
-                "2026-11-01T00:00:00Z"
-            )
-            .is_err()
+    }
+
+    #[test]
+    fn notes_read_comments_one_after_another_and_keep_what_parses_before_a_fault() {
+        let unset = |_: &str| None;
+        let since = "2026-11-01T00:00:00Z";
+        let stream: String = comments()
+            .iter()
+            .map(|comment| serde_json::to_string(comment).unwrap() + "\n")
+            .collect();
+        assert_eq!(notes(&stream, &unset, since).unwrap().len(), 2);
+        let cut = &stream[..stream.find("helper-b").unwrap()];
+        assert_eq!(
+            notes(cut, &unset, since).unwrap(),
+            ["2026-11-02T00:00:00Z @owner-a: Operator: stop after the fix."]
         );
+        let error = "{\"message\": \"Not Found\"}";
+        assert!(notes(error, &unset, since).unwrap().is_empty());
     }
 }

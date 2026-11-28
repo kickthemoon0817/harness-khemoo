@@ -395,8 +395,10 @@ recognises a lane or landing tick by its slot file's `kind`.
 
 `"$HARNESS_BIN" lint` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
-`harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
-the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these
+`harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, `operator-voice` (a body that opens
+with `Operator`, which a later tick would read as the operator's ruling, since ticks post with the
+operator's token), and the `label-mention` warning for the harness labels (`WIP_LABEL` through
+`LOW_LABEL`, as set in the environment). It reads these
 settings from its environment, not from `harness.env`.
 
 The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else from

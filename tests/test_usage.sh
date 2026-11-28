@@ -137,7 +137,8 @@ out=$(HARNESS_TICK="state=$H/elsewhere slot=1 agent=codex model=m kind=work" TIC
 check "another installation's marker names no agent here" '[ "$rc" -eq 0 ] && [[ "$out" == "claude: "* ]]' "rc=$rc $out"
 
 # Operator notes: only a trusted author's `Operator` comment newer than the claim is named. The fake
-# gh answers with a fixed page of comments, as GitHub's REST API does.
+# gh applies the -q program to a fixed list of comments with jq, as gh does with its own, and records
+# its arguments.
 mkdir -p "$H/fakebin" "$H/state/locks"
 cat > "$H/comments.json" <<'JSON'
 [{"created_at":"2026-11-02T00:00:00Z","author_association":"OWNER","user":{"login":"owner-a"},"issue_url":"https://api.github.com/repos/example/repo/issues/7","body":"Operator: stop after the fix.\nmore"},
@@ -149,7 +150,9 @@ JSON
 cat > "$H/fakebin/gh" <<'GH'
 #!/usr/bin/env bash
 [ -z "${FAKE_GH_FAIL:-}" ] || exit 1
-cat "$COMMENTS"
+printf '%s\n' "$*" > "$COMMENTS.args"
+while [ $# -gt 0 ]; do [ "$1" = -q ] && { jq -c "$2" "$COMMENTS"; exit; }; shift; done
+exit 1
 GH
 chmod +x "$H/fakebin/gh"
 notes() {
@@ -169,6 +172,11 @@ out=$(notes 'OPERATOR_LOGINS=x") or true or ("')
 check "an OPERATOR_LOGINS that is not a list of logins reads no notes" '[[ "$out" != *"OPERATOR:"* ]] && [[ "$out" == *"not a space-separated list"* ]]' "$out"
 out=$(notes FAKE_GH_FAIL=1)
 check "a failed comment fetch names nothing and says nothing" '[[ "$out" != *"OPERATOR:"* ]] && [[ "$out" != *"harness operator"* ]]' "$out"
+check "every page of comments is read" 'grep -q -- "--paginate" "$H/comments.json.args"' "$(cat "$H/comments.json.args")"
+head -c 5000000 /dev/zero | tr "\\0" x > "$H/huge.txt"
+jq --rawfile huge "$H/huge.txt" '[.[0] + {body: ("Operator: " + $huge), user: {login: "stranger"}, author_association: "NONE"}] + .' "$H/comments.json" > "$H/huge.json"
+out=$(notes COMMENTS="$H/huge.json")
+check "a huge comment does not keep the rulings after it from a tick" '[[ "$out" == *"@helper-b: Operator: use the slow set."* ]]' "${out:0:300}"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
