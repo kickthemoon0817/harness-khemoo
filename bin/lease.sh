@@ -80,6 +80,17 @@
 #       named holders (anything but a `claude -p` tick) and holds of an issue the operator named
 #       (`prioritize`) keep no clock and are never taken. IDLE_HOLD_S=0 turns the rule off.
 #       bin/card_dispatch.sh reads status every minute, so the samples are never far apart.
+#   Cost-read hosts: while another harness tick is live, at most COST_READ_HOSTS_MAX (1) hosts are
+#       held whole for cost reads (`--all --render`, and `--all-remote` without --no-cost), so a host
+#       stays free for compiles and identity runs. A cost-read acquire that would hold one more host,
+#       beside the hosts already held whole (by any issue, its own included), prints
+#       BUSY cost-read host limit <issue>@<host> ... (exit 1) and waits as a refused whole-card
+#       acquire does: `--all` drops its reservations and records its whole-card wait, which counts
+#       toward priority as usual; `--all-remote` leaves its cost-wait marker. A tick is live while its
+#       claim (bin/claim.sh) names a live `claude -p` pid (bin/tick-pid.sh); the asking issue's own
+#       claims do not count. With no other tick live the limit does not apply, so one issue may hold
+#       both hosts. A holder renewing the card it already holds is never refused, and a --no-cost hold
+#       is no cost read. 0 or empty turns the limit off; status names it while it is on.
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
@@ -531,6 +542,42 @@ note_taken() {
   mkdir -p "${LEASE_LOG%/*}" 2>/dev/null
   echo "$(date -u +%FT%TZ) $msg [$2] -> [$(cat "$(slot_file "$1")" 2>/dev/null)] by ${reclaim_by:-lease.sh}" >> "$LEASE_LOG" 2>/dev/null
 }
+# The cost-read limit (see the header). 0 or empty turns it off, so an empty value is kept.
+: "${COST_READ_HOSTS_MAX=1}"
+cost_read_limit_on() { [[ "${COST_READ_HOSTS_MAX:-}" =~ ^[0-9]+$ ]] && [ "$COST_READ_HOSTS_MAX" -gt 0 ]; }
+# "<issue> <pid> <host>" for each host a live cost read holds whole; host is `local` for this
+# host's card, else the remote card's user@host.
+cost_read_holds() {
+  local s line hi hp
+  for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
+    line=$(cat "$(slot_file "$s")" 2>/dev/null) || continue
+    case "$line" in *" no-cost"*) continue ;; *" exclusive"|*" held-for-all"|*" remote-all"*) ;; *) continue ;; esac
+    read -r hi hp _ <<< "$line"
+    kill -0 "$hp" 2>/dev/null && echo "$hi $hp $(slot_daemon "$s")"
+  done | sort -u
+}
+# "<issue> <pid>" for each claim whose pid is a live tick.
+live_tick_claims() {
+  local f ci cp
+  for f in "$LOCKS"/claim.[0-9]*; do
+    [ -s "$f" ] || continue
+    read -r ci cp _ < "$f"
+    kill -0 "$cp" 2>/dev/null && holder_is_tick "$cp" && echo "$ci $cp"
+  done
+}
+# Prints "<issue>@<host> ..." for the hosts held whole besides host $1 and returns 0 when this
+# issue's cost read on $1 would pass the limit; returns 1 when it may go ahead.
+cost_read_limit_hit() {
+  local target=$1 hi hp hh n=0 who=""
+  cost_read_limit_on || return 1
+  while read -r hi hp hh; do
+    [ -n "$hh" ] && [ "$hh" != "$target" ] || continue
+    n=$(( n + 1 )); who+="${who:+ }$hi@$hh"
+  done < <(cost_read_holds)
+  [ "$n" -ge "$COST_READ_HOSTS_MAX" ] || return 1
+  live_tick_claims | awk -v i="$issue" -v p="$pid" '$1 != i && $2 != p { found = 1 } END { exit !found }' || return 1
+  echo "$who"
+}
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
@@ -614,7 +661,7 @@ case "${1:-}" in
       # An issue the operator named ahead of this one (`lease.sh prioritize`) whose cost read is
       # waiting (a cost-wait marker its runner refreshed) gets the first free card it can use; a
       # fresh grant to this issue leaves that card to it and may take another.
-      prio=""; prio_want=""; reserved=""
+      prio=""; prio_want=""; reserved=""; limited=""
       if [ -s "$OPERATOR_FILE" ]; then
         for n in $(cat "$OPERATOR_FILE"); do
           [ "$n" = "$issue" ] && break
@@ -642,6 +689,7 @@ case "${1:-}" in
           fi
           # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
           [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
+          if [ -z "$no_cost" ] && who=$(cost_read_limit_hit "$(remote_host "$i")"); then limited=$who; continue; fi
           REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
           grant_remote_all "$i" "$(remote_host "$i")"
         done
@@ -649,6 +697,7 @@ case "${1:-}" in
       # A cost read left waiting names the card it waits for (or any), so bin/build_host.sh keeps
       # compiles off that card until it is quiet. The runner asks every 30 s and refreshes it.
       [ -n "$no_cost" ] || echo "${LEASE_WANT_HOST:-any} $(date +%s)" > "$LOCKS/cost-wait.$issue"
+      [ -n "$limited" ] && { echo "BUSY cost-read host limit $limited"; exit 1; }
       [ -n "$reserved" ] && { echo "BUSY the free card $(remote_host "$reserved") is left to issue $prio, which has priority"; exit 1; }
       echo "BUSY no remote card is free, alone and quiet"; exit 1
     fi
@@ -683,6 +732,18 @@ case "${1:-}" in
         fi
         note_wait "$issue"
         echo "YIELDING to operator-priority issue $op"; exit 1
+      fi
+      # A cost read on one more host while another tick is live waits in the whole-card line; a
+      # holder renewing the card it holds goes on.
+      held_whole=""
+      for s in $(card_slots); do
+        f=$(slot_file $s)
+        [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" exclusive" ]] && held_whole=1
+      done
+      if [ -z "$held_whole" ] && who=$(cost_read_limit_hit "$(local_off && echo "$REMOTE_CARD_HOST" || echo local)"); then
+        drop_whole_card
+        note_wait "$issue"
+        echo "BUSY cost-read host limit $who"; exit 1
       fi
       mine=0; primary=""; others=""; takes=""
       for s in $(card_slots); do
@@ -933,6 +994,10 @@ case "${1:-}" in
       device_holder_live && echo "device HELD $(cat "$DEVICE_FILE") (alive)" || echo "device ORPHAN $(cat "$DEVICE_FILE") (pid dead)"
     fi
     [ -s "$OPERATOR_FILE" ] && echo "operator priority: $(cat "$OPERATOR_FILE")"
+    if cost_read_limit_on; then
+      whole=$(cost_read_holds | awk '{ printf "%s%s@%s", (NR > 1 ? " " : ""), $1, $3 }')
+      echo "cost-read host limit: $COST_READ_HOSTS_MAX host(s) held whole while another tick is live (held: ${whole:-none}; live ticks: $(live_tick_claims | awk '{ print $2 }' | sort -u | grep -c .))"
+    fi
     now=$(date -u +%s); card_first=$(priority_issue); line_first=$(slot_first_issue)
     for m in "$LOCKS"/all-wait.* "$LOCKS"/slot-wait.*; do
       [ -s "$m" ] || continue
