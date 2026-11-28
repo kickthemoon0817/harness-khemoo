@@ -29,6 +29,48 @@ const AGENTS: [(&str, &str); 3] = [
     ("codex", "CODEX_HOME"),
     ("gemini", "GEMINI_CLI_HOME"),
 ];
+/// The variables other than its folder through which each agent's CLI signs in: a key, a token, a
+/// cloud provider's credentials or the switch to one. A tick, fetch or sign-in check on an account
+/// runs without them, so the default account's never signs in on another's behalf. Read from
+/// Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3.
+const CREDENTIALS: [(&str, &[&str]); 3] = [
+    (
+        "claude",
+        &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+            "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ],
+    ),
+    (
+        "codex",
+        &[
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+        ],
+    ),
+    (
+        "gemini",
+        &[
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+            "GOOGLE_CLOUD_ACCESS_TOKEN",
+            "GEMINI_DEFAULT_AUTH_TYPE",
+        ],
+    ),
+];
 /// How long a sign-in check holds: the launcher fires every couple of minutes, and no firing should
 /// wait on the agents' CLIs.
 pub const STATUS_TTL_S: u64 = 300;
@@ -57,8 +99,9 @@ pub struct Args {
 
 #[derive(clap::Subcommand)]
 enum Sub {
-    /// Print `VARIABLE=folder` for each agent@account, the setting its tick runs with; exit 1, naming
-    /// each, when any folder is missing or refused.
+    /// Print, one a line, the env(1) arguments a tick on each agent@account runs with: an `--unset`
+    /// of each credential variable of its agent, then `VARIABLE=folder`; exit 1, naming each, when
+    /// any folder is missing or refused.
     Env {
         #[arg(required = true)]
         accounts: Vec<String>,
@@ -87,6 +130,14 @@ pub fn variable(agent: &str) -> Option<&'static str> {
         .map(|(_, variable)| *variable)
 }
 
+/// The variables a tick, fetch or check on one of `agent`'s accounts runs without.
+pub fn credentials(agent: &str) -> &'static [&'static str] {
+    CREDENTIALS
+        .iter()
+        .find(|(name, _)| *name == agent)
+        .map_or(&[], |(_, names)| names)
+}
+
 /// An account name: 1 to 32 of a-z, 0-9 and `-`, starting with a letter or a digit.
 pub fn valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -112,9 +163,10 @@ pub struct Account {
 
 impl Account {
     /// `<AGENT_ACCOUNTS_DIR>/<agent>/<agent>-<name>`, refused unless both folders below the root
-    /// are real directories, not symlinks, and all three are this user's and not writable by every
-    /// user: whoever could write there would choose the login a tick runs with. The root itself may
-    /// be a symlink.
+    /// are real directories, not symlinks, and all three are this user's and writable by no one
+    /// else: whoever could write there would choose the login a tick runs with. On macOS every user
+    /// shares the `staff` group, so a group-writable folder is as open as a world-writable one. The
+    /// root itself may be a symlink.
     pub fn resolve(env: Lookup, agent: &str, name: &str) -> Result<Self, String> {
         if variable(agent).is_none() {
             return Err(format!(
@@ -177,8 +229,11 @@ fn private(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if meta.uid() != rustix::process::geteuid().as_raw() {
         return Err(format!("{} is another user's", path.display()));
     }
-    if meta.mode() & 0o002 != 0 {
-        return Err(format!("{} is writable by every user", path.display()));
+    if meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{0} is writable by its group or every user: chmod go-w {0}",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -226,6 +281,9 @@ pub struct SignIn {
     /// When the sign-in ends, an ISO time, where the CLI says.
     pub expires_at: Option<String>,
     pub checked_at: u64,
+    /// Why the state is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 fn method_word(text: &str) -> Option<String> {
@@ -256,16 +314,20 @@ fn parse_claude(stdout: &str) -> (SignState, Option<String>, Option<String>) {
     let expires_at = doc
         .get("loginExpiresAt")
         .and_then(Value::as_str)
-        .filter(|at| {
-            at.len() <= 40
-                && at
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || b"-:.TZ+".contains(&byte))
-                && epoch_of(at).is_some()
-        })
-        .map(str::to_owned);
+        .and_then(end_time);
     (state, method, expires_at)
 }
+
+fn end_time(at: &str) -> Option<String> {
+    (at.len() <= 40
+        && at
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || b"-:.TZ+".contains(&byte))
+        && epoch_of(at).is_some())
+    .then(|| at.to_owned())
+}
+
+const UNREADABLE: &str = "unreadable answer";
 
 /// `codex login status`, which answers on stderr: `Logged in using ChatGPT`, `Logged in using an
 /// API key - <the key, masked>` or `Not logged in`. Only the method is kept, never the rest of the
@@ -289,8 +351,9 @@ fn parse_codex(output: &str) -> (SignState, Option<String>) {
     (SignState::Unknown, None)
 }
 
-/// Asks the account's CLI, with its variable set to the folder, whether it is signed in. Gemini's CLI
-/// has no command that answers without starting a session, so its accounts read as unknown.
+/// Asks the account's CLI, with its variable set to the folder and its agent's credential variables
+/// unset, whether it is signed in. Gemini's CLI has no command that answers without starting a
+/// session, so its accounts read as unknown.
 fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
     let bin = env(&format!("AGENT_BIN_{}", account.agent)).unwrap_or_else(|| account.agent.clone());
     let words: &[&str] = match account.agent.as_str() {
@@ -303,17 +366,16 @@ fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
         method: None,
         expires_at: None,
         checked_at: now,
+        reason: Some(UNREADABLE.to_owned()),
     };
     if words.is_empty() {
+        sign_in.reason = Some(format!("{}'s CLI has no sign-in check", account.agent));
         return sign_in;
     }
     let argv: Vec<String> = std::iter::once(bin)
         .chain(words.iter().map(|word| (*word).to_owned()))
         .collect();
-    let environment = Environment::Inherit(vec![(
-        account.variable().to_owned(),
-        account.dir.display().to_string(),
-    )]);
+    let environment = Environment::Exactly(probe_env(std::env::vars(), account));
     let Ok(output) = command::run(&argv, environment, STATUS_TIMEOUT, STATUS_OUTPUT) else {
         return sign_in;
     };
@@ -323,7 +385,25 @@ fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
         (sign_in.state, sign_in.method) =
             parse_codex(&format!("{}\n{}", output.stdout, output.stderr));
     }
+    if sign_in.state != SignState::Unknown {
+        sign_in.reason = None;
+    }
     sign_in
+}
+
+/// `inherited` without the account's agent's credential variables, its folder variable naming it.
+fn probe_env(
+    inherited: impl Iterator<Item = (String, String)>,
+    account: &Account,
+) -> Vec<(String, String)> {
+    let unset = credentials(&account.agent);
+    inherited
+        .filter(|(name, _)| !unset.contains(&name.as_str()) && name != account.variable())
+        .chain(std::iter::once((
+            account.variable().to_owned(),
+            account.dir.display().to_string(),
+        )))
+        .collect()
 }
 
 fn status_dir(state: &Path) -> PathBuf {
@@ -339,25 +419,59 @@ struct Kept {
     logged: Option<SignState>,
 }
 
+/// The kept check, its fields held to what a check would keep, as the file is read back from disk.
 fn kept(state: &Path, key: &str) -> Option<Kept> {
-    files::read_text_limited(&status_dir(state).join(format!("{key}.json")), STATUS_FILE)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+    let mut kept: Kept =
+        files::read_text_limited(&status_dir(state).join(format!("{key}.json")), STATUS_FILE)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())?;
+    let sign_in = &mut kept.sign_in;
+    sign_in.method = sign_in.method.as_deref().and_then(method_word);
+    sign_in.expires_at = sign_in.expires_at.as_deref().and_then(end_time);
+    sign_in.reason = sign_in
+        .reason
+        .as_deref()
+        .filter(|reason| {
+            reason.len() <= 64
+                && reason
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " '._-".contains(c))
+        })
+        .map(str::to_owned);
+    Some(kept)
+}
+
+/// The accounts' lock, held while the kept files are checked and written: two launchers' firings
+/// must neither ask a CLI twice nor log one state twice.
+pub struct Lock {
+    _held: std::fs::File,
+}
+
+/// Takes the lock, or `None` while another process holds it.
+pub fn lock(state: &Path) -> Option<Lock> {
+    let dir = status_dir(state);
+    files::prepare_private_dir(&dir).ok()?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        .open(dir.join("lock"))
+        .ok()?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).ok()?;
+    Some(Lock { _held: file })
 }
 
 /// Whether `what` holds of the account `key` now and did not at the last call, so the launcher
 /// logs a lasting state once: `<state>/accounts/<key>.<what>` stands while it holds.
-pub fn first_time(state: &Path, key: &str, what: &str, holds: bool) -> bool {
-    let dir = status_dir(state);
-    let mark = dir.join(format!("{key}.{what}"));
+pub fn first_time(_lock: &Lock, state: &Path, key: &str, what: &str, holds: bool) -> bool {
+    let mark = status_dir(state).join(format!("{key}.{what}"));
     if !holds {
         let _ = std::fs::remove_file(&mark);
         return false;
     }
-    if mark.exists() || files::prepare_private_dir(&dir).is_err() {
-        return false;
-    }
-    files::write_private(&mark, "").is_ok()
+    !mark.exists() && files::write_private(&mark, "").is_ok()
 }
 
 /// The last check of the account `key`, when one was made.
@@ -365,12 +479,14 @@ pub fn cached(state: &Path, key: &str) -> Option<SignIn> {
     kept(state, key).map(|kept| kept.sign_in)
 }
 
-/// Checks again each account whose last check is older than [`STATUS_TTL_S`], unless another
-/// process is checking now. An answer this cannot read keeps the state an earlier check found: a
-/// CLI that hangs once must not let a signed-out account run. With `log`, as the launcher's refresh
-/// asks, returns a line for each account signed out since the launcher last logged it, and for each
-/// signed in again, so a sign-out is logged once whichever check found it.
+/// Checks again each account whose last check is older than [`STATUS_TTL_S`], or dated ahead of
+/// this host's clock. An answer this cannot read leaves a signed-out account signed out, since a CLI
+/// that hangs once must not let it run, and a signed-in one unknown, since it was not seen signed
+/// in. With `log`, as the launcher's refresh asks, returns a line for each account signed out since
+/// the launcher last logged it, and for each signed in again, so a sign-out is logged once whichever
+/// check found it.
 pub fn refresh(
+    _lock: &Lock,
     env: Lookup,
     state: &Path,
     accounts: &[Account],
@@ -378,34 +494,19 @@ pub fn refresh(
     log: bool,
 ) -> Vec<String> {
     let dir = status_dir(state);
-    if accounts.is_empty() || files::prepare_private_dir(&dir).is_err() {
-        return Vec::new();
-    }
-    let Ok(lock) = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
-        .open(dir.join("lock"))
-    else {
-        return Vec::new();
-    };
-    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
-        return Vec::new();
-    }
     let mut lines = Vec::new();
     for account in accounts {
         let key = account.key();
         let before = kept(state, &key);
-        let stale = before
-            .as_ref()
-            .is_none_or(|last| now.saturating_sub(last.sign_in.checked_at) >= STATUS_TTL_S);
+        let stale = before.as_ref().is_none_or(|last| {
+            let at = last.sign_in.checked_at;
+            at > now || now - at >= STATUS_TTL_S
+        });
         let mut after = match before {
             Some(last) if !stale => last,
             Some(last) => {
                 let mut found = probe(env, account, now);
-                if found.state == SignState::Unknown && last.sign_in.state != SignState::Unknown {
+                if found.state == SignState::Unknown && last.sign_in.state == SignState::SignedOut {
                     found = SignIn {
                         checked_at: now,
                         ..last.sign_in
@@ -452,7 +553,12 @@ fn env_command(env: Lookup, keys: &[String]) -> ExitCode {
             Err(message) => Err(message),
         };
         match resolved {
-            Ok(account) => println!("{}={}", account.variable(), account.dir.display()),
+            Ok(account) => {
+                for name in credentials(&account.agent) {
+                    println!("--unset={name}");
+                }
+                println!("{}={}", account.variable(), account.dir.display());
+            }
             Err(message) => {
                 eprintln!("{key}: {message}");
                 failed = true;
@@ -490,7 +596,10 @@ pub fn describe(sign_in: Option<&SignIn>, now: u64) -> String {
         .unwrap_or_default();
     match sign_in.state {
         SignState::SignedOut => "signed out".to_owned(),
-        SignState::Unknown => "sign-in unknown".to_owned(),
+        SignState::Unknown => match &sign_in.reason {
+            Some(reason) => format!("sign-in unknown ({reason})"),
+            None => "sign-in unknown".to_owned(),
+        },
         SignState::SignedIn => match &sign_in.expires_at {
             Some(at) => match days_left(at, now) {
                 Some(days) if days < 0 => format!("signed in{how}, ended {at}"),
@@ -519,7 +628,9 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
             .iter()
             .filter_map(|(agent, name)| Account::resolve(env, agent, name).ok())
             .collect();
-        refresh(env, &state, &accounts, now, false);
+        if let Some(lock) = lock(&state) {
+            refresh(&lock, env, &state, &accounts, now, false);
+        }
     }
     let usages = usages(env)?;
     if json {
@@ -652,10 +763,23 @@ mod tests {
         let error = Account::resolve(&env, "claude", "link").unwrap_err();
         assert!(error.ends_with("is a symlink"), "{error}");
         let error = Account::resolve(&env, "claude", "open").unwrap_err();
-        assert!(error.ends_with("writable by every user"), "{error}");
+        let open = root.join("claude/claude-open");
+        assert_eq!(
+            error,
+            format!(
+                "{0} is writable by its group or every user: chmod go-w {0}",
+                open.display()
+            )
+        );
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let error = Account::resolve(&env, "claude", "open").unwrap_err();
+        assert!(
+            error.contains("writable by its group"),
+            "a group-writable folder is refused too: {error}"
+        );
         let error = Account::resolve(&env, "codex", "work").unwrap_err();
         assert!(error.contains("/codex is writable"), "{error}");
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o770)).unwrap();
         let error = Account::resolve(&env, "claude", "open").unwrap_err();
         assert!(
             error.starts_with(&format!("{} is writable", root.display())),
@@ -750,7 +874,8 @@ mod tests {
     }
 
     fn refresh_logged(env: Lookup, state: &Path, account: &Account, now: u64) -> Vec<String> {
-        refresh(env, state, std::slice::from_ref(account), now, true)
+        let lock = lock(state).unwrap();
+        refresh(&lock, env, state, std::slice::from_ref(account), now, true)
     }
 
     #[test]
@@ -809,15 +934,30 @@ mod tests {
                 state: SignState::SignedOut,
                 method: None,
                 expires_at: None,
-                checked_at: 1_800
+                checked_at: 1_800,
+                reason: None,
             },
-            "an answer this cannot read keeps the state found before"
+            "an answer this cannot read leaves a signed-out account signed out"
         );
         std::fs::write(&answer, "Logged in using ChatGPT\n").unwrap();
+        let lock = lock(&state).unwrap();
         assert!(
-            refresh(&env, &state, std::slice::from_ref(&account), 2_200, false).is_empty(),
+            lock_again(&state).is_none(),
+            "a second process cannot check meanwhile"
+        );
+        assert!(
+            refresh(
+                &lock,
+                &env,
+                &state,
+                std::slice::from_ref(&account),
+                2_200,
+                false
+            )
+            .is_empty(),
             "a check that does not log leaves the line to the launcher"
         );
+        drop(lock);
         let back = refresh_logged(&env, &state, &account, 2_300);
         assert_eq!(back, ["codex@work is signed in again"]);
         let file = std::fs::read_to_string(state.join("accounts/codex@work.json")).unwrap();
@@ -825,7 +965,83 @@ mod tests {
             serde_json::from_str::<Value>(&file).unwrap(),
             serde_json::json!({"state": "signed_in", "method": "chatgpt", "expires_at": null, "checked_at": 2200, "logged": "signed_in"})
         );
+        std::fs::write(&answer, "something else entirely\n").unwrap();
+        refresh_logged(&env, &state, &account, 2_600);
+        let unread = cached(&state, "codex@work").unwrap();
+        assert_eq!(
+            (unread.state, unread.reason.as_deref()),
+            (SignState::Unknown, Some("unreadable answer")),
+            "a signed-in account not seen signed in is not shown signed in"
+        );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Another process's attempt at the lock: a new descriptor of the same file.
+    fn lock_again(state: &Path) -> Option<Lock> {
+        lock(state)
+    }
+
+    #[test]
+    fn a_kept_check_is_held_to_what_a_check_keeps() {
+        let root = scratch("kept");
+        let state = root.join("state");
+        std::fs::create_dir_all(state.join("accounts")).unwrap();
+        std::fs::write(
+            state.join("accounts/claude@work.json"),
+            r#"{"state": "signed_in", "method": "owner@example.com", "expires_at": "Example Org", "checked_at": 9000000000, "reason": "a\nb"}"#,
+        )
+        .unwrap();
+        let kept = cached(&state, "claude@work").unwrap();
+        assert_eq!(
+            (kept.method, kept.expires_at, kept.reason),
+            (None, None, None)
+        );
+        std::fs::create_dir_all(root.join("accounts/gemini/gemini-a")).unwrap();
+        let env = env_of(&[(
+            "AGENT_ACCOUNTS_DIR",
+            root.join("accounts").to_str().unwrap(),
+        )]);
+        let account = Account::resolve(&env, "gemini", "a").unwrap();
+        std::fs::write(
+            state.join("accounts/gemini@a.json"),
+            r#"{"state": "signed_out", "method": null, "expires_at": null, "checked_at": 9000000000}"#,
+        )
+        .unwrap();
+        refresh_logged(&env, &state, &account, 1_000);
+        assert_eq!(
+            cached(&state, "gemini@a").unwrap().checked_at,
+            1_000,
+            "a check dated ahead of the clock is checked again"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_probe_runs_without_the_agents_credential_variables() {
+        let account = Account {
+            agent: "claude".to_owned(),
+            name: "work".to_owned(),
+            dir: PathBuf::from("/accounts/claude/claude-work"),
+        };
+        let inherited = [
+            ("PATH", "/usr/bin"),
+            ("ANTHROPIC_API_KEY", "sk-ant-default"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "default-token"),
+            ("CLAUDE_CONFIG_DIR", "/home/dev-a/.claude"),
+            ("OPENAI_API_KEY", "kept: another agent's"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        assert_eq!(
+            probe_env(inherited.into_iter(), &account),
+            [
+                ("PATH", "/usr/bin"),
+                ("OPENAI_API_KEY", "kept: another agent's"),
+                ("CLAUDE_CONFIG_DIR", "/accounts/claude/claude-work"),
+            ]
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        );
+        assert!(credentials("codex").contains(&"CODEX_API_KEY"));
+        assert!(credentials("gemini").contains(&"GOOGLE_GENAI_USE_VERTEXAI"));
     }
 
     #[test]
@@ -852,6 +1068,7 @@ mod tests {
             method: Some("claude.ai".to_owned()),
             expires_at: Some(expires.to_owned()),
             checked_at: now,
+            reason: None,
         };
         assert_eq!(
             describe(Some(&at("2026-12-15T00:00:00Z")), now),

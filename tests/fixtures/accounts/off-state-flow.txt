@@ -1,0 +1,80 @@
+--- claude supervisor
+argv: -p --model model-s --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence
+ANTHROPIC_API_KEY=sk-ant-fixture
+--- claude
+argv: -p --model model-l
+lane: This tick runs on model-l, the model lane: claim only an issue labelled `ai:lane`. If none is claimable, print a one-line summary and end.
+HARNESS_TICK=state=H/state slot=1 agent=claude model=model-l kind=lane
+TICK_AGENT=claude
+claude model-l lane
+claude: five_hour=10% weekly=20% stop=88% long_stop=88% ceiling=90%: go on
+--- claude
+argv: -p --model model-a
+lane: This tick runs on model-a: never claim an issue labelled `ai:lane`; those are worked on the model lane.
+HARNESS_TICK=state=H/state slot=1 agent=claude model=model-a kind=work
+TICK_AGENT=claude
+claude model-a work
+claude: five_hour=10% weekly=20% stop=88% long_stop=88% ceiling=90%: go on
+--- claude
+argv: -p --model model-a
+lane: This tick is the merge slot's landing tick: claim only an issue labelled `ai:ready`. If none is claimable, print a one-line summary and end.
+HARNESS_TICK=state=H/state slot=1 agent=claude model=model-a kind=landing
+TICK_AGENT=claude
+claude model-a landing
+claude: five_hour=10% weekly=20% stop=88% long_stop=88% ceiling=90%: go on
+--- check
+harness home:  H
+instance:      H/instance
+config:        H/instance/harness.env
+state:         H/state
+target repo:   H/target
+worktree root: H/worktrees
+repository:    example-org/example-repo
+queue:         H/fakebin/queue
+default agent: claude
+dispatch:      local
+agent claude: H/fakebin/claude -p --model <model> < prompt
+agent codex: H/fakebin/codex exec --model <model> - < prompt
+models:        model-a codex:model-x
+model lane:    model-l for `ai:lane`
+supervisor:    claude:model-s, budget 10 min, at least 86400s apart, at most 86400s
+supervisor:    runs with no tools: H/fakebin/claude -p --model model-s --tools  --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence < prompt
+hook env.sh: none
+hook hold: none
+hook worktree-busy: none
+hook worktree-remove: none
+hold:          not held
+usage:         claude: cap 1 of 1, 0 running, claude-cache:H/usage-cache.json
+usage:           five_hour 10% of 300 min, steps 60 70 80: 1
+usage:           weekly 20% of 10080 min, steps 80 85 88: 1
+usage:         codex: cap 1 of 1, 0 running, codex-sessions:H/home/.codex/sessions
+usage:           primary 30% of 10080 min, steps 80 85 88: 1
+usage:         pool: 1 of 1, room for 1 more
+instance complete
+--- usage
+{"width":1,"pool_cap":1,"room":1,"agents":[{"agent":"claude","source":"claude-cache:H/usage-cache.json","reading":{"state":"fresh"},"taken_ms":N,"windows":[{"name":"five_hour","used_pct":10.0,"window_minutes":300,"resets_at":null,"long":false,"steps":[60,70,80],"cap":1},{"name":"weekly","used_pct":20.0,"window_minutes":10080,"resets_at":null,"long":true,"steps":[80,85,88],"cap":1}],"cap":1,"running":0},{"agent":"codex","source":"codex-sessions:H/home/.codex/sessions","reading":{"state":"fresh"},"taken_ms":N,"windows":[{"name":"primary","used_pct":30.0,"window_minutes":10080,"resets_at":N,"long":true,"steps":[80,85,88],"cap":1}],"cap":1,"running":0}],"cooling":[]}
+--- state
+state/dashboard/flow_state.json
+state/dashboard/local_history.tsv
+state/locks/slot1.lock
+state/locks/supervisor.lock
+state/logs/allocator.log
+state/logs/directive.log
+state/logs/supervisor-TS.log
+state/logs/tick-TS-slot1.log
+state/supervisor/directive-status
+state/supervisor/failures
+state/supervisor/last_end
+state/supervisor/last_exit
+state/supervisor/last_reason
+state/supervisor/last_start
+state/supervisor/next_reset
+state/supervisor/runs.log
+--- logs
+TS claude=1[five_hour:10%,weekly:20%] codex=1[primary:30%] pool=1 room=1 busy=0 claimable=2 -> spawning 1
+TS slot1 chains tick 2 after Ns: claude=1[five_hour:10%,weekly:20%] codex=1[primary:30%] pool=1 room=1 claimable=2 young=0
+[tick.sh] exit=0 duration=Ns agent=claude model=model-l
+[tick.sh] exit=0 duration=Ns agent=claude model=model-a
+[tick.sh] exit=0 duration=Ns agent=claude model=model-a
+[tick.sh] exit=0 duration=Ns agent=claude model=model-s
+exit=0 duration=Ns reason=manual

@@ -250,7 +250,7 @@ pub fn assemble(
             "width": snapshot["usage"]["width"],
             "cooling": snapshot["usage"]["cooling"],
             "cooling_models": snapshot["harness"]["cooling_models"],
-            "agents": snapshot["usage"]["agents"],
+            "agents": usage_agents(&snapshot["usage"]["agents"]),
             "error": snapshot["usage"]["error"],
         },
         "ticks": ticks,
@@ -283,6 +283,67 @@ pub fn assemble(
         doc["accounts"] = accounts(&snapshot["accounts"]);
     }
     doc
+}
+
+/// Each agent's usage as the dashboard weighs it. An account's is held to the fields named here, its
+/// folder's paths taken out of its source and its reading's reason, so the supervisor learns why an
+/// account allows nothing but not where its folder is.
+fn usage_agents(agents: &Value) -> Value {
+    let Some(agents) = agents.as_array() else {
+        return agents.clone();
+    };
+    agents
+        .iter()
+        .map(|agent| {
+            if agent["account"].is_null() {
+                return agent.clone();
+            }
+            let source = agent["source"].as_str().map(|source| {
+                source
+                    .split_once(':')
+                    .map_or(source, |(kind, _)| kind)
+                    .to_owned()
+            });
+            json!({
+                "agent": text(&agent["agent"], LABEL_CHARS),
+                "account": text(&agent["account"], LABEL_CHARS),
+                "source": source,
+                "reading": {
+                    "state": text(&agent["reading"]["state"], LABEL_CHARS),
+                    "detail": agent["reading"]["detail"].as_str().map(|detail| clip(&without_paths(detail), 200)),
+                },
+                "sign_in": {
+                    "state": text(&agent["sign_in"]["state"], LABEL_CHARS),
+                    "method": text(&agent["sign_in"]["method"], LABEL_CHARS),
+                    "expires_at": text(&agent["sign_in"]["expires_at"], LABEL_CHARS),
+                    "reason": text(&agent["sign_in"]["reason"], LABEL_CHARS),
+                },
+                "windows": agent["windows"],
+                "cap": agent["cap"].as_u64(),
+                "running": agent["running"].as_u64(),
+                "cooling": agent["cooling"].as_bool(),
+                "age_s": agent["age_s"],
+            })
+        })
+        .collect()
+}
+
+/// `text` with each word that is an absolute path read as `<path>`.
+fn without_paths(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            if word.starts_with('/') {
+                if word.ends_with(':') {
+                    "<path>:"
+                } else {
+                    "<path>"
+                }
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Each account's sign-in and cap, the fields named here and no other.
@@ -638,6 +699,36 @@ mod tests {
             "health": {"stalls": null, "allocator": [{"text": "20261128T100000Z slot1 claude:opus hit its usage limit; cooling 1800s"}]},
             "machines": [{"kind": "local", "load1": 0.5, "nproc": 8, "mem_used_mb": 1000.0, "mem_total_mb": 8000.0}]
         })
+    }
+
+    #[test]
+    fn an_accounts_usage_keeps_its_named_fields_and_no_folder_path() {
+        let dir = TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        let mut snapshot = snapshot();
+        snapshot["usage"]["agents"] = json!([
+            {"agent": "claude", "cap": 2, "source": "claude-cache:/home/dev-a/.claude/usage-cache.json"},
+            {"agent": "claude", "account": "work", "cap": 0, "running": 0, "cooling": false,
+             "source": "claude-cache:/home/dev-a/agents/claude/claude-work/usage-cache.json",
+             "reading": {"state": "unreadable", "detail": "/home/dev-a/agents/claude/claude-work/usage-cache.json: No such file"},
+             "sign_in": {"state": "signed_in", "method": "claude.ai", "expires_at": null, "checked_at": 1, "email": "someone@example.com"},
+             "windows": [], "taken_ms": 5, "email": "someone@example.com"}
+        ]);
+        let doc = assemble(&local(snapshot), &paths, &|_| None, 1_800_000_000);
+        let agents = &doc["usage"]["agents"];
+        assert_eq!(
+            agents[0]["source"], "claude-cache:/home/dev-a/.claude/usage-cache.json",
+            "a seat without an account is as it was"
+        );
+        assert_eq!(
+            agents[1],
+            json!({"agent": "claude", "account": "work", "source": "claude-cache",
+                   "reading": {"state": "unreadable", "detail": "<path>: No such file"},
+                   "sign_in": {"state": "signed_in", "method": "claude.ai", "expires_at": null, "reason": null},
+                   "windows": [], "cap": 0, "running": 0, "cooling": false, "age_s": null})
+        );
     }
 
     #[test]

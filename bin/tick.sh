@@ -170,8 +170,10 @@ accounts_export() {
     export AGENT_ACCOUNTS_DIR
     for v in $(compgen -v AGENT_BIN_); do export "${v?}"; done
 }
-# Prints VARIABLE=folder, what a tick on each agent@account of $@ runs with; fails, naming each
-# refused account on stderr, when a folder is missing, a symlink or writable by every user.
+# Prints the env(1) arguments a tick on each agent@account of $@ runs with, one a line: an --unset of
+# each of its agent's credential variables, so the default account's key never signs it in, then
+# VARIABLE=folder. Fails, naming each refused account on stderr, when a folder is missing, a symlink
+# or writable by anyone else.
 account_env() {
     ( accounts_export; exec "$HARNESS_BIN" accounts env "$@" )
 }
@@ -417,6 +419,10 @@ instance_missing() {
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
+    # An entry naming an account must name a model too: `claude@work` alone reads as a model.
+    for s in $(model_list) $(lane_on && printf '%s' "$LANE_MODEL") $([ -n "$supervisor" ] && printf '%s' "${SUPERVISOR_MODEL:-}"); do
+        [[ "$s" == *@* && "$s" != *:* ]] && echo "$HARNESS_ENV_FILE: '$s' names an account but no model: write agent@account:model"
+    done
     # Each account named must be a folder a tick can run with; a fleet device keeps its own, and the
     # supervisor always runs here.
     accounts=$(list_seats | grep '@')
@@ -431,7 +437,7 @@ instance_missing() {
         [[ "$s" == *@* ]] && accounts+="${accounts:+$'\n'}$s"
     fi
     if [ -n "$accounts" ]; then
-        # shellcheck disable=SC2086
+        # shellcheck disable=SC2046
         account_env $(printf '%s\n' "$accounts" | awk '!seen[$0]++') 2>&1 >/dev/null | sed 's/^/an account folder for /'
     fi
     if [ -n "$supervisor" ]; then
@@ -907,11 +913,11 @@ if [ "${1:-}" = "runner" ]; then
             seat=${entry%%:*}; agent=${seat%%@*}; model=${entry#*:}
             # A tick on an account runs with the agent's variable naming its folder; an entry whose
             # folder is refused is passed over, as one on its usage limit is.
-            account_var=""
+            account_args=()
             if [ "$seat" != "$agent" ]; then
                 if [ -n "$fleet" ]; then why="a FLEET_DISPATCH=1 tick runs on the device's own account"
-                elif account_var=$(account_env "$seat" 2>&1); then why=""
-                else why=$account_var; fi
+                elif out=$(account_env "$seat" 2>&1); then why=""; mapfile -t account_args <<<"$out"
+                else why=$out; fi
                 if [ -n "$why" ]; then
                     log_changed "$entry not run: $why"
                     tried="$tried $entry"
@@ -945,7 +951,7 @@ if [ "${1:-}" = "runner" ]; then
             # SIGQUIT ignored, which every tool would inherit, and the runner, started as one
             # itself, cannot reset them (bash keeps a signal ignored on entry ignored); env can, so
             # `kill -INT` and `timeout -s INT` reach the agent's tools.
-            setsid env --default-signal=INT,QUIT HARNESS_TICK="$marker" ${account_var:+"$account_var"} "${argv[@]}" \
+            setsid env --default-signal=INT,QUIT ${account_args[@]+"${account_args[@]}"} HARNESS_TICK="$marker" "${argv[@]}" \
                 < <(compose_prompt "$lane") >>"$log" 2>&1 &
             tick_pid=$!
             record_tick "$tick_pid" "$seat" "$model" "$kind"
@@ -1012,9 +1018,9 @@ if [ "${1:-}" = supervisor ]; then
         log_changed "supervisor not run: $refusal"
         exit 0
     fi
-    account_var=""
-    if [ "$seat" != "$agent" ] && ! account_var=$(account_env "$seat" 2>&1); then
-        log_changed "supervisor not run: $account_var"
+    sup_account=""
+    if [ "$seat" != "$agent" ] && ! sup_account=$(account_env "$seat" 2>&1); then
+        log_changed "supervisor not run: $sup_account"
         exit 0
     fi
     log="$LOGS/supervisor-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -1023,11 +1029,13 @@ if [ "${1:-}" = supervisor ]; then
     harness_supervisor supervisor begin --reason "${2:-}" >/dev/null 2>>"$log"
     run_s=$(date +%s)
     sup_env=("HOME=$HOME" "PATH=$PATH")
+    # On an account, its folder is the only way it signs in: the variables `harness accounts env`
+    # unsets or sets are not taken from here.
     for k in USER LOGNAME LANG LC_ALL TMPDIR TERM ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR OPENAI_API_KEY CODEX_HOME XDG_CONFIG_HOME; do
-        [ "$k" = "${account_var%%=*}" ] && continue
+        [ -n "$sup_account" ] && grep -qxE -- "(--unset=)?$k(=.*)?" <<<"$sup_account" && continue
         [ -n "${!k:-}" ] && sup_env+=("$k=${!k}")
     done
-    [ -n "$account_var" ] && sup_env+=("$account_var")
+    [ -n "$sup_account" ] && sup_env+=("$(grep -v '^--unset=' <<<"$sup_account")")
     # In a session and process group of its own, as a tick runs; the lock stays this shell's alone.
     ( exec {sfd}>&-; cd "$work" && exec setsid env -i --default-signal=INT,QUIT "${sup_env[@]}" \
         timeout -k 30 "$(( SUPERVISOR_BUDGET_MIN * 60 ))" "${argv[@]}" ) \
@@ -1084,6 +1092,13 @@ if [ -n "$supervisor" ]; then
         done
     elif [ "$rc" -ne 1 ]; then
         log_changed "ERROR harness supervisor due failed ($(tail -n 1 "$err" | cut -c1-200)); no supervisor tick"
+    fi
+    # On an account, held back for want of a reading, it would stay silent for ever: said once, until
+    # it clears.
+    if [ "$rc" -eq 1 ] && [[ "$due" == *"@"*" has no fresh usage reading"* ]]; then
+        [ -e "$SUP/no-reading" ] || { touch "$SUP/no-reading"; echo "$(date -u +%Y%m%dT%H%M%SZ) supervisor $due" >>"$LOGS/allocator.log"; }
+    else
+        rm -f "$SUP/no-reading"
     fi
     rm -f "$err"
     directive_read

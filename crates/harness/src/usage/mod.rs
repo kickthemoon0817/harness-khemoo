@@ -269,6 +269,12 @@ impl Entry {
     /// Parses `agent:model`, `agent@account:model`, or a bare `model` run by `default_agent`. The
     /// entry names its cooldown file, so the model holds no `/` and no control character.
     pub fn parse(text: &str, default_agent: &str) -> Result<Self, String> {
+        // `claude@work` alone would otherwise run model `claude@work` on the default account.
+        if !text.contains(':') && text.contains('@') {
+            return Err(format!(
+                "'{text}' names an account but no model: write agent@account:model"
+            ));
+        }
         let (key, model) = text.split_once(':').unwrap_or((default_agent, text));
         let (agent, account) = split_key(key)
             .map_err(|message| message.replacen(&format!("'{key}'"), &format!("'{text}'"), 1))?;
@@ -323,6 +329,8 @@ pub struct AgentSource {
     pub account: Option<Account>,
     pub source: Source,
     pub fetch: Option<PathBuf>,
+    /// Why this account's reading cannot be trusted, which makes it allow nothing.
+    pub refusal: Option<String>,
 }
 
 impl AgentSource {
@@ -358,64 +366,58 @@ impl AgentSource {
             account: None,
             source,
             fetch: agent_fetch(env, agent),
+            refusal: None,
         })
     }
 
     /// An account's: `USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>`, a `-` of
-    /// the name read as `_`. Without its own source claude reads `<folder>/usage-cache.json` and codex
-    /// `<folder>/sessions`, and any other agent takes `USAGE_SOURCE_<agent>`. A claude account runs
-    /// only its own fetch command: claude's would read the default account's login and fill this
-    /// account's cache with another account's usage. Any other agent's account falls back to the
-    /// agent's command, run with the account's folder ([`AgentSource::fetch_env`]).
+    /// the name read as `_`, and never the agent's own keys: two seats reading one file would count
+    /// one account's usage twice, and the agent's fetch reads the default account's login. Without
+    /// its own source claude reads `<folder>/usage-cache.json` and codex `<folder>/sessions`; an
+    /// agent with no such folder default is refused while its own source names a reading, and
+    /// unmetered while that is `none`. A Claude cache with no fetch of its own is refused too, since
+    /// nothing of this account's would write it.
     pub fn for_account(env: Lookup, account: Account) -> Result<Self, String> {
         let agent = account.agent.clone();
         let own = format!("{agent}_{}", crate::accounts::key_name(&account.name));
         let sessions = account.dir.join("sessions");
-        let parse = |key: &str, text: &str| {
-            Source::parse(text, || Some(sessions.clone()))
-                .map_err(|message| format!("{key}: {message}"))
-        };
         let own_key = format!("USAGE_SOURCE_{own}");
-        let agent_key = format!("USAGE_SOURCE_{agent}");
+        let fetch_key = format!("USAGE_FETCH_{own}");
+        let mut refusal = None;
         let source = match (env(&own_key), agent.as_str()) {
-            (Some(text), _) => parse(&own_key, &text)?,
+            (Some(text), _) => Source::parse(&text, || Some(sessions.clone()))
+                .map_err(|message| format!("{own_key}: {message}"))?,
             (None, "claude") => Source::ClaudeCache(account.dir.join("usage-cache.json")),
             (None, "codex") => Source::CodexSessions(sessions.clone()),
-            (None, _) => match env(&agent_key) {
-                Some(text) => parse(&agent_key, &text)?,
+            (None, _) => match env(&format!("USAGE_SOURCE_{agent}")).as_deref() {
+                Some("none") => Source::None,
+                Some(_) => {
+                    refusal = Some(format!(
+                        "an account never reads USAGE_SOURCE_{agent}: set {own_key}"
+                    ));
+                    Source::Unset
+                }
                 None => Source::Unset,
             },
         };
-        let fetch = match env(&format!("USAGE_FETCH_{own}")) {
-            Some(path) => Some(PathBuf::from(path)),
-            None if agent == "claude" => None,
-            None => agent_fetch(env, &agent),
-        };
+        let fetch = env(&fetch_key).map(PathBuf::from);
+        if matches!(source, Source::ClaudeCache(_)) && fetch.is_none() {
+            refusal = Some(format!("no usage fetch for this account: set {fetch_key}"));
+        }
         Ok(Self {
             agent,
             account: Some(account),
             source,
             fetch,
+            refusal,
         })
     }
 
-    /// A Claude cache of an account that has no fetch command of its own: nothing would refresh it
-    /// but a command that reads another account's login, so it is read as no reading at all.
-    pub fn missing_fetch(&self) -> Option<String> {
-        let account = self.account.as_ref()?;
-        (matches!(self.source, Source::ClaudeCache(_)) && self.fetch.is_none()).then(|| {
-            format!(
-                "no usage fetch for this account: set USAGE_FETCH_{}_{}",
-                account.agent,
-                crate::accounts::key_name(&account.name)
-            )
-        })
-    }
-
-    /// What the fetch command runs with for an account: the agent's variable set to its folder, and
-    /// for a Claude cache `USAGE_CACHE` naming it and `USAGE_CREDENTIALS_FILE` the folder's
-    /// `.credentials.json` when there is one. The default account's credentials file, which the
-    /// environment may name, never reaches another account's fetch.
+    /// What the fetch command runs with for an account: the agent's variable set to its folder,
+    /// `USAGE_CACHE` naming the account's own source file (unset when its source is no file) and
+    /// `USAGE_CREDENTIALS_FILE` the folder's `.credentials.json` when there is one. Nothing of the
+    /// default account's reaches it: not its cache, its credentials file or its agent's credential
+    /// variables.
     pub fn fetch_env(&self) -> (Vec<(String, String)>, Vec<&'static str>) {
         let Some(account) = &self.account else {
             return (Vec::new(), Vec::new());
@@ -424,9 +426,12 @@ impl AgentSource {
             account.variable().to_owned(),
             account.dir.display().to_string(),
         )];
-        let mut remove = Vec::new();
-        if let Source::ClaudeCache(path) = &self.source {
-            set.push(("USAGE_CACHE".to_owned(), path.display().to_string()));
+        let mut remove = crate::accounts::credentials(&account.agent).to_vec();
+        match &self.source {
+            Source::ClaudeCache(path) | Source::Json(path) => {
+                set.push(("USAGE_CACHE".to_owned(), path.display().to_string()));
+            }
+            _ => remove.push("USAGE_CACHE"),
         }
         let credentials = account.dir.join(".credentials.json");
         if credentials.is_file() {
@@ -688,6 +693,7 @@ pub fn agent_usage(
                     account: None,
                     source: Source::Unset,
                     fetch: None,
+                    refusal: None,
                 };
                 let mut usage = assess(env, settings, &source, Err(message), now_ms())?;
                 usage.account = Some(name.to_owned());
@@ -695,13 +701,13 @@ pub fn agent_usage(
             }
         },
     };
-    let reading = if let Some(why) = source.missing_fetch() {
-        Err(why)
+    let reading = if let Some(why) = &source.refusal {
+        Err(why.clone())
     } else {
         match (&source.source, account) {
             (Source::None, _) => Err(String::new()),
             (Source::Unset, Some(name)) => Err(format!(
-                "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent} is set: name its source, or none",
+                "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent}=none is set: name its source, or none",
                 crate::accounts::key_name(name)
             )),
             (Source::Unset, None) => Err(format!(
@@ -755,6 +761,7 @@ pub fn pool(env: Lookup) -> Result<Pool, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
     let entries: Vec<Entry> = entries.into_iter().chain(lane).collect();
+    shared_sources(env, &entries)?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     let state = state_dir(env);
     let running = match &state {
@@ -816,26 +823,28 @@ pub fn state_dir(env: Lookup) -> Option<PathBuf> {
         .or_else(|| harness_home().map(|home| home.join("state")))
 }
 
-/// Also checks again each account of the lists, and the supervisor's with `SUPERVISOR=1`, whose
-/// sign-in check is old, printing a line for each signed out, or signed in again, since the launcher
-/// last logged it: the launcher logs them.
+/// Also runs the fetch command of the supervisor's account with `SUPERVISOR=1`, and checks again
+/// each account of the lists and the supervisor's whose sign-in check is old, printing a line for
+/// each signed out, or signed in again, since the launcher last logged it, and for each whose reading
+/// is refused: the launcher logs them.
 fn refresh(env: Lookup) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
-    let mut accounts = Vec::new();
-    if env("SUPERVISOR").as_deref() == Some("1")
-        && let Some(text) = env("SUPERVISOR_MODEL")
-    {
-        let agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
-        let entry = Entry::parse(text.trim(), &agent)
-            .map_err(|message| format!("SUPERVISOR_MODEL: {message}"))?;
-        if let Some(name) = &entry.account
-            && let Ok(account) = Account::resolve(env, &entry.agent, name)
-        {
-            accounts.push(account);
+    let supervisor = match env("SUPERVISOR_MODEL") {
+        Some(text) if env("SUPERVISOR").as_deref() == Some("1") => {
+            let agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
+            Some(
+                Entry::parse(text.trim(), &agent)
+                    .map_err(|message| format!("SUPERVISOR_MODEL: {message}"))?,
+            )
         }
-    }
-    for (agent, account) in seats_of(entries.iter().chain(lane.iter())) {
+        _ => None,
+    };
+    let all: Vec<&Entry> = entries.iter().chain(lane.iter()).collect();
+    shared_sources(env, all.iter().copied())?;
+    let mut accounts = Vec::new();
+    let mut refusals = Vec::new();
+    for (agent, account) in seats_of(all.into_iter().chain(supervisor.iter())) {
         let source = match account {
             None => AgentSource::from_env(env, &agent)?,
             Some(name) => match Account::resolve(env, &agent, &name) {
@@ -846,26 +855,70 @@ fn refresh(env: Lookup) -> Result<ExitCode, String> {
                 Err(_) => continue,
             },
         };
-        if let (Some(account), Some(state)) = (&source.account, state_dir(env)) {
-            let missing = source.missing_fetch();
-            if crate::accounts::first_time(&state, &account.key(), "no-fetch", missing.is_some()) {
-                println!(
-                    "{}: {}; none of its ticks start",
-                    account.key(),
-                    missing.unwrap_or_default()
-                );
-            }
+        if let Some(account) = &source.account {
+            refusals.push((account.key(), source.refusal.clone()));
         }
-        if !matches!(source.source, Source::None | Source::Unset) {
+        if source.refusal.is_none() && !matches!(source.source, Source::None | Source::Unset) {
             let _ = read_refreshed(&settings, &source);
         }
     }
-    if let Some(state) = state_dir(env) {
-        for line in crate::accounts::refresh(env, &state, &accounts, now_ms() / 1000, true) {
-            println!("{line}");
+    let Some(state) = state_dir(env) else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    if accounts.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Another process holding the lock is checking and logging these itself.
+    let Some(lock) = crate::accounts::lock(&state) else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    for (key, refusal) in refusals {
+        if crate::accounts::first_time(&lock, &state, &key, "refused", refusal.is_some()) {
+            println!(
+                "{key}: {}; none of its ticks start",
+                refusal.unwrap_or_default()
+            );
         }
     }
+    for line in crate::accounts::refresh(&lock, env, &state, &accounts, now_ms() / 1000, true) {
+        println!("{line}");
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Refuses two seats, one of them on an account, whose sources name one file or directory: the
+/// pool would count one account's usage twice, once under each.
+fn shared_sources<'a>(
+    env: Lookup,
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> Result<(), String> {
+    let mut seen: Vec<(PathBuf, String, bool)> = Vec::new();
+    for (agent, account) in seats_of(entries) {
+        let source = match &account {
+            None => AgentSource::from_env(env, &agent)?,
+            Some(name) => match Account::resolve(env, &agent, name) {
+                Ok(account) => AgentSource::for_account(env, account)?,
+                Err(_) => continue,
+            },
+        };
+        let (Source::Json(path) | Source::ClaudeCache(path) | Source::CodexSessions(path)) =
+            &source.source
+        else {
+            continue;
+        };
+        let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let key = key_of(&agent, account.as_deref());
+        if let Some((_, other, other_account)) = seen.iter().find(|(seen, _, _)| *seen == path)
+            && (account.is_some() || *other_account)
+        {
+            return Err(format!(
+                "{other} and {key} both read their usage from {}: give each account a source of its own",
+                path.display()
+            ));
+        }
+        seen.push((path, key, account.is_some()));
+    }
+    Ok(())
 }
 
 fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
@@ -1032,7 +1085,8 @@ struct PickArgs<'a> {
 
 fn pick_command(env: Lookup, args: &PickArgs) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
-    let (entries, _) = model_entries(env)?;
+    let (entries, lane) = model_entries(env)?;
+    shared_sources(env, entries.iter().chain(lane.iter()))?;
     let default_agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
     let mut entries = match args.entry {
         Some(text) => vec![Entry::parse(text, &default_agent)?],
@@ -1111,6 +1165,7 @@ mod tests {
             account: None,
             source: Source::Json("/u.json".into()),
             fetch: None,
+            refusal: None,
         }
     }
 
@@ -1340,6 +1395,7 @@ mod tests {
             account: None,
             source: Source::None,
             fetch: None,
+            refusal: None,
         };
         let usage = assess(&env_of(&[]), &s, &source, Err(String::new()), NOW_MS).unwrap();
         assert_eq!((usage.cap, &usage.reading), (3, &Freshness::Unmetered));
@@ -1355,6 +1411,7 @@ mod tests {
             account: None,
             source: Source::CodexSessions("/s".into()),
             fetch: None,
+            refusal: None,
         };
         let now_s = NOW_MS / 1000;
         let day_old = NOW_MS - 86_400_000;
@@ -1704,14 +1761,14 @@ mod tests {
             "claude's own fetch would read another account's login"
         );
         assert_eq!(
-            of(&claude).missing_fetch().as_deref(),
+            of(&claude).refusal.as_deref(),
             Some("no usage fetch for this account: set USAGE_FETCH_claude_work")
         );
         assert_eq!(
             of(&codex).source,
             Source::CodexSessions(codex.dir.join("sessions"))
         );
-        assert_eq!(of(&codex).missing_fetch(), None);
+        assert_eq!(of(&codex).refusal, None);
         assert_eq!(
             AgentSource::from_env(&env, "claude").unwrap().fetch,
             Some("/f.sh".into()),
@@ -1732,6 +1789,26 @@ mod tests {
             "a bare codex-sessions names the account's own"
         );
         assert_eq!(of(&gemini).source, Source::Unset);
+        let inherited = env_of(&[
+            ("USAGE_SOURCE_gemini", "json:/g.json"),
+            ("USAGE_FETCH_gemini", "/g.sh"),
+            ("USAGE_FETCH_codex", "/c.sh"),
+        ]);
+        let of = |account: &Account| AgentSource::for_account(&inherited, account.clone()).unwrap();
+        assert_eq!(
+            (
+                of(&gemini).source,
+                of(&gemini).fetch,
+                of(&gemini).refusal.as_deref()
+            ),
+            (
+                Source::Unset,
+                None,
+                Some("an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_lab")
+            ),
+            "an account never takes its agent's source or fetch"
+        );
+        assert_eq!(of(&codex).fetch, None);
         let bad = env_of(&[("USAGE_SOURCE_claude_work", "s3://x")]);
         assert!(
             AgentSource::for_account(&bad, claude.clone())
@@ -1758,7 +1835,11 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR".to_owned(), dir.clone()),
                     ("USAGE_CACHE".to_owned(), cache.clone())
                 ],
-                vec!["USAGE_CREDENTIALS_FILE"]
+                [
+                    crate::accounts::credentials("claude"),
+                    &["USAGE_CREDENTIALS_FILE"]
+                ]
+                .concat()
             )
         );
         std::fs::write(claude.dir.join(".credentials.json"), "{}").unwrap();
@@ -1772,7 +1853,12 @@ mod tests {
             ]
         );
         let codex = AgentSource::for_account(&env, codex.clone()).unwrap();
-        assert_eq!(codex.fetch_env().0[0].0, "CODEX_HOME");
+        let (set, remove) = codex.fetch_env();
+        assert_eq!(set[0].0, "CODEX_HOME");
+        assert!(
+            remove.contains(&"USAGE_CACHE") && remove.contains(&"OPENAI_API_KEY"),
+            "a sessions source is no file to name, and the default account's key never reaches it: {remove:?}"
+        );
         assert_eq!(
             AgentSource::from_env(&env_of(&[("HOME", "/h")]), "claude")
                 .unwrap()
@@ -1931,30 +2017,80 @@ mod tests {
             "even a fresh cache is not trusted: nothing of this account's wrote it"
         );
         let state = dir.join("state");
+        let lock = crate::accounts::lock(&state).unwrap();
         assert!(crate::accounts::first_time(
+            &lock,
             &state,
             "claude@work",
-            "no-fetch",
+            "refused",
             true
         ));
         assert!(!crate::accounts::first_time(
+            &lock,
             &state,
             "claude@work",
-            "no-fetch",
+            "refused",
             true
         ));
         assert!(!crate::accounts::first_time(
+            &lock,
             &state,
             "claude@work",
-            "no-fetch",
+            "refused",
             false
         ));
         assert!(crate::accounts::first_time(
+            &lock,
             &state,
             "claude@work",
-            "no-fetch",
+            "refused",
             true
         ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_seats_reading_one_file_are_refused_when_one_is_an_account() {
+        let dir = std::env::temp_dir().join(format!("usage-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("accounts");
+        account_dir(&root, "gemini", "lab");
+        account_dir(&root, "codex", "a");
+        let root_text = root.display().to_string();
+        let shared = env_of(&[
+            ("AGENT_ACCOUNTS_DIR", &root_text),
+            ("TICK_MODELS", "gemini:g gemini@lab:g"),
+            ("USAGE_SOURCE_gemini", "json:/shared.json"),
+            ("USAGE_SOURCE_gemini_lab", "json:/shared.json"),
+        ]);
+        assert_eq!(
+            pool(&shared).unwrap_err(),
+            "gemini and gemini@lab both read their usage from /shared.json: give each account a source of its own"
+        );
+        let defaults = env_of(&[
+            ("TICK_MODELS", "codex:x gemini:g"),
+            ("USAGE_SOURCE_codex", "json:/shared.json"),
+            ("USAGE_SOURCE_gemini", "json:/shared.json"),
+        ]);
+        assert!(
+            pool(&defaults).is_ok(),
+            "two default seats sharing a file are as they were without accounts"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_entry_naming_an_account_needs_a_model() {
+        assert_eq!(
+            Entry::parse("claude@work", "claude").unwrap_err(),
+            "'claude@work' names an account but no model: write agent@account:model"
+        );
+        assert_eq!(
+            Entry::parse("claude:claude-opus-4@20250514", "claude")
+                .unwrap()
+                .model,
+            "claude-opus-4@20250514",
+            "a model named with its agent may hold @, as a Vertex model does"
+        );
     }
 }

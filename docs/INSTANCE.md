@@ -223,12 +223,30 @@ $AGENT_ACCOUNTS_DIR/            for example $HOME/.agents-accounts
 A name is 1 to 32 of `a-z`, `0-9` and `-`, not starting with `-`. The root is an absolute path;
 write it with `$HOME`, not `~`, since the dashboard expands only `$HOME` in a path key. An account
 folder, or its agent's folder, that is a symlink is refused, and so is one of them or the root that
-is another user's or that every user can write to.
+is another user's or that its group or every user can write to: on macOS every user shares the
+`staff` group. The refusal names the fix, `chmod go-w <folder>`. On a host whose umask is 002, as
+many Linux distributions set it, `mkdir` makes group-writable folders, so run that once for the
+root and each folder below it.
+
+An account signs in only through its folder. Its tick, its fetch command and its sign-in check run
+without its agent's credential variables, which would otherwise sign it in as the default account:
+
+| Agent | Variables unset |
+|---|---|
+| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` |
+| `codex` | `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE` |
+| `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE` |
+
+The list was read from Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3; a variable a
+later release adds is not on it. The supervisor on an account takes none of them into its cut-down
+environment either. An account signed in with an API key keeps that key in its folder.
 
 **Entries.** `agent@account:model` names an account in `TICK_MODELS`, `LANE_MODEL`,
 `SUPERVISOR_MODEL` and `state/tick-model`, as in
 `TICK_MODELS="claude@work:claude-opus-5-5 claude@home:claude-opus-5-5 codex@work:gpt-5.5"`. An entry
-without `@` runs as it always has, with the CLI's own default folder. The runner sets the agent's
+without `@` runs as it always has, with the CLI's own default folder. An entry with `@` and no `:`,
+such as `claude@work`, names no model, and `check` refuses it; a model holding `@`, as a Vertex
+model id does, is written with its agent (`claude:claude-opus-4@20250514`). The runner sets the agent's
 variable to the account's folder for that tick only (`harness accounts env`), and records
 `agent@account` in the slot file, `HARNESS_TICK` and the log's trailer, so `libexec/usage-ok.sh`
 checks that account's windows. A folder refused when its tick is about to start is logged and the
@@ -243,17 +261,23 @@ cooldowns (`model-cooldown/<agent>@<account>:<model>`). A usage limit on `claude
 `claude@work`'s entry, and the tick re-runs at once on the next. `USAGE_STEPS_<agent>_<window>`
 applies to each of the agent's accounts.
 
-**Usage.** Each account reads its own windows:
+**Usage.** Each account reads its own windows, and never through its agent's keys: an account's
+source is `USAGE_SOURCE_<agent>_<account>`, else its folder's own default, and its fetch command only
+`USAGE_FETCH_<agent>_<account>`, a `-` of the name written `_` (`claude@client-2` reads
+`USAGE_SOURCE_claude_client_2`). A bare `codex-sessions` there names the folder's own sessions.
 
-| Agent | Source | Fetch command, and what it runs with |
+| Agent | Source without its own | Fetch command without its own |
 |---|---|---|
-| `claude` | `claude-cache:<folder>/usage-cache.json` | only its own `USAGE_FETCH_claude_<account>` (below); without one, none |
-| `codex` | `codex-sessions:<folder>/sessions` | `USAGE_FETCH_codex`, with `CODEX_HOME` the folder |
-| `gemini` | `USAGE_SOURCE_gemini` | `USAGE_FETCH_gemini`, with `GEMINI_CLI_HOME` the folder |
+| `claude` | `claude-cache:<folder>/usage-cache.json` | none, so it allows nothing (below) |
+| `codex` | `codex-sessions:<folder>/sessions` | none, and it needs none |
+| `gemini` | `none` while `USAGE_SOURCE_gemini` is `none`; refused while it names a reading, with `an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_<account>`, logged once; unset, none | none |
 
-`USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>` replace one account's, a `-`
-of the name written `_` (`claude@client-2` reads `USAGE_SOURCE_claude_client_2`); a bare
-`codex-sessions` there names the folder's own sessions.
+Two seats of the lists whose sources name one file or directory, one of them on an account, are
+refused: `harness usage` names them (`<seat> and <seat> both read their usage from <path>`), so
+`check` fails and the launcher starts nothing, since the pool would count one account's usage
+twice. The supervisor's account, with `SUPERVISOR=1`, gets its fetch command run with the lists';
+while it has no fresh reading, the launcher logs `supervisor not due: <account> has no fresh usage
+reading` once.
 
 A claude account fails closed. Claude's own fetch command (`USAGE_FETCH_claude`, `USAGE_FETCH` or
 the default script) reads the default account's login, and run for an account it would fill that
@@ -266,12 +290,12 @@ usage fetch for this account: set USAGE_FETCH_claude_<account>; none of its tick
 default entry, without `@`, keeps claude's fetch as before.
 
 *Writing a per-account fetch.* It runs as any fetch command does (no input or output, killed after
-60 s), with these set:
+60 s), without its agent's credential variables, and with these set:
 
 | Variable | Value |
 |---|---|
 | `CLAUDE_CONFIG_DIR` | the account's folder |
-| `USAGE_CACHE` | the cache to write, `<folder>/usage-cache.json`, in Claude Code's cache shape (the `claude-cache` row above) |
+| `USAGE_CACHE` | the file the account's source reads, by default `<folder>/usage-cache.json` in Claude Code's cache shape (the `claude-cache` row of [Usage windows](#usage-windows)); unset when the source is no file |
 | `USAGE_CREDENTIALS_FILE` | `<folder>/.credentials.json`, only when that file exists; otherwise unset, even if the environment set one for the default account |
 
 It must read the account's own login and no other. On Linux Claude Code keeps a folder's login in
@@ -292,15 +316,18 @@ command that answers without starting a session, so a gemini account reads `unkn
 is kept, owner-only, in `$HARNESS_STATE/accounts/<agent>@<name>.json` and asked again once it is
 over 5 minutes old: by `harness usage refresh`, which the launcher and the runners run, for the
 accounts of the lists and, with `SUPERVISOR=1`, the supervisor's, and by `harness accounts` for
-every folder. An answer it cannot read (a CLI that hangs past its timeout, or output of another
-shape) keeps the state the last check found. An account found signed out counts as cap 0, and the
+every folder; a check dated ahead of this host's clock is asked again, and what the file holds is
+held to the fields a check keeps when it is read back. An answer it cannot read (a CLI that hangs
+past its timeout, or output of another shape) leaves a signed-out account signed out, and makes a
+signed-in one `unknown` with the reason `unreadable answer`, since it was not seen signed in. An account found signed out counts as cap 0, and the
 launcher logs `<agent>@<name> is signed out; none of its ticks start until it signs in again` once
 to `allocator.log`, whichever check found it, and `... is signed in again` when it is; an unknown
 state blocks nothing. `check` prints the list (`account:` lines), `harness health` carries it under
 `accounts` (agent, account, sign-in state, method, end, days left, cap and reading only), and the
-dashboard shows it ([Dashboard sources](#dashboard-sources)). `harness accounts env
-<agent@account>...` prints the `VARIABLE=folder` each tick on one runs with, or names each account
-refused and exits 1.
+dashboard shows it ([Dashboard sources](#dashboard-sources)). The snapshot holds an account's usage
+to its named fields too, with no path of its folder. `harness accounts env <agent@account>...`
+prints the env(1) arguments each tick on one runs with, one a line (an `--unset=<name>` for each
+credential variable above, then `VARIABLE=folder`), or names each account refused and exits 1.
 
 ## Supervisor
 
