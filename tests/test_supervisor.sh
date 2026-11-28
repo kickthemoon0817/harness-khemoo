@@ -122,7 +122,7 @@ record() {
     local stat; local -a f
     mkdir -p "$3/locks"
     stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
-    printf '%s %s claude model-a work\n' "$1" "${f[19]}" > "$3/locks/slot$2.tick"
+    printf '%s %s %s claude model-a work\n' "$1" "${f[19]}" "$(cat /proc/sys/kernel/random/boot_id)" > "$3/locks/slot$2.tick"
 }
 reset_supervisor() { rm -rf "$SUP" "$S/directive.json" "$DLOG" "$H/sup-prompt.txt" "$H/sup-crash" "$H/directive-in.json" "$H/answer.json"; }
 usage 10
@@ -365,7 +365,7 @@ apply "{\"version\": 1, \"reason\": \"steer\", \"expires_at\": \"$(at 3600)\", \
 check "a note that names an operator is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"names an operator"* ]]' "rc=$rc $out"
 # A tick that records itself and claims #43, then waits to check its usage until it is named.
 bash -c 'echo "43 $$ 2026-11-28T00:00:00Z" > "$1/claim.43"; s=$(cat /proc/$$/stat); read -ra f <<<"${s##*) }"
-    echo "$$ ${f[19]} claude model-a work" > "$1/slot7.tick"
+    echo "$$ ${f[19]} $(cat /proc/sys/kernel/random/boot_id) claude model-a work" > "$1/slot7.tick"
     until [ -e "$3" ]; do sleep 0.05; done; "$2/libexec/usage-ok.sh" > "$4" 2>&1; :' _ "$L" "$H" "$H/go" "$H/notice.txt" & named=$!
 until_ok test -s "$L/slot7.tick"
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $named, \"reason\": \"loops on #43\"}]}"

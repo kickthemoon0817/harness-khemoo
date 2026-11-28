@@ -95,15 +95,16 @@ Three agents run locally, each with the composed prompt on stdin, never in argv:
 |---|---|---|---|
 | `claude` | `$AGENT_BIN_claude -p --model <model> <flags>` | `--dangerously-skip-permissions` | `You've (reached\|hit) your [^.]{0,40}limit` |
 | `codex` | `$AGENT_BIN_codex exec --model <model> <flags> -` | `--dangerously-bypass-approvals-and-sandbox` | `You've hit your usage limit\|rate_limit_reached` |
-| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `Quota exceeded\|RESOURCE_EXHAUSTED\|status 429\|You have exhausted your` |
+| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `TerminalQuotaError\|RESOURCE_EXHAUSTED\|exhausted your daily quota\|exhausted your capacity\|Quota exceeded\|status 429` |
 
 `AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
 is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
 the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. `AGENT_LIMIT_RE_<agent>`
-is an extended regex that must match at the start of one of the last 5 non-empty lines of the
-attempt's output, after spaces and an optional error prefix (`Error:`, `ERROR:`, `[API Error:`, a
-class name such as `TerminalQuotaError:`), so a sentence a tick quotes from an issue body and then
-writes past is no limit; set but empty, `check` refuses it. A gemini attempt counts as a usage limit only
+is an extended regex. For claude and codex it must match at the start of one of the last 5
+non-empty lines of the attempt's output, after spaces and an optional error prefix (`Error:`,
+`ERROR:`), so a sentence a tick quotes from an issue body and then writes past is no limit. For
+gemini, which ends a quota error with a stack trace or wraps it in `[API Error: ...]`, it may match
+anywhere in the attempt's last 40 lines. Set but empty, `check` refuses it. A gemini attempt counts as a usage limit only
 when it also exited non-zero, as gemini does on every error it ends on, so a tick that quoted the
 message and went on does not cool its entry; claude's and codex's exit status on a limit is not
 documented, so for them the message alone decides. Any other agent runs only through fleet, where
@@ -113,8 +114,9 @@ its limit regex defaults to the three above joined.
 
 The runner starts each tick, a local agent or `fleet dispatch`, as its own child, its prompt on a
 pipe, and records it in `$HARNESS_STATE/locks/slot<n>.tick` (mode 0600, written by rename) as
-`pid starttime agent model kind`, where `starttime` is field 22 of `/proc/<pid>/stat` and `kind` is
-`work`, `lane` or `landing`. It removes the file when the tick ends, so a slot records one tick at
+`pid starttime bootid agent model kind`, where `starttime` is field 22 of `/proc/<pid>/stat`,
+`bootid` is `/proc/sys/kernel/random/boot_id` (a file a crash left behind matches nothing after a
+reboot) and `kind` is `work`, `lane` or `landing`. It removes the file when the tick ends, so a slot records one tick at
 most. A tick is live while `/proc/<pid>/stat` gives the same start time, which a reused pid does
 not. Only `stat` is read, never a process's environment or descriptors, which an agent CLI that
 marks itself non-dumpable (the release Codex CLI does) keeps private. `harness ticks [--json]` lists
@@ -136,7 +138,7 @@ slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool she
 The runner starts the agent, or `fleet dispatch`, in a session and process group of its own, so
 `kill -TERM -<pid>` stops the tick and its tools but never the runner, which writes the exit
 trailer as usual. It starts it with SIGINT and SIGQUIT at their defaults (`env --default-signal`,
-GNU coreutils 8.31 or later), which a background job of a non-interactive shell would otherwise
+GNU coreutils 8.31 or later; `check` names an `env` without it as missing), which a background job of a non-interactive shell would otherwise
 ignore, so `kill -INT` and `timeout -s INT` reach every tool it runs.
 
 ## Usage windows

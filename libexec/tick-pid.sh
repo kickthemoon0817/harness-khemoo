@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print the PID of the enclosing tick: the first ancestor of the caller whose pid and start time,
-# field 22 of /proc/<pid>/stat, a tick file records. The runner records each tick it starts in
+# field 22 of /proc/<pid>/stat, a tick file of this boot records. The runner records each tick it starts in
 # $HARNESS_STATE/locks/slot<n>.tick; on a fleet device, fleetd records the agent it starts in the
 # file FLEET_SESSION_TICK names. A file counts only when it is a regular file of this user, not a
 # symlink. Only /proc/<pid>/stat is read: an agent CLI that marks itself non-dumpable, as the
@@ -9,12 +9,16 @@
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 state="${HARNESS_STATE:-$H/state}"
+boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 declare -A recorded=()
-record() {  # $1 = a tick file
-    local pid start
+record() {  # $1 = a tick file, `pid starttime bootid ...`; one of another boot is a crash's leftover
+    local line pid start fboot
     [ -f "$1" ] && [ ! -h "$1" ] && [ -O "$1" ] || return 0
-    read -r pid start _ < "$1" 2>/dev/null || return 0
-    [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$start" =~ ^[0-9]+$ ]] && recorded[$pid]=$start
+    # Read under a timeout: a FIFO swapped in after the checks would block an open for good.
+    line=$(timeout 1 head -c 512 -- "$1" 2>/dev/null) || return 0
+    read -r pid start fboot _ <<<"$line"
+    [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$start" =~ ^[0-9]+$ ]] && [ -n "$boot" ] && [ "$fboot" = "$boot" ] \
+        && recorded[$pid]=$start
 }
 for f in "$state"/locks/slot*.tick; do record "$f"; done
 [ -n "${FLEET_SESSION_TICK:-}" ] && record "$FLEET_SESSION_TICK"
