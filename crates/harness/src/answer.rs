@@ -129,33 +129,37 @@ fn markup(text: &str) -> Option<&'static str> {
     })
 }
 
-/// What a body the supervisor posts must not hold besides [`markup`], each looked for in the text
-/// itself, whatever the parser makes of it: a mention notifies a person or a team, a URL, an
-/// address and a link reference's definition lead elsewhere, a character reference (`&#64;`,
-/// `&commat;`) is the character GitHub renders, an escaped `/` or `:` hides a URL from the plain
-/// checks, and a closing keyword closes whatever it names once its PR merges.
-static UNSAFE: LazyLock<[(Regex, &str); 11]> = LazyLock::new(|| {
+/// What a body the supervisor posts must not hold besides [`markup`], each looked for as plain text
+/// anywhere in the body, whatever the parser makes of it and whatever surrounds it: GitHub finds a
+/// mention, a bare link or a cross-reference inside emphasis, a table cell or a task item, where a
+/// word boundary would not. Any `@` (a mention, an address, a ref at a commit), `www.` and `://` (a
+/// bare link), a cross-reference to another repository or a commit (`owner/repo#1`, `/` and a SHA),
+/// a link reference's definition (`]:`), a character reference (`&#64;`, `&commat;`, the character
+/// GitHub renders), an escaped `/` or `:`, which hides a URL from these checks, and a closing
+/// keyword, which closes whatever it names once its PR merges. A plain `#N` holds none of them.
+static UNSAFE: LazyLock<[(Regex, &str); 12]> = LazyLock::new(|| {
     let pattern = |text: &str| Regex::new(text).unwrap_or_else(|error| panic!("{text}: {error}"));
     [
+        (pattern(r"@"), "an @"),
+        (pattern(r"(?i)www\."), "a URL"),
+        (pattern(r"://"), "a URL"),
+        (pattern(r"(?m)(^|[\s(<:=])//"), "a URL"),
+        (
+            pattern(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[#@]|(?i)/[0-9a-f]{7,40}"),
+            "a cross-reference",
+        ),
         (
             pattern(r"&#|&[A-Za-z][A-Za-z0-9]*;"),
             "a character reference",
         ),
-        (pattern(r"(^|[^A-Za-z0-9_])@[A-Za-z0-9]"), "an @-mention"),
         (pattern(r"\]:"), "a link reference"),
         (pattern(r"\\[/:]"), "an escaped URL"),
-        (pattern(r"(?i)\b[a-z][a-z0-9+.-]*://|(?i)\bwww\."), "a URL"),
-        (pattern(r"(?m)(^|[\s(<:=])//"), "a URL"),
         (pattern(r"!\["), "an image"),
         (pattern(r"\]\("), "a link"),
         (pattern(r"<[A-Za-z/!?]"), "HTML or an autolink"),
         (
-            pattern(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]"),
-            "an email address",
-        ),
-        (
             pattern(
-                r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[\s:]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]",
+                r"(?i)(^|[^a-z0-9])(close[sd]?|fix(e[sd])?|resolve[sd]?)[\s:]*([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]",
             ),
             "a closing keyword",
         ),
@@ -666,8 +670,22 @@ mod tests {
     #[test]
     fn a_body_reaches_no_one_past_its_issue() {
         for (body, what) in [
-            ("ping @owner-a about it", "an @-mention"),
-            ("@example-org/team please look", "an @-mention"),
+            ("ping @owner-a about it", "an @"),
+            ("@example-org/team please look", "an @"),
+            // Emphasis, a table cell or a task item hides no mention, bare link or cross-reference.
+            ("_@octocat_", "an @"),
+            ("__@octocat__", "an @"),
+            ("_@github/docs_", "an @"),
+            ("_www.example.org/login_", "a URL"),
+            ("| a |\n|---|\n| _www.example.org/login_ |", "a URL"),
+            ("- [ ] _www.example.org/login_", "a URL"),
+            ("_WWW.example.org_", "a URL"),
+            ("a scheme_://x", "a URL"),
+            ("see octocat/Hello-World#1", "a cross-reference"),
+            ("_see octocat/Hello-World#1_", "a cross-reference"),
+            ("at commit /0123abc", "a cross-reference"),
+            ("the commit _/0123ABCdef_", "a cross-reference"),
+            ("_fixes #3_", "a closing keyword"),
             ("see https://example.com/x", "a URL"),
             ("see ftp://192.0.2.1/x", "a URL"),
             ("see www.example.com", "a URL"),
@@ -678,10 +696,10 @@ mod tests {
             ("<!-- hidden -->", "HTML"),
             (
                 "write to dev-a.example.com's owner, ops@example.com",
-                "an email address",
+                "an @",
             ),
             ("Fixes #3", "a closing keyword"),
-            ("this closes example-org/other#12", "a closing keyword"),
+            ("this closes example-org/other#12", "a cross-reference"),
             ("Resolved: #4", "a closing keyword"),
             ("thanks &#64;octocat", "a character reference"),
             ("thanks &commat;octocat", "a character reference"),
@@ -727,11 +745,11 @@ mod tests {
         // Plain references and words stay.
         for body in [
             "Waits on #3; a prefix #4 and a fixed point stay.",
-            "user@ is not an address",
             "a < b and 2 > 1",
             "email the team",
             "A & B; a path a/b//c and [a] list",
             "Waits on #3: run `cargo test --workspace` and `tests/run.sh`, then see #12.",
+            "The _emphasis_ stays: read src/main.rs and `src/lib.rs`, then #7 and **#8**.",
             "- a list item\n- another, waiting on #5\n\n> a quote\n\n    an indented code block",
             "rate 3/4 and 1//2",
         ] {

@@ -243,7 +243,7 @@ echo '{"directive": null, "github": [{"comment": {"issue": 7, "body": "ping @own
 : > "$FAKE_GH_LOG"
 "$H/bin/tick.sh" supervisor manual
 check "a body with a mention or a link is refused" \
-    '! grep -q -- "-X POST" "$FAKE_GH_LOG" && grep -q "refused comment on #7: body: holds an @-mention" "$DLOG"' "$(tail -n 1 "$DLOG")"
+    '! grep -q -- "-X POST" "$FAKE_GH_LOG" && grep -q "refused comment on #7: body: holds an @" "$DLOG"' "$(tail -n 1 "$DLOG")"
 rm -f "$H/answer.json" "$SUP/failures"
 
 flock -o "$L/supervisor.lock" sleep 30 >/dev/null 2>&1 & holders+=("$!")

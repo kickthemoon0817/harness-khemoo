@@ -248,9 +248,11 @@ The supervisor's comments and parked questions are held to more than the lint. E
 as GitHub parses Markdown, extensions included, and refused if it yields a link, an autolink, an
 image or HTML, however it is written: a link whose reference is defined in a block quote or a list
 item, at any depth, or whose URL is escaped, is found where it is used. The text itself is then
-refused if it holds an @-mention, a URL (a scheme, `www.`, or `//` starting a word), `]:` (a link
-reference's definition), a backslash before `/` or `:`, an HTML character reference (`&#...;`,
-`&name;`, which GitHub renders as the character, an `@` among them), an email address, or a closing
+refused, wherever these stand (GitHub finds them in emphasis, a table cell or a task item too), if
+it holds any `@` (a mention, an address, a ref at a commit), `www.` in any case, `://`, a `//`
+starting a word, a cross-reference (`owner/repo#N`, `owner/repo@...`, or `/` and 7 to 40 hex
+digits, a commit), `]:` (a link reference's definition), a backslash before `/` or `:`, an HTML
+character reference (`&#...;`, `&name;`, which GitHub renders as the character), or a closing
 keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
 `owner/repo#N`). Each would reach past the issue: notify someone, send readers or their browsers
 elsewhere, hide text, or close an issue when a PR merges. Plain `#N` references and code spans
