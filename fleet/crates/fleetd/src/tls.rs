@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use fleet_proto::{DeviceName, Role};
+use fleet_proto::{DeviceName, ROLE_URI_PREFIX, Role};
 use rustls::RootCertStore;
 use rustls::server::{ServerConfig, WebPkiClientVerifier};
 use rustls_pki_types::pem::PemObject;
@@ -16,8 +16,6 @@ use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
 use crate::config::{Config, ConfigError, normalize_serial};
 use crate::{own_uid, report_str};
-
-const ROLE_URI_PREFIX: &str = "fleet:role:";
 
 fn invalid(key: &str, message: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {

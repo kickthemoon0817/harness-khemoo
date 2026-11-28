@@ -207,8 +207,9 @@ boundary. Labels and JSON escaping can still make 256 sessions larger than a fra
 also stops adding sessions to a `sessions` reply when the next would take it past 1 MiB
 (`MAX_FRAME_LEN`), and sets `truncated`. The hub still treats them as untrusted: its human
 tables replace control characters again, and the dashboard passes them through its redaction.
-`fleet logs` and `fleet dispatch --wait` write `event` data raw, since it is the agent's own
-output.
+`fleet logs` and `fleet dispatch --wait` write `event` data raw to a pipe, since it is the
+agent's own output, and with its control characters replaced to a terminal (see
+[fleet](#fleet)).
 
 - An `AdapterInfo` with `max_concurrent` 0 is discovery-only: it cannot be dispatched to.
   `models[0]` is the model a dispatch without `model` gets.
@@ -257,10 +258,36 @@ frame. The role granted is at most `[unix] max_role`.
 The hub runs, as an argv with no shell:
 
 ```text
-ssh -T -o BatchMode=yes [-o OPTION]... -- TARGET fleetd --stdio
+ssh -T -a -x -o BatchMode=yes -o ClearAllForwardings=yes -o ForwardAgent=no \
+    -o PermitLocalCommand=no -o ControlPath=none -o ControlMaster=no \
+    [-o OPTION]... -- TARGET fleetd --stdio
 ```
 
 and speaks the protocol over the child's stdin and stdout. ssh does the authentication.
+
+A device is less trusted than the hub, and a compromised one must not be able to use the hub's
+ssh agent, X display or local ports to reach other machines. The fixed options therefore turn off
+agent and X11 forwarding, every port forward, `LocalCommand`, and connection sharing, so a control
+master another session opened with its own forwards is never reused. ssh keeps the first value
+it obtains for an option, and command-line options come before `~/.ssh/config`, so neither the
+user's ssh config nor a device's `ssh_options` can turn them back on. On top of that, fleet.toml
+refuses `ssh_options` whose key, in any case, is one of:
+
+- `ForwardAgent`, `ForwardX11`, `ForwardX11Trusted`, `LocalForward`, `RemoteForward`,
+  `DynamicForward`, `Tunnel`: they forward the hub's agent, display or ports to the device;
+- `ProxyCommand`, `ProxyJump`, `LocalCommand`, `PermitLocalCommand`, `RemoteCommand`,
+  `KnownHostsCommand`, `PKCS11Provider`, `SecurityKeyProvider`: they run a command or load a
+  library on the hub, route the connection elsewhere, or replace the pinned remote command;
+- `Include`, `Match`: they read further config that could do any of this;
+- `ControlPath`, `ControlMaster`, `ControlPersist`: they share or keep a connection;
+- `SendEnv`, `SetEnv`: they send the hub's environment, or set one, on the device;
+- `StrictHostKeyChecking`, `UserKnownHostsFile`, `GlobalKnownHostsFile`, `HostKeyAlias`,
+  `VerifyHostKeyDNS`, `CheckHostIP`: they weaken or redirect host key checking.
+
+An option must be one `Key=value` string with an ASCII alphanumeric key, so ssh's other
+spellings (`Key value`, `Key = value`, `-oKey=value`) are refused rather than parsed around the
+list. Those settings belong in the user's own `~/.ssh/config` if they are wanted at all.
+
 `fleetd --stdio` is a relay: it reads the client's `Hello`, connects to the running daemon's unix
 socket, completes the handshake there asking for the lesser of the client's role, `--role` and
 `[stdio] max_role`, returns the granted `Hello` to the client, and then copies bytes both ways
@@ -667,10 +694,11 @@ TARGET_REPO = "/srv/work/repo"
 
 ## fleet.toml
 
-fleet reads `--config PATH`, else `$FLEET_CONFIG`, else `$HARNESS_INSTANCE_DIR/fleet.toml`. No
-path, a missing file, a TOML error, an unknown key, a wrong type or a value outside its range is
-an error that names the key, and fleet exits 2. Relative paths resolve against the directory of
-fleet.toml; a leading `~/` expands to `$HOME`.
+fleet reads `--config PATH`, else `$FLEET_CONFIG`, else `$HARNESS_INSTANCE_DIR/fleet.toml`. An
+empty `$FLEET_CONFIG` or `$HARNESS_INSTANCE_DIR` counts as unset, so resolution falls through to
+the next source. No path, a missing file, a TOML error, an unknown key, a wrong type or a value
+outside its range is an error that names the key, and fleet exits 2. Relative paths resolve
+against the directory of fleet.toml; a leading `~/` expands to `$HOME`.
 
 ### Top level
 
@@ -695,7 +723,8 @@ own keys.
 ### `[devices.<name>]`
 
 `<name>` is a `DeviceName` (1 to 63 of `[a-z0-9.-]` starting with a letter or digit), and not `auto`. Devices keep
-their file order, which is the registry order everywhere.
+their file order, which is the registry order everywhere. A key that applies to another transport
+is an error.
 
 | Key | Type | Default | Applies to | Meaning |
 |---|---|---|---|---|
@@ -703,7 +732,7 @@ their file order, which is the registry order everywhere.
 | `auto` | boolean | true | all | whether `--device auto` may pick it |
 | `socket` | path | `$XDG_STATE_HOME/fleetd/fleetd.sock`, else `~/.local/state/fleetd/fleetd.sock` | local | fleetd's socket |
 | `target` | string | required | ssh | the ssh destination, `host` or `user@host`; must not begin with `-` |
-| `ssh_options` | array of strings | `[]` | ssh | each passed as `-o OPTION`; each must be `Key=value` |
+| `ssh_options` | array of strings | `[]` | ssh | each passed as `-o OPTION`; each must be `Key=value`, with a key not on the [refused list](#ssh) |
 | `remote_command` | array of strings | `["fleetd", "--stdio"]` | ssh | appended after the target; ignored by a pinned `command=` |
 | `address` | string | required | tls | `host:port`; the host may be an IP or a DNS name |
 | `server_name` | string | the device's `<name>` | tls | the DNS SAN the server certificate must carry |
@@ -759,8 +788,8 @@ fleet [--config PATH] <command>
 fleet status   [--json] [--device NAME]...
 fleet sessions [--json] [--device NAME]... [--running]
 fleet dispatch --device NAME|auto --adapter NAME --workdir PATH [--model M] [--timeout S]
-               [--label KEY=VALUE]... [--wait] [--json]          (prompt on stdin)
-fleet logs     <device> <session> [--lines N] [--follow] [--json]
+               [--label KEY=VALUE]... [--wait] [--json | --raw]  (prompt on stdin)
+fleet logs     <device> <session> [--lines N] [--follow] [--json | --raw]
 fleet cancel   <device> <session> [--json]
 fleet pki init         [--dir DIR] [--days N]
 fleet pki issue-server <device> [--dir DIR] [--ip IP]... [--dns NAME]... [--days N]
@@ -768,14 +797,16 @@ fleet pki issue-client <name> --role monitor|dispatch [--dir DIR] [--days N]
 fleet --version | --help
 ```
 
-- `status` asks every device (or each `--device`) concurrently. It prints a table, or with
-  `--json` the [status document](#fleet-status---json). It exits 0 when every device answered and
-  1 when any failed; the output is complete either way.
+- `status` asks every device (or each `--device`) concurrently, at most 16 at a time. It prints
+  a table, or with `--json` the [status document](#fleet-status---json). It exits 0 when every
+  device answered and 1 when any failed; the output is complete either way.
 - `sessions` is the same for sessions. `--running` keeps only sessions in state `running`.
 - `dispatch` reads the prompt from stdin, up to the prompt cap; an empty or oversize prompt is an
-  error before any connection. Without `--wait` it prints the device and session id
-  (`{"device": "dev-a", "session": "d-…"}` with `--json`) and exits 0. With `--wait` it then sends
-  `wait`, writes the session's output to stdout as it arrives, and exits with the agent's status:
+  error before any connection; like any usage or config error it exits 2, even with `--wait`.
+  Without `--wait` it prints the device and session id (`{"device": "dev-a", "session": "d-…"}`
+  with `--json`) and exits 0. With `--wait` it writes `fleet: <device>: session <id>` to stderr,
+  then sends `wait`, writes the session's output to stdout as it arrives, and exits with the
+  agent's status:
 
   | Session end | Exit code |
   |---|---|
@@ -787,6 +818,15 @@ fleet --version | --help
 
   If fleet receives SIGINT or SIGTERM while waiting, it cancels the session over a new connection,
   best effort, and exits 128 + the signal.
+
+  The exit code alone is ambiguous: an agent that exits 124, 125 or 130 itself, or 128 + N, looks
+  like a timeout, a fleet failure, a cancel or a signal. A caller that must tell them apart uses
+  `--json`: the last line is then `{"state": {…}}` with the session's end, such as
+  `{"kind": "exited", "code": 124}` against `{"kind": "timed_out"}`, and when fleet itself
+  failed there is no `state` line at all. Without `--json`, a fleet failure writes
+  `fleet: <device>: …` to stderr after the `fleet: <device>: session <id>` line, while an
+  agent's own exit code writes nothing more there; the session id also lets `fleet sessions
+  --json` report the recorded state afterwards.
 - `--device auto` asks every device with `auto = true` for its status, concurrently, and keeps
   those that answered, have the adapter with `max_concurrent` above 0 and `running` below it,
   and allow `--model` if one is given. It orders them by `load[0] / cpus`, lowest first, ties in
@@ -797,14 +837,28 @@ fleet --version | --help
   session ends.
 - With `--json`, `logs` and `dispatch --wait` print one JSON object per line instead of raw
   output: `{"data": "…"}` per non-empty event, then `{"state": {…}}` last.
-- `cancel` prints the cancelled session and exits 0. Cancelling an ended session succeeds.
+- Without `--json`, when stdout is a terminal, `logs` and `dispatch --wait` replace every control
+  character in the output other than tab, LF and CR (ESC and the rest of C0, DEL, and C1
+  U+0080–U+009F), every bidi control (U+202A–U+202E, U+2066–U+2069, U+200E, U+200F, U+061C),
+  every invisible character (U+00AD, U+180E, U+200B, U+200C, U+2060–U+2064, U+3164, U+FEFF) and
+  every tag character (U+E0000–U+E007F) with U+FFFD, so a remote agent cannot drive the terminal
+  with escape sequences or make text read differently from what it is. The zero-width joiner
+  U+200D and the variation selectors U+FE00–U+FE0F are kept, so emoji survive; on their own they
+  cannot reorder or hide text. Strings a device reports, such as names, labels, workdirs and
+  error messages, get the same treatment without those exceptions: tab, LF, CR, U+200D and
+  U+FE00–U+FE0F are replaced too.
+  `--raw` writes the output unchanged. When stdout is not a terminal (a pipe or a file), the
+  output is always written unchanged, so logs keep the agent's exact bytes.
+- `cancel` prints the cancelled session (`{"device": …, "session": …}` with `--json`) and exits
+  0. Cancelling an ended session succeeds.
 - `pki` writes into `--dir`, by default `pki/` beside the resolved fleet.toml. The directory is
   created 0700, key files are written 0600, and no file is overwritten: an existing file is an
   error. Keys are ECDSA P-256 and serials random. `init` makes `ca.pem` and `ca.key` (default
   3650 days). `issue-server` makes `<device>.pem` and `<device>.key` with DNS SAN `<device>`,
   each `--dns` and each `--ip`, and serverAuth usage. `issue-client` makes `<name>.pem` and
-  `<name>.key` with the SAN URI `fleet:role:<role>` and clientAuth usage. Leaves default to 397
-  days. Each prints the files it wrote and the serial in hex.
+  `<name>.key`, `<name>` following the device-name rule, with the SAN URI `fleet:role:<role>`
+  and clientAuth usage. Leaves default to 397 days. Each prints the files it wrote and the
+  serial in hex.
 
 Exit codes, except `dispatch --wait`: 0 success, 1 a device or operation failed, 2 a usage or
 config error. Errors go to stderr as `fleet: <device>: <code>: <message>`. Human tables are not

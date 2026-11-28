@@ -20,7 +20,7 @@ mod valid;
 
 pub use error::{ErrorCode, WireError};
 pub use frame::{Connection, ProtoError};
-pub use hello::{Hello, Op, Role, UnknownRole};
+pub use hello::{Hello, Op, ROLE_URI_PREFIX, Role, UnknownRole};
 pub use model::{
     AdapterInfo, DeviceInfo, Disk, Gpu, Memory, Metrics, Origin, Session, SessionState,
     StatusReport,
