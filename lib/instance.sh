@@ -14,14 +14,15 @@ harness_load() {
     # Environment only: the config cannot name the directory it is read from.
     HARNESS_INSTANCE_DIR="${HARNESS_INSTANCE_DIR:-$HARNESS_HOME/instance}"
     HARNESS_ENV_FILE="${HARNESS_ENV:-$HARNESS_INSTANCE_DIR/harness.env}"
-    # shellcheck source=/dev/null
-    [ -r "$HARNESS_ENV_FILE" ] && . "$HARNESS_ENV_FILE"
-    : "${HARNESS_STATE:=$HARNESS_HOME/state}"
-    # The harness binary (crates/harness): the config's, else this checkout's release build, else PATH's.
+    # The harness binary (crates/harness): this checkout's release build, else PATH's. It is set
+    # before the config is read, so the config can name it (QUEUE_DEPTH_CMD) or replace it.
     if [ -z "${HARNESS_BIN:-}" ]; then
         if [ -x "$HARNESS_HOME/target/release/harness" ]; then HARNESS_BIN=$HARNESS_HOME/target/release/harness
         else HARNESS_BIN=harness; fi
     fi
+    # shellcheck source=/dev/null
+    [ -r "$HARNESS_ENV_FILE" ] && . "$HARNESS_ENV_FILE"
+    : "${HARNESS_STATE:=$HARNESS_HOME/state}"
     if [ -z "${GH_REPO:-}" ] && [ -n "${TARGET_REPO:-}" ]; then
         GH_REPO=$(harness_repo_from_origin "$TARGET_REPO")
     fi
