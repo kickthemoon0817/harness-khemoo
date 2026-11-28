@@ -1014,7 +1014,7 @@ fn reads_a_live_holder_and_waiter() {
     use super::buildlocks::BuildLockReader;
     use super::procs::ProcessScanner;
     if !has_lslocks() {
-        eprintln!("skipped: needs lslocks");
+        eprintln!("SKIP: lslocks cannot see this namespace's locks");
         return;
     }
     let mut harness = FixtureHarness::new();
@@ -1062,7 +1062,7 @@ fn reads_a_live_holder_and_waiter() {
 fn the_collector_builds_a_live_flow_and_the_page_draws_it() {
     let mut harness = FixtureHarness::new();
     if !has_lslocks() {
-        eprintln!("skipped: needs lslocks");
+        eprintln!("SKIP: lslocks cannot see this namespace's locks");
         return;
     }
     let tick_pid = harness.start_fake_tick(2464, 3, "sleep 30");
@@ -1653,6 +1653,14 @@ fn labels_come_from_the_env_file_and_the_flag_overrides_the_queue_label() {
 
 #[test]
 fn an_empty_gh_repo_is_derived_through_instance_lib() {
+    if !super::checkout_of_binary()
+        .is_some_and(|checkout| checkout.join("lib/instance.sh").is_file())
+    {
+        eprintln!(
+            "SKIP an_empty_gh_repo_is_derived_through_instance_lib: the test binary is outside its checkout (CARGO_TARGET_DIR)"
+        );
+        return;
+    }
     let directory = TempDir::new();
     let root = directory.path();
     let target = root.join("target-repo");
@@ -2052,7 +2060,7 @@ fn numbers_outside_fleets_range_are_a_source_error() {
     let fleet = FleetFixture::new();
     fleet.read(None, 0);
     let huge = "1".to_owned() + &"0".repeat(400);
-    let cases: [(&[&str], String, &str); 5] = [
+    let cases: [(&[&str], String, &str); 7] = [
         (
             &["status", "metrics", "load"],
             format!("[{huge}, 0, 0]"),
@@ -2074,6 +2082,16 @@ fn numbers_outside_fleets_range_are_a_source_error() {
             "cpu_percent",
         ),
         (&["status", "device", "cpus"], huge.clone(), "out of range"),
+        (
+            &["status", "metrics", "cpu_percent"],
+            "100000000000000000000".to_owned(),
+            "cpu_percent",
+        ),
+        (
+            &["status", "metrics", "cpu_percent"],
+            "1e20".to_owned(),
+            "cpu_percent",
+        ),
     ];
     for (keys, value, expected) in cases {
         let mut document = status_document();
@@ -2647,4 +2665,78 @@ fn a_token_cut_by_an_error_message_leaves_no_part_behind() {
             assert!(!error.contains(fragment), "{fragment} in {error}");
         }
     }
+}
+
+#[test]
+fn a_symlinked_state_directory_reads_as_its_target() {
+    let directory = TempDir::new();
+    let home = directory.path().join("home");
+    let real = directory.path().join("real-state");
+    std::fs::create_dir_all(&home).ok();
+    std::fs::create_dir_all(&real).ok();
+    std::os::unix::fs::symlink(&real, home.join("state")).ok();
+    let config = config_of(&home, &[]);
+    assert_eq!(config.state_dir(), real);
+    assert_eq!(config.data_dir, real.join("dashboard"));
+}
+
+#[test]
+fn harness_bin_from_the_env_file_expands_home_and_a_tilde() {
+    let harness = FixtureHarness::new();
+    let env_file = harness.home.join("instance/harness.env");
+    let original = std::fs::read_to_string(&env_file).unwrap_or_default();
+    for (line, expected) in [
+        ("HARNESS_BIN=$HOME/bin/harness", "/home/someone/bin/harness"),
+        ("HARNESS_BIN=~/bin/harness", "/home/someone/bin/harness"),
+    ] {
+        std::fs::write(
+            &env_file,
+            format!("{original}{line}\nQUEUE_DEPTH_CMD=\"$HARNESS_BIN claimable\"\n"),
+        )
+        .ok();
+        let config = config_of(&harness.home, &[("HOME", "/home/someone".to_owned())]);
+        assert_eq!(config.harness_bin, expected, "{line}");
+        assert_eq!(
+            config.queue_depth_command,
+            [expected, "claimable"],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn the_last_of_a_repeated_option_wins() {
+    let parsed = args(&[
+        "--port",
+        "1",
+        "--port",
+        "2",
+        "--refresh",
+        "5",
+        "--refresh",
+        "7",
+    ]);
+    assert_eq!((parsed.port, parsed.refresh), (Some(2), 7));
+}
+
+#[test]
+fn a_host_that_reads_as_an_ssh_option_is_refused() {
+    let harness = FixtureHarness::new();
+    let collector = harness.collector();
+    let error = collector
+        .probe_host("-oProxyCommand=touch /tmp/x", "true")
+        .err()
+        .unwrap_or_default();
+    assert!(error.contains("refusing host"), "{error}");
+}
+
+#[test]
+fn the_server_listens_on_loopback_only() {
+    let listener = super::bind_loopback(0).expect("binds");
+    let address = listener.local_addr().expect("an address");
+    assert!(address.ip().is_loopback());
+    assert_eq!(
+        address.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
 }

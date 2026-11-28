@@ -28,7 +28,8 @@ fn iso_or_null(epoch: Option<f64>) -> Value {
         .map_or(Value::Null, |epoch| Value::String(iso(epoch)))
 }
 
-/// Every string of a value, keys included, with control, bidi and invisible characters replaced.
+/// Every string of a value with control, bidi and invisible characters replaced. Keys are the
+/// dashboard's own names, or fleet's label names, which are redacted where they are read.
 pub fn clean_value(value: &mut Value) {
     match value {
         Value::String(text) => {
@@ -38,11 +39,7 @@ pub fn clean_value(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(clean_value),
         Value::Object(map) => {
-            let entries: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();
-            for (key, mut item) in entries {
-                clean_value(&mut item);
-                map.insert(clean(&key).into_owned(), item);
-            }
+            map.values_mut().for_each(clean_value);
         }
         _ => {}
     }
@@ -399,8 +396,17 @@ impl Collector {
                 #[allow(clippy::cast_precision_loss)]
                 let started = session.started_at as f64;
                 let (title, url) = issue.and_then(|issue| issue_titles.get(&issue).cloned()).unwrap_or_default();
-                let labels: Map<String, Value> =
-                    session.labels.iter().map(|(key, value)| (redact(key), Value::String(redact(value)))).collect();
+                // Two names can redact alike; the later is numbered rather than lost.
+                let mut labels = Map::new();
+                for (key, value) in &session.labels {
+                    let mut name = redact(key);
+                    let mut number = 2;
+                    while labels.contains_key(&name) {
+                        name = format!("{} ({number})", redact(key));
+                        number += 1;
+                    }
+                    labels.insert(name, Value::String(redact(value)));
+                }
                 json!({
                     "device": redact(&session.device), "adapter": redact(&session.adapter), "id": redact(&session.id),
                     "origin": session.origin, "state": redact(&session.state), "running": session.running,

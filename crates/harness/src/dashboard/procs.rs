@@ -7,7 +7,7 @@
 //! issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then
 //! from a lease it holds, then from a cached GitHub claim-comment lookup the caller supplies.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -121,11 +121,12 @@ impl ProcessScanner {
             }
             let targets = self.descriptor_targets(process.pid);
             let Some(stdout_target) = targets
-                .get("1")
+                .get(&1)
                 .filter(|target| target.starts_with(&logs_prefix))
             else {
                 continue;
             };
+            // The highest-numbered descriptor on a slot lock names the slot.
             let mut slot = None;
             for target in targets.values() {
                 if let Some(found) = SLOT_LOCK.captures(target)
@@ -160,6 +161,11 @@ impl ProcessScanner {
                 .entry(process.ppid)
                 .or_default()
                 .push(process);
+        }
+        // In pid order, as /proc lists them: the first of equally young shells, and the first
+        // child of one, is the lowest pid.
+        for children in children_by_parent.values_mut() {
+            children.sort_by_key(|child| child.pid);
         }
         candidates
             .iter()
@@ -229,17 +235,21 @@ impl ProcessScanner {
         }
     }
 
-    fn descriptor_targets(&self, pid: i64) -> HashMap<String, String> {
-        let mut targets = HashMap::new();
+    /// Descriptor number to target, in descriptor order.
+    fn descriptor_targets(&self, pid: i64) -> BTreeMap<u64, String> {
+        let mut targets = BTreeMap::new();
         let Ok(entries) = std::fs::read_dir(self.proc_root.join(pid.to_string()).join("fd")) else {
             return targets;
         };
         for entry in entries.flatten() {
-            if let Ok(target) = std::fs::read_link(entry.path()) {
-                targets.insert(
-                    entry.file_name().to_string_lossy().into_owned(),
-                    target.to_string_lossy().into_owned(),
-                );
+            if let (Some(number), Ok(target)) = (
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse().ok()),
+                std::fs::read_link(entry.path()),
+            ) {
+                targets.insert(number, target.to_string_lossy().into_owned());
             }
         }
         targets

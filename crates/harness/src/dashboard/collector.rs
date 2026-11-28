@@ -954,7 +954,7 @@ impl Collector {
         });
     }
 
-    fn probe_host(&self, host: &str, script: &str) -> Result<MachineProbe, String> {
+    pub fn probe_host(&self, host: &str, script: &str) -> Result<MachineProbe, String> {
         // A host read from a state file must not be taken by ssh for an option.
         if host.starts_with('-') {
             return Err(format!("RuntimeError: refusing host {host:?}"));
@@ -1226,8 +1226,9 @@ impl Collector {
             {
                 continue;
             }
+            // Past the cap the loop goes on, so every live pid keeps its cached issue.
             if lookups >= PID_LOOKUPS_PER_CYCLE {
-                break;
+                continue;
             }
             lookups += 1;
             lock(&self.pid_lookup_attempts).insert(pid, now);

@@ -15,7 +15,7 @@ use super::models::{
     HostStreak, LeaseSlot, LeaseStatus, LeaseWait, MachineProbe, RemoteCard, StallLine,
     UsageReading,
 };
-use super::text::{optional_float, optional_int, parse_iso, split_lines};
+use super::text::{is_word_char, optional_float, optional_int, parse_iso, split_lines};
 
 fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("a constant pattern compiles")
@@ -42,8 +42,7 @@ static WAIT: LazyLock<Regex> = LazyLock::new(|| {
 });
 static STALL: LazyLock<Regex> = LazyLock::new(|| regex(r"^(\S+) STALL (\S+) (\S+) ?(.*)$"));
 static ALLOCATOR: LazyLock<Regex> = LazyLock::new(|| regex(r"^([0-9]{8}T[0-9]{6}Z) (.*)$"));
-static ALLOCATOR_FIELD: LazyLock<Regex> =
-    LazyLock::new(|| regex(r"(?:^|[^\p{L}\p{N}_])([a-z_]+)=([^\s%]+)%?"));
+static ALLOCATOR_FIELD: LazyLock<Regex> = LazyLock::new(|| regex(r"([a-z_]+)=([^\s%]+)%?"));
 static ALLOCATOR_SLOT: LazyLock<Regex> = LazyLock::new(|| regex(r"^(slot[0-9]+) "));
 static SPAWNING: LazyLock<Regex> = LazyLock::new(|| regex(r"-> spawning ([0-9]+)"));
 static MODEL: LazyLock<Regex> =
@@ -236,10 +235,7 @@ pub fn parse_allocator(text: &str, limit: usize) -> Vec<AllocatorLine> {
         } else {
             "other"
         };
-        let mut fields: BTreeMap<String, String> = ALLOCATOR_FIELD
-            .captures_iter(rest)
-            .filter_map(|field| Some((group(&field, 1)?.to_owned(), group(&field, 2)?.to_owned())))
-            .collect();
+        let mut fields = allocator_fields(rest);
         if let Some(spawning) = SPAWNING.captures(rest).and_then(|found| group(&found, 1)) {
             fields.insert("spawning".to_owned(), spawning.to_owned());
         }
@@ -255,6 +251,31 @@ pub fn parse_allocator(text: &str, limit: usize) -> Vec<AllocatorLine> {
         });
     }
     newest(decisions, limit)
+}
+
+/// The `name=value` fields of an allocator line, a name starting at a word boundary: one field
+/// may follow another's `%` directly (`a=1%b=2`).
+fn allocator_fields(text: &str) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let mut position = 0;
+    while let Some(found) = ALLOCATOR_FIELD.captures_at(text, position) {
+        let (Some(whole), Some(name), Some(value)) = (found.get(0), found.get(1), found.get(2))
+        else {
+            break;
+        };
+        if text[..whole.start()]
+            .chars()
+            .next_back()
+            .is_some_and(is_word_char)
+        {
+            // Every later start in this name follows a word character too.
+            position = name.end();
+            continue;
+        }
+        fields.insert(name.as_str().to_owned(), value.as_str().to_owned());
+        position = whole.end();
+    }
+    fields
 }
 
 /// A JSON number other than a boolean, as a float.
@@ -652,6 +673,11 @@ mod tests {
         assert_eq!(lines[1].fields["spawning"], "1");
         assert_eq!(lines[4].fields["ready"], "1");
         assert_eq!(lines[5].fields["claimable"], "2");
+        let glued = allocator_fields("pct=1%b=2 Xc=3 d=4");
+        assert_eq!(
+            glued.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["b", "d", "pct"]
+        );
     }
 
     #[test]

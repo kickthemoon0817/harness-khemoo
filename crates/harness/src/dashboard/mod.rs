@@ -237,18 +237,15 @@ fn harness_bin(harness_home: &Path, from_file: Option<&str>, lookup: Lookup<'_>)
 /// the launcher derives it; empty when none is derived or the loader fails. The library is
 /// sourced by bash, the one place the dashboard runs a shell, with a fixed script.
 fn derived_repo(harness_home: &Path, lookup: Lookup<'_>) -> String {
-    // The harness home's library, else that of the checkout the binary sits in or was built in.
-    let build_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let library = [
-        Some(harness_home.to_path_buf()),
-        checkout_of_binary(),
-        Some(build_checkout),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|checkout| checkout.join("lib").join("instance.sh"))
-    .find(|library| library.is_file())
-    .unwrap_or_else(|| harness_home.join("lib").join("instance.sh"));
+    let Some(library) = checkout_of_binary()
+        .map(|checkout| checkout.join("lib").join("instance.sh"))
+        .filter(|library| library.is_file())
+    else {
+        eprintln!(
+            "harness dashboard: no checkout with lib/instance.sh holds this binary; GH_REPO is not derived"
+        );
+        return String::new();
+    };
     let argv = [
         "bash".to_owned(),
         "-c".to_owned(),
@@ -324,7 +321,14 @@ impl App {
             ("HARNESS_HOME", harness_home.display().to_string()),
             ("HARNESS_INSTANCE_DIR", instance.display().to_string()),
         ];
-        let bin_from_file = env::expand(value("HARNESS_BIN"), &command_placeholders);
+        let mut bin_placeholders = command_placeholders.clone();
+        bin_placeholders.push(("HOME", lookup("HOME").unwrap_or_default()));
+        let bin_text = env::expand(value("HARNESS_BIN"), &bin_placeholders);
+        let bin_from_file = if bin_text.is_empty() {
+            bin_text
+        } else {
+            expand_user(&bin_text, lookup).display().to_string()
+        };
         let bin = harness_bin(&harness_home, Some(&bin_from_file), lookup);
         let fleet_base = command_placeholders.clone();
         command_placeholders.push(("HARNESS_BIN", bin.clone()));
@@ -342,7 +346,7 @@ impl App {
         };
         let state_setting = path_setting("HARNESS_STATE");
         let harness_state = if state_setting.is_empty() {
-            harness_home.join("state")
+            resolve(&harness_home.join("state"))
         } else {
             resolve(&expand_user(&state_setting, lookup))
         };
