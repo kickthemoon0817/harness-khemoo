@@ -7,6 +7,7 @@
 #   tick.sh runner <max> <delay>  internal: hold a slot and run exactly one tick
 #   tick.sh runner <max> <delay> landing
 #                                 internal: one tick that claims only a merge slot's ready issue
+#   tick.sh supervisor <reason>   internal: one supervisor tick (SUPERVISOR=1)
 #
 # The launcher is invoked from cron every couple of minutes. It sizes the pool from
 # each agent's usage windows AND the number of unclaimed issues, then spawns enough
@@ -34,6 +35,11 @@ harness_load
 : "${LOG_RETENTION:=200}"
 : "${HOLD_TIMEOUT_S:=5}"
 : "${USAGE_CEILING_PCT:=90}"
+# The supervisor (docs/ARCHITECTURE.md) is off unless SUPERVISOR=1; off, nothing below that names it runs.
+: "${SUPERVISOR_BUDGET_MIN:=10}"
+: "${SUPERVISOR_MAX_DIRECTIVE_S:=21600}"
+: "${SUPERVISOR_STOP_GRACE_S:=600}"
+supervisor=""; [ "${SUPERVISOR:-}" = 1 ] && supervisor=1
 # The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
 : "${FLEET_BIN:=fleet}"
@@ -48,6 +54,9 @@ LOCKS="$HARNESS_STATE/locks"
 mkdir -p "$LOGS" "$LOCKS"
 CORE_PROMPT="$HARNESS_HOME/prompts/tick-core.md"
 INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
+SUPERVISOR_CORE="$HARNESS_HOME/prompts/supervisor-core.md"
+SUPERVISOR_PROMPT="$HARNESS_INSTANCE_DIR/prompts/supervisor.md"
+SUP="$HARNESS_STATE/supervisor"
 
 # The agent CLIs a tick runs on this host, each reading its prompt from stdin, never argv, which ps
 # shows. AGENT_BIN_<agent> names the executable (default: the agent's name), AGENT_FLAGS_<agent> its
@@ -103,9 +112,15 @@ log_changed() {  # $1 = message
 : "${TICK_MODELS:=claude-opus-5-5}"
 : "${MODEL_COOLDOWN_S:=1800}"
 MODEL_COOL="$HARNESS_STATE/model-cooldown"
-model_list() {
+configured_models() {
     if [ -s "$HARNESS_STATE/tick-model" ]; then tr -s '[:space:]' ' ' < "$HARNESS_STATE/tick-model"
     else printf '%s' "$TICK_MODELS"; fi
+}
+# A directive's models, a subset or reordering of the configured list, replace it while it holds.
+# directive_read sets these; empty, the configuration's own formulas hold.
+d_quiet=""; d_until=""; d_why=""; d_woken=""; d_width=""; d_models=""; d_focus=""; d_avoid=""
+model_list() {
+    if [ -n "$d_models" ]; then printf '%s' "$d_models"; else configured_models; fi
 }
 entry_of() {  # $1 = a list entry; prints it as agent:model
     case $1 in *:*) printf '%s' "$1" ;; *) printf '%s' "$TICK_AGENT:$1" ;; esac
@@ -141,6 +156,65 @@ harness_usage() {
         export MAX_SLOTS MODEL_COOLDOWN_S
         TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" usage "$@"
     )
+}
+
+# Runs `harness <subcommand>` for the supervisor and the directive with what they read; --gh passes
+# GH_TOKEN, as the queue count gets it, to `supervisor due`'s look for Operator comments. The model
+# list is the configured one: a directive is checked against it.
+harness_supervisor() {
+    local gh=""
+    [ "$1" = --gh ] && { gh=1; shift; }
+    (
+        vars=$(compgen -v USAGE_; compgen -v SUPERVISOR_)
+        # shellcheck disable=SC2086,SC2163
+        [ -n "$vars" ] && export $vars
+        [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
+        [ -n "$gh" ] && [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        export MAX_SLOTS MODEL_COOLDOWN_S TICK_MODELS TICK_AGENT LONG_TICK_BUDGET_MIN
+        exec "$HARNESS_BIN" "$@"
+    )
+}
+
+# The supervisor's entry: SUPERVISOR_MODEL, else the configured list's last.
+supervisor_entry() {
+    local m=${SUPERVISOR_MODEL:-}
+    [ -n "$m" ] || m=$(configured_models | awk '{print $NF}')
+    entry_of "$m"
+}
+
+# Sets d_* from the directive (`harness directive effective`): its quiet (a pause, or a wake_at not
+# reached) unless a wake event ended it, its width, models, focus and avoid. Without SUPERVISOR=1,
+# or with no directive, an expired one or one that no longer validates, none is set and the
+# configuration's own formulas hold; `effective` logs an expired or invalid one once.
+directive_read() {
+    local out k v
+    d_quiet=""; d_until=""; d_why=""; d_woken=""; d_width=""; d_models=""; d_focus=""; d_avoid=""
+    [ -n "$supervisor" ] || return 0
+    if ! out=$(harness_supervisor directive effective 2>/dev/null); then
+        log_changed "ERROR harness directive effective failed; defaults in force"
+        return 0
+    fi
+    while IFS='=' read -r k v; do
+        case $k in
+            quiet) d_quiet=$v ;;
+            until) d_until=$v ;;
+            quiet_reason) d_why=$v ;;
+            woken) d_woken=$v ;;
+            width) [[ "$v" =~ ^[0-9]+$ ]] && d_width=$v ;;
+            models) d_models=$v ;;
+            focus) d_focus=$v ;;
+            avoid) d_avoid=$v ;;
+        esac
+    done <<<"$out"
+}
+# The directive's focus and avoid, as sentences for the lane line.
+directive_lane() {
+    local n f="" a=""
+    for n in $d_focus; do f+="${f:+, }#$n"; done
+    for n in $d_avoid; do a+="${a:+, }#$n"; done
+    [ -n "$f" ] && printf ' The supervisor asks: among the issues you may claim, prefer %s.' "$f"
+    [ -n "$a" ] && printf ' The supervisor asks: do not claim %s.' "$a"
+    return 0
 }
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
@@ -192,6 +266,14 @@ instance_missing() {
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
+    if [ -n "$supervisor" ]; then
+        [ -r "$SUPERVISOR_CORE" ] || echo "$SUPERVISOR_CORE"
+        a=$(supervisor_entry); a=${a%%:*}
+        case " $LOCAL_AGENTS " in
+            *" $a "*) bin=$(agent_bin "$a"); type -P -- "$bin" >/dev/null || echo "an executable AGENT_BIN_$a ($bin) for the supervisor" ;;
+            *) echo "$HARNESS_ENV_FILE: the supervisor runs on this host, and only $LOCAL_AGENTS run locally (SUPERVISOR_MODEL)" ;;
+        esac
+    fi
 }
 
 if [ "${1:-}" != check ]; then
@@ -222,6 +304,8 @@ compute_allowed() {
                 then [.windows[] | "\(.name):\(.used_pct | if . == floor then floor else . end)%"] | join(",") else "unknown" end) + "]"] | join(" ")),
             ([.agents[] | select(.reading.state == "stale" or .reading.state == "unreadable") | .agent] | join(" "))' <<<"$doc")
         [[ "$allowed" =~ ^[0-9]+$ ]] || allowed=0
+        # A directive's width only narrows what the windows allow.
+        [ -n "$d_width" ] && [ "$allowed" -gt "$d_width" ] && allowed=$d_width
     else
         log_changed "ERROR harness usage failed ($(tail -n 1 "$err" | cut -c1-200)); starting nothing"
     fi
@@ -241,7 +325,8 @@ read_ticks() {
 }
 # How many of the live ticks of kind $1 (any when empty) are younger than CLAIM_GRACE_S.
 young_ticks() {
-    awk -v grace="${CLAIM_GRACE_S:-360}" -v kind="$1" 'NF && $2 < grace && (kind == "" || $6 == kind)' <<<"$ticks" | wc -l
+    # The supervisor claims nothing, so it never stands for a queued issue.
+    awk -v grace="${CLAIM_GRACE_S:-360}" -v kind="$1" 'NF && $2 < grace && (kind == "" ? $6 != "supervisor" : $6 == kind)' <<<"$ticks" | wc -l
 }
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
@@ -257,6 +342,8 @@ compute_want() {
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     read_ticks
+    # The supervisor's claimable-count event compares this with the count at its last run.
+    [ -n "$supervisor" ] && mkdir -p "$SUP" && echo "$claimable" > "$SUP/claimable"
     young=$(young_ticks "")
     want=$(( claimable - young ))
     [ "$want" -lt 0 ] && want=0
@@ -356,16 +443,40 @@ LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If n
 # The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
 # the key's value through a sed escape, never eval, so a value cannot run as code.
 PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
-compose_prompt() {  # $1 = the lane line
-    local k v subst=()
-    for k in $PROMPT_KEYS; do
+SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S"
+prompt_subst() {  # sets subst to the sed expressions for the keys $@
+    local k v
+    subst=()
+    for k in "$@"; do
         v=$(printf '%s' "${!k:-}" | tr '\n' ' ' | sed 's/[\\&|]/\\&/g')
         subst+=(-e "s|{{$k}}|$v|g")
     done
+}
+compose_prompt() {  # $1 = the lane line
+    local subst
+    # shellcheck disable=SC2086
+    prompt_subst $PROMPT_KEYS
     printf '%s\n\n' "$1"
     sed "${subst[@]}" "$CORE_PROMPT"
     printf '\n## This installation\n\n'
     sed "${subst[@]}" "$INSTANCE_PROMPT"
+}
+# The supervisor's prompt: its core rules, this installation's own when it has them, then the health
+# snapshot. GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
+compose_supervisor_prompt() {
+    local subst doc
+    # shellcheck disable=SC2086
+    prompt_subst $PROMPT_KEYS $SUPERVISOR_PROMPT_KEYS
+    sed "${subst[@]}" "$SUPERVISOR_CORE"
+    if [ -r "$SUPERVISOR_PROMPT" ]; then
+        printf '\n## This installation\n\n'
+        sed "${subst[@]}" "$SUPERVISOR_PROMPT"
+    fi
+    printf '\n## Health snapshot\n\n'
+    if ! doc=$( [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN; "$HARNESS_BIN" health --json 2>&1 ); then
+        doc=$(jq -nc --arg e "$(printf '%s' "$doc" | tail -n 1 | cut -c1-300)" '{error: ("harness health failed: " + $e)}')
+    fi
+    printf '%s\n' "$doc"
 }
 
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
@@ -433,6 +544,10 @@ if [ "${1:-}" = check ]; then
     done
     echo "models:        $(model_list)"
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; pool_lane=$lane_entry; else echo "model lane:    off"; fi
+    if [ -n "$supervisor" ]; then
+        echo "supervisor:    $(supervisor_entry), budget $SUPERVISOR_BUDGET_MIN min, at least ${SUPERVISOR_MIN_INTERVAL_S:-600}s apart, at most ${SUPERVISOR_INTERVAL_S:-1800}s"
+        echo "directive:     $(harness_supervisor directive show 2>&1 | head -1)"
+    fi
     # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
     for h in env.sh hold worktree-busy worktree-remove; do
         f="$HARNESS_INSTANCE_DIR/hooks/$h"
@@ -489,6 +604,8 @@ if [ "${1:-}" = "runner" ]; then
     [ "$stagger" -gt 0 ] && sleep "$stagger"
     # A pause set while the launcher staggered its runners still stops the ones not yet started.
     harness_paused && exit 0
+    directive_read
+    [ -n "$d_quiet" ] && exit 0
 
     slot=""
     s=1
@@ -535,6 +652,7 @@ if [ "${1:-}" = "runner" ]; then
                     lane="This tick runs on ${entry#*:}: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
                 fi
             fi
+            lane+=$(directive_lane)
             if [ -z "$entry" ]; then
                 # Logged once, not as a tick log of its own: those would push real ones out.
                 log_changed "no entry of '$(model_list)' can run: each cools down or its agent is at its usage cap; nothing run"
@@ -572,7 +690,8 @@ if [ "${1:-}" = "runner" ]; then
             break
         done
 
-        ls -1t "$LOGS" | tail -n +$(( LOG_RETENTION + 1 )) | while read -r old; do rm -f "$LOGS/$old"; done
+        # Only tick logs: the allocator's, the directive's and the supervisor's own logs live beside them.
+        ls -1t "$LOGS"/tick-* 2>/dev/null | tail -n +$(( LOG_RETENTION + 1 )) | while read -r old; do rm -f "$old"; done
         chain=$(( chain + 1 ))
         dur=$(( $(date +%s) - start_s ))
         # A short tick found nothing to claim or failed: leave the retry to cron.
@@ -580,6 +699,8 @@ if [ "${1:-}" = "runner" ]; then
         [ -n "$landing" ] && break
         [ "$chain" -ge "${MAX_CHAIN:-24}" ] && break
         harness_paused && break
+        directive_read
+        [ -n "$d_quiet" ] && break
         compute_allowed
         [ "$slot" -gt "$allowed" ] && break
         compute_want
@@ -590,9 +711,42 @@ if [ "${1:-}" = "runner" ]; then
     exit 0
 fi
 
+# ------------------------------------------------------------ supervisor mode
+# One supervisor tick, outside the slots: its prompt and the health snapshot on stdin, its budget
+# held by timeout. It holds supervisor.lock, so at most one runs, and its run is recorded under
+# $HARNESS_STATE/supervisor/ for the next `supervisor due`.
+if [ "${1:-}" = supervisor ]; then
+    exec {sfd}>"$LOCKS/supervisor.lock"
+    flock -n "$sfd" || exit 0
+    harness_paused && exit 0
+    entry=$(supervisor_entry); agent=${entry%%:*}; model=${entry#*:}
+    [[ " $LOCAL_AGENTS " == *" $agent "* ]] || exit 0
+    log="$LOGS/supervisor-$(date -u +%Y%m%dT%H%M%SZ).log"
+    harness_supervisor supervisor begin --reason "${2:-}" >/dev/null 2>>"$log"
+    run_s=$(date +%s)
+    agent_argv "$agent" "$model"
+    compose_supervisor_prompt \
+        | HARNESS_TICK="state=$HARNESS_STATE slot=0 agent=$agent model=$model kind=supervisor" \
+            timeout -k 30 "$(( SUPERVISOR_BUDGET_MIN * 60 ))" "${argv[@]}" >>"$log" 2>&1
+    rc=$?
+    dur=$(( $(date +%s) - run_s ))
+    echo "[tick.sh] exit=$rc duration=${dur}s agent=$agent model=$model" >>"$log"
+    if [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && tail -n 40 "$log" | grep -qE -- "$(agent_limit_re "$agent")"; then
+        mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
+        echo "$(date -u +%Y%m%dT%H%M%SZ) supervisor $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
+    fi
+    harness_supervisor supervisor end --exit "$rc" --duration "$dur" >/dev/null 2>>"$log"
+    ls -1t "$LOGS"/supervisor-* 2>/dev/null | tail -n +21 | while read -r old; do rm -f "$old"; done
+    exit 0
+fi
+
 # -------------------------------------------------------------- launcher mode
 
-harness_paused && exit 0
+if harness_paused; then
+    # The supervisor's unpause event is the first firing that no longer finds this.
+    [ -n "$supervisor" ] && mkdir -p "$SUP" && touch "$SUP/paused"
+    exit 0
+fi
 missing=$(instance_missing)
 if [ -n "$missing" ]; then
     # Say so at most hourly; `tick.sh check` names everything that is missing.
@@ -602,6 +756,24 @@ if [ -n "$missing" ]; then
         echo "$(date -u +%Y%m%dT%H%M%SZ) instance incomplete: $(printf '%s\n' "$missing" | head -1)" >>"$LOGS/allocator.log"
     fi
     exit 0
+fi
+
+# The supervisor runs outside the slots, so it is weighed before them: a stop whose grace ended is
+# sent, a supervisor tick starts when one is due, and a directive's quiet ends the firing here.
+if [ -n "$supervisor" ]; then
+    harness_supervisor directive enforce >/dev/null 2>&1 || log_changed "ERROR harness directive enforce failed"
+    due=$(harness_supervisor --gh supervisor due 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+        setsid "$0" supervisor "${due#due }" >/dev/null 2>&1 &
+    elif [ "$rc" -ne 1 ]; then
+        log_changed "ERROR harness supervisor due failed ($(printf '%s' "$due" | tail -n 1 | cut -c1-200)); no supervisor tick"
+    fi
+    directive_read
+    if [ -n "$d_quiet" ]; then
+        log_changed "directive: quiet ($d_quiet) until $d_until: $d_why"
+        exit 0
+    fi
+    [ -n "$d_woken" ] && log_changed "directive: its quiet ended early on $d_woken"
 fi
 
 # 1. Cheapest gate: if every slot is held there is nothing to decide.
@@ -616,8 +788,20 @@ done
 # No entry can run even a landing tick (each cools down or its agent's windows allow none), and
 # no model lane can run: a runner would only log that nothing ran. A pick that fails goes on, so
 # compute_allowed logs why.
-pick_model "" --landing >/dev/null 2>&1
-[ "$?" -eq 1 ] && ! lane_wanted && exit 0
+pick_model "" --landing >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 1 ] && ! lane_wanted; then
+    # Every cap at 0 with a reset ahead stays so until then: said once, not at each firing.
+    at=$(harness_usage --json 2>/dev/null | jq -r '[.agents[]] as $a
+        | if ($a | length) > 0 and all($a[]; .cap == 0)
+          then [$a[].windows[] | select(.cap == 0) | .resets_at
+                | if type == "number" then . elif type == "string"
+                  then sub("\\.[0-9]+"; "") | sub("(\\+00:00|Z)$"; "Z") | (try fromdateiso8601 catch empty)
+                  else empty end | select(. > now)] | min // empty
+          else empty end' 2>/dev/null)
+    [[ "$at" =~ ^[0-9]+$ ]] \
+        && log_changed "every agent is at its usage cap; nothing starts before the earliest reset, $(date -u -d "@$at" +%Y%m%dT%H%M%SZ)"
+    exit 0
+fi
 
 compute_allowed
 if [ -n "$unknown" ]; then

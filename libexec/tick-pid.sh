@@ -14,6 +14,8 @@ marked() {  # $1 = pid
     # Bounded: Linux caps a process's argv and environment together at a few MiB.
     while IFS= read -r -d '' entry; do
         case $entry in
+            # The supervisor claims nothing and takes no merge lock.
+            "HARNESS_TICK=state=$state slot="*" kind=supervisor") return 1 ;;
             "HARNESS_TICK=state=$state slot="*|FLEET_SESSION=?*) return 0 ;;
         esac
     done < <(head -c 4194304 "/proc/$1/environ" 2>/dev/null)
