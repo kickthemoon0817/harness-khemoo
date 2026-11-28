@@ -374,6 +374,14 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(by_slot[2].tags, ())
         self.assertEqual(status.unparsed_lines, ())
 
+    def test_lease_status_cost_read_limit_line_is_known(self) -> None:
+        status = StateParsers.parse_lease_status(
+            "cost-read host limit: 1 host(s) held whole while another tick is live (held: 2504@ci@w; live ticks: 3)\n"
+            "slot 4 HELD 2504 4242 2026-11-28T00:00:00Z domain=80 remote-all render (alive)\n"
+        )
+        self.assertEqual(status.unparsed_lines, ())
+        self.assertEqual([slot.slot for slot in status.slots], [4])
+
     def test_stalls_keep_the_newest(self) -> None:
         stalls = StateParsers.parse_stalls((FIXTURES / "stalls.log").read_text(), 2)
         self.assertEqual([stall.kind for stall in stalls], ["lock_wait", "gpu_idle"])
