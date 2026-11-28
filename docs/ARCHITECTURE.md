@@ -39,7 +39,8 @@ Ordered cheapest-first because it runs every couple of minutes:
 ### Runner (`tick.sh runner <max> <delay>`)
 
 Sleeps for its stagger, takes the first free slot via `flock`, and runs an agent CLI (Claude
-Code, Codex or Gemini) with the composed prompt on stdin: the lane line, `prompts/tick-core.md`,
+Code, Codex or agy, the Antigravity CLI) with the composed prompt on stdin, as one stream-json line
+for agy: the lane line, `prompts/tick-core.md`,
 then the instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is
 a normal outcome, not an error.
 
@@ -112,7 +113,7 @@ still hold, and the agent runs at most one tick past its cap, for one budget. At
 - no shell, no file access, no web and no MCP server (the flags `docs/INSTANCE.md` lists per agent);
 - an empty temporary working directory, and an environment that holds only what its CLI needs to
   sign in, nothing of `harness.env`;
-- an agent whose CLI cannot be confined this way, gemini today, is refused as `SUPERVISOR_MODEL`.
+- an agent whose CLI cannot be confined this way, agy today, is refused as `SUPERVISOR_MODEL`.
 
 Its prompt is `prompts/supervisor-core.md` and the instance's `prompts/supervisor.md`, then the
 output of `harness health --json`, all on stdin. The snapshot is bounded and holds usage, live

@@ -1,9 +1,9 @@
 # Autonomous GitHub issue harness for coding-agent CLIs
 
-The harness works a GitHub issue queue on its own, with Claude Code, Codex or Gemini CLI. A tick
-claims one labelled issue, fixes it in its own worktree, verifies the fix, and opens a pull request
-that carries the evidence. It either lands the PR or leaves it for review. Cron fires a bash
-launcher every couple of minutes. The launcher sizes the pool from each agent's usage windows and
+The harness works a GitHub issue queue on its own, with Claude Code, Codex or agy (the Antigravity
+CLI). A tick claims one labelled issue, fixes it in its own worktree, verifies the fix, and opens a
+pull request that carries the evidence. It either lands the PR or leaves it for review. Cron fires
+a bash launcher every couple of minutes. The launcher sizes the pool from each agent's usage windows and
 the queue depth, and each tick is one non-interactive agent run, on the best model of one priority
 list across agents. Nothing runs as a daemon and there is no database: all durable state lives in
 the issues and PRs. The core knows nothing about your project. Your build, tests, rules and
