@@ -984,4 +984,6 @@ cargo deny check advisories bans licenses sources
 ```
 
 Every crate forbids `unsafe` code. TLS is rustls with the ring provider; there is no OpenSSL. CI
-(`.github/workflows/ci.yml`) runs the commands above and the core's `tests/run.sh`.
+(`.github/workflows/ci.yml`) runs the commands above but `cargo deny`, and the core's `tests/run.sh`,
+for every change outside `docs/` and the README. `.github/workflows/deny.yml` runs `cargo deny` when a
+manifest or `deny.toml` changes, and weekly for new advisories.

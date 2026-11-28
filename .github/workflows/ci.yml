@@ -3,7 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**", "README.md"]
   pull_request:
+    paths-ignore: ["docs/**", "README.md"]
 
 permissions:
   contents: read
@@ -27,11 +29,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: Cargo.toml
-          command: check
-          command-arguments: advisories bans licenses sources
 
   core:
     runs-on: ubuntu-latest
@@ -42,7 +39,11 @@ jobs:
         with:
           toolchain: "1.94.1"
       - uses: Swatinem/rust-cache@v2
+      # The runner image carries these; install only what a newer image dropped.
       - run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git util-linux procps bc zstd jq curl
+          declare -A pkg=([git]=git [flock]=util-linux [pgrep]=procps [bc]=bc [zstd]=zstd [jq]=jq [curl]=curl)
+          missing=(); for cmd in "${!pkg[@]}"; do command -v "$cmd" >/dev/null || missing+=("${pkg[$cmd]}"); done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          fi
       - run: tests/run.sh
