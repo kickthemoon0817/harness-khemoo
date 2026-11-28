@@ -623,11 +623,11 @@ fn create_log(dir: &Path) -> io::Result<tokio::fs::File> {
     Ok(tokio::fs::File::from_std(file))
 }
 
-/// Writes the session's tick file: the agent's pid and its start time, field 22 of
-/// `/proc/<pid>/stat`, which a reused pid does not share. Written whole, by rename, and readable by
+/// Writes the session's tick file: the agent's pid, its start time, field 22 of
+/// `/proc/<pid>/stat`, which a reused pid does not share, and the boot it counts from. Written whole, by rename, and readable by
 /// fleetd's user only. Without `/proc` there is no start time to record, and no file.
 fn write_tick(dir: &Path, pid: Pid) {
-    let Some(start) = start_ticks(pid) else {
+    let (Some(start), Some(boot_id)) = (start_ticks(pid), boot_id()) else {
         return;
     };
     let result = (|| {
@@ -638,7 +638,7 @@ fn write_tick(dir: &Path, pid: Pid) {
             .truncate(true)
             .mode(0o600)
             .open(&tmp)?;
-        writeln!(file, "{} {start}", pid.as_raw_nonzero())?;
+        writeln!(file, "{} {start} {boot_id}", pid.as_raw_nonzero())?;
         std::fs::rename(&tmp, dir.join(TICK_FILE))
     })();
     if let Err(e) = result {
@@ -656,6 +656,15 @@ fn start_ticks(pid: Pid) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn start_ticks(_pid: Pid) -> Option<u64> {
     None
+}
+
+/// This boot's id: start times count from boot, so a file a crash left behind must not match a
+/// process of the next one.
+fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
 }
 
 fn read_record(dir: &Path) -> io::Result<Session> {

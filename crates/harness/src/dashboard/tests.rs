@@ -278,7 +278,11 @@ impl FixtureHarness {
         self.ticks.push(child);
         std::fs::write(
             self.state.join(format!("locks/slot{slot}.tick")),
-            format!("{pid} {} {agent} {model} {kind}\n", start_ticks(pid)),
+            format!(
+                "{pid} {} {} {agent} {model} {kind}\n",
+                start_ticks(pid),
+                boot_id()
+            ),
         )
         .ok();
         std::fs::write(
@@ -1161,6 +1165,15 @@ fn start_ticks(pid: i64) -> u64 {
     stat.rsplit_once(')')
         .and_then(|(_, rest)| rest.split_whitespace().nth(19)?.parse().ok())
         .unwrap_or_default()
+}
+
+/// This boot's id, as the runner records it in a slot file.
+#[cfg(target_os = "linux")]
+fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// Whether lslocks runs and sees the locks of this namespace: some containers show none.
@@ -3090,9 +3103,10 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
     std::fs::write(
         harness.state.join("locks/slot4.tick"),
         format!(
-            "{} {} claude m work\n",
+            "{} {} {} claude m work\n",
             reused.id(),
-            start_ticks(i64::from(reused.id())) + 1
+            start_ticks(i64::from(reused.id())) + 1,
+            boot_id()
         ),
     )
     .expect("the slot file writes");

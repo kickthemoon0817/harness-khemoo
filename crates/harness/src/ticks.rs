@@ -1,9 +1,9 @@
 //! `harness ticks`: the live ticks of one harness state directory.
 //!
 //! The runner starts each tick, a local agent CLI or `fleet dispatch`, as its own child and records
-//! it in `<state>/locks/slot<n>.tick` as `pid starttime agent model kind` until it ends, so a slot
-//! holds one tick at most. A tick is live while `/proc/<pid>/stat` gives the same start time, which
-//! a reused pid does not. Only `stat` is read, never the process's environment or descriptors: an
+//! it in `<state>/locks/slot<n>.tick` as `pid starttime bootid agent model kind` until it ends, so a
+//! slot holds one tick at most. A tick is live while this boot's `/proc/<pid>/stat` gives the same
+//! start time, which a reused pid does not. Only `stat` is read, never the process's environment or descriptors: an
 //! agent CLI that marks itself non-dumpable, as the release Codex CLI does, keeps both private.
 
 use std::fs::File;
@@ -128,6 +128,7 @@ pub fn scan(state: &str) -> io::Result<Vec<Tick>> {
 struct Record {
     pid: u32,
     start_ticks: u64,
+    boot_id: String,
     agent: String,
     model: String,
     kind: Kind,
@@ -139,6 +140,7 @@ impl Record {
         let record = Self {
             pid: fields.next()?.parse().ok().filter(|pid| *pid > 1)?,
             start_ticks: fields.next()?.parse().ok()?,
+            boot_id: fields.next()?.to_owned(),
             agent: fields.next()?.to_owned(),
             model: fields.next()?.to_owned(),
             kind: Kind::parse(fields.next()?)?,
@@ -154,6 +156,7 @@ fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
         Err(error) => return Err(error),
     };
     let uid = rustix::process::getuid().as_raw();
+    let mut boot_id: Option<String> = None;
     let mut found = Vec::new();
     for entry in entries.take(LOCKS_LIMIT).flatten() {
         let name = entry.file_name();
@@ -178,7 +181,14 @@ fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
         else {
             continue;
         };
-        if start_ticks(proc_root, record.pid) == Some(record.start_ticks) {
+        // Start times count from boot, so a file a crash left behind could match a new process
+        // after a reboot: only this boot's records count.
+        if boot_id.is_none() {
+            boot_id = Some(read_boot_id(proc_root)?);
+        }
+        if boot_id.as_deref() == Some(record.boot_id.as_str())
+            && start_ticks(proc_root, record.pid) == Some(record.start_ticks)
+        {
             found.push((slot, record));
         }
     }
@@ -231,6 +241,18 @@ fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn read_boot_id(proc_root: &Path) -> io::Result<String> {
+    let bytes = read_limited(&proc_root.join("sys/kernel/random/boot_id"), STAT_LIMIT)?;
+    let id = String::from_utf8_lossy(&bytes).trim().to_owned();
+    if id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "an empty boot id",
+        ));
+    }
+    Ok(id)
+}
+
 fn uptime_s(proc_root: &Path) -> io::Result<f64> {
     let text = read_limited(&proc_root.join("uptime"), STAT_LIMIT)?;
     String::from_utf8_lossy(&text)
@@ -255,10 +277,11 @@ mod tests {
     #[test]
     fn a_slot_record_parses() {
         assert_eq!(
-            Record::parse("4242 123456 codex gpt-5.5 lane\n"),
+            Record::parse("4242 123456 b00t codex gpt-5.5 lane\n"),
             Some(Record {
                 pid: 4242,
                 start_ticks: 123_456,
+                boot_id: "b00t".to_owned(),
                 agent: "codex".to_owned(),
                 model: "gpt-5.5".to_owned(),
                 kind: Kind::Lane,
@@ -270,12 +293,13 @@ mod tests {
     fn a_malformed_slot_record_is_none() {
         for text in [
             "",
-            "4242 123456 codex gpt-5.5",
-            "x 123456 codex m work",
-            "1 123456 codex m work",
-            "4242 -1 codex m work",
-            "4242 123456 codex m other",
-            "4242 123456 codex m work extra",
+            "4242 123456 b codex gpt-5.5",
+            "4242 123456 codex gpt-5.5 work",
+            "x 123456 b codex m work",
+            "1 123456 b codex m work",
+            "4242 -1 b codex m work",
+            "4242 123456 b codex m other",
+            "4242 123456 b codex m work extra",
         ] {
             assert_eq!(Record::parse(text), None, "{text:?}");
         }

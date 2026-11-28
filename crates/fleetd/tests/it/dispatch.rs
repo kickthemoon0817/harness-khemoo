@@ -93,7 +93,7 @@ async fn the_tick_file_records_the_agent_until_it_ends() {
          stat=$(cat /proc/$$/stat); set -- ${stat##*) }\n\
          echo \"$FLEET_SESSION_TICK\"\n\
          echo \"$(stat -c %a \"$FLEET_SESSION_TICK\") $(cat \"$FLEET_SESSION_TICK\")\"\n\
-         echo \"600 $$ ${20}\"\n",
+         echo \"600 $$ ${20} $(cat /proc/sys/kernel/random/boot_id)\"\n",
     );
     let toml = base_config(&dir) + &adapter("a", &agent, &[], &root, "");
     let running = start(&toml).await;

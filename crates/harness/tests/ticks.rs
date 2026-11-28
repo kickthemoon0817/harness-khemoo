@@ -57,11 +57,18 @@ fn start_ticks(pid: u32) -> u64 {
     rest.split_whitespace().nth(19).unwrap().parse().unwrap()
 }
 
+fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
 /// Records `pid` as slot `slot`'s tick, as the runner does once it has started the agent.
 fn record(dir: &Path, slot: u32, pid: u32, start: u64, agent: &str, kind: &str) {
     std::fs::write(
         dir.join(format!("state/locks/slot{slot}.tick")),
-        format!("{pid} {start} {agent} model-{slot} {kind}\n"),
+        format!("{pid} {start} {} {agent} model-{slot} {kind}\n", boot_id()),
     )
     .unwrap();
 }
@@ -138,7 +145,16 @@ fn a_stale_or_reused_pid_is_not_a_tick() {
     std::fs::write(dir.join("state/locks/slot3.tick"), "not a record\n").unwrap();
     std::fs::write(
         dir.join("state/locks/slotx.tick"),
-        format!("{live} {} claude m work\n", start_ticks(live)),
+        format!("{live} {} {} claude m work\n", start_ticks(live), boot_id()),
+    )
+    .unwrap();
+    // A file a crash left behind, from another boot: its pid and start time may match by chance.
+    std::fs::write(
+        dir.join("state/locks/slot4.tick"),
+        format!(
+            "{live} {} 00000000-0000-0000-0000-000000000000 claude m work\n",
+            start_ticks(live)
+        ),
     )
     .unwrap();
     assert_eq!(scan(&state_of(&dir)).unwrap(), []);
