@@ -125,28 +125,6 @@ fn secret_variable(name: &str, value: &str) -> bool {
     secret_name || URL_WITH_CREDENTIALS.is_match(value)
 }
 
-/// Where each usage window cuts the pool (lib/usage.sh defaults).
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct UsageThresholds {
-    pub ceiling_pct: i64,
-    pub five_half_at: i64,
-    pub five_one_at: i64,
-    pub five_none_at: i64,
-    pub week_half_at: i64,
-    pub week_one_at: i64,
-    pub week_none_at: i64,
-}
-
-pub const USAGE_THRESHOLDS: UsageThresholds = UsageThresholds {
-    ceiling_pct: 90,
-    five_half_at: 60,
-    five_one_at: 70,
-    five_none_at: 80,
-    week_half_at: 80,
-    week_one_at: 85,
-    week_none_at: 88,
-};
-
 /// Where the dashboard reads from and writes to, how often each source refreshes, and the
 /// instance's optional sources; each optional source left empty keeps its panel off the page.
 ///
@@ -172,6 +150,10 @@ pub struct Config {
     pub harness_bin: String,
     pub title: String,
     pub lane_model: String,
+    /// The state directory as a tick's `HARNESS_TICK` may name it.
+    pub tick_states: Vec<String>,
+    /// harness.env's model list, usage and agent keys, which win over the environment's.
+    pub usage_settings: Vec<(String, String)>,
     pub labels: QueueLabels,
     pub usage_cache: PathBuf,
     pub crontab_command: Vec<String>,
@@ -229,6 +211,8 @@ impl Config {
             harness_bin: "harness".to_owned(),
             title: "Harness status".to_owned(),
             lane_model: String::new(),
+            tick_states: Vec::new(),
+            usage_settings: Vec::new(),
             labels: QueueLabels::default(),
             usage_cache: PathBuf::from(std::env::var("HOME").unwrap_or_default())
                 .join(".claude")
@@ -763,9 +747,17 @@ impl Collector {
             self.refresh_resource_status_in_place();
         }
         let started = self.now();
-        match self.scanner.scan_processes() {
-            Ok(processes) => {
-                let ticks = self.scanner.find_ticks(&processes);
+        let states = if self.config.tick_states.is_empty() {
+            vec![self.config.state_dir().display().to_string()]
+        } else {
+            self.config.tick_states.clone()
+        };
+        let found = self.scanner.scan_processes().and_then(|processes| {
+            let ticks = self.scanner.find_ticks(&processes, &states, self.now())?;
+            Ok((processes, ticks))
+        });
+        match found {
+            Ok((processes, ticks)) => {
                 *lock(&self.processes) = Arc::new(processes);
                 let duration = self.now() - started;
                 lock(&self.results).procs = Some(Slot::fresh(ticks, started, Some(duration)));
@@ -1391,15 +1383,61 @@ impl Collector {
         }
     }
 
-    /// `state/tick-model`'s models, best first.
-    pub fn read_tick_models(&self) -> Vec<String> {
-        read_text_or_empty(&self.config.state_dir().join("tick-model"))
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect()
+    /// A setting as the launcher hands it to `harness usage`: harness.env's, else the
+    /// environment's; the model list is `state/tick-model` when that is set, the lane counts only
+    /// while `LANE_LABEL` turns it on, and the state directory and the claude cache are the
+    /// dashboard's own.
+    pub fn usage_setting(&self, key: &str) -> Option<String> {
+        match key {
+            "HARNESS_STATE" => Some(self.config.state_dir().display().to_string()),
+            "USAGE_CACHE" => Some(self.config.usage_cache.display().to_string()),
+            "TICK_MODELS" => {
+                let listed = read_text_or_empty(&self.config.state_dir().join("tick-model"));
+                let listed = listed.split_whitespace().collect::<Vec<_>>().join(" ");
+                if listed.is_empty() {
+                    self.setting("TICK_MODELS")
+                } else {
+                    Some(listed)
+                }
+            }
+            "LANE_MODEL" if self.config.labels.lane.is_empty() => None,
+            _ => self.setting(key),
+        }
     }
 
-    /// Models still cooling down after a usage limit: model, label and seconds left.
+    /// harness.env's value of a model list, usage or agent key, else the environment's.
+    fn setting(&self, key: &str) -> Option<String> {
+        self.config
+            .usage_settings
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var(key).ok())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// A model list, usage or agent key's value, or an empty string.
+    pub fn setting_or_empty(&self, key: &str) -> String {
+        self.setting(key).unwrap_or_default()
+    }
+
+    /// The model list, best first, each entry `agent:model`: `state/tick-model`, else
+    /// `TICK_MODELS`, a bare model run by `TICK_AGENT`.
+    pub fn read_tick_models(&self) -> Vec<String> {
+        let text = self
+            .usage_setting("TICK_MODELS")
+            .unwrap_or_else(|| "claude-opus-5-5".to_owned());
+        let agent = self
+            .usage_setting("TICK_AGENT")
+            .unwrap_or_else(|| "claude".to_owned());
+        match crate::usage::Entry::list(&text, &agent) {
+            Ok(entries) => entries.iter().map(ToString::to_string).collect(),
+            Err(_) => text.split_whitespace().map(str::to_owned).collect(),
+        }
+    }
+
+    /// Entries still cooling down after a usage limit, stamped `<agent>:<model>`: the entry, its
+    /// agent and model, a label and the seconds left.
     pub fn cooling_models(&self, now: f64) -> Vec<Value> {
         let Ok(entries) = std::fs::read_dir(self.config.state_dir().join("model-cooldown")) else {
             return Vec::new();
@@ -1419,7 +1457,13 @@ impl Collector {
         #[allow(clippy::cast_possible_truncation)]
         cooling
             .into_iter()
-            .map(|(model, remaining)| serde_json::json!({"model": model, "remaining_s": remaining as i64, "label": model_label(&model)}))
+            .map(|(entry, remaining)| {
+                let (agent, model) = entry.split_once(':').unwrap_or(("", entry.as_str()));
+                serde_json::json!({
+                    "entry": entry, "agent": agent, "model": model, "remaining_s": remaining as i64,
+                    "label": entry_label(&entry),
+                })
+            })
             .collect()
     }
 
@@ -1634,6 +1678,14 @@ impl Collector {
             .device_probe_command
             .first()
             .map_or("", |program| basename(program))
+    }
+}
+
+/// An `agent:model` entry for people: `claude Opus 5.5`; a bare model reads as its label.
+pub fn entry_label(entry: &str) -> String {
+    match entry.split_once(':') {
+        Some((agent, model)) => format!("{agent} {}", model_label(model)),
+        None => model_label(entry),
     }
 }
 

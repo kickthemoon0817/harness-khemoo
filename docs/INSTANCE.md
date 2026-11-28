@@ -318,6 +318,13 @@ Every source below is optional. While its keys are empty, its panel stays off th
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
 | `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and any `FLEET_CONFIG` in its environment as a tick's fleet has them, so a plain `fleet status --json` reads the instance's fleet.toml |
 
+The live ticks are those `harness ticks` lists, with the agent, model and kind each marker names.
+The usage panel weighs each agent's windows as `harness usage` does, from the model list
+(`state/tick-model`, else `TICK_MODELS`), `LANE_MODEL` while `LANE_LABEL` is set, `TICK_AGENT`,
+`MAX_SLOTS`, `TICK_WIDTH`, `MODEL_COOLDOWN_S` and every `USAGE_*` and `AGENT_*` key, read from
+harness.env as above (expanded as a path key is) and else from the environment. It never runs a
+`USAGE_FETCH` command: refreshing a reading is the launcher's job.
+
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has
 tab-separated `time host connect_s upload_mb_s load1 nproc gpu_util_pct gpu_mem_used_mb status`

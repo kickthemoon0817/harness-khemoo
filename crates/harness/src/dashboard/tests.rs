@@ -82,16 +82,16 @@ impl FixtureHarness {
             ("host_health.streaks", state.join("host_health.streaks")),
             ("stalls.log", state.join("stalls.log")),
             ("allocator.log", state.join("logs/allocator.log")),
-            ("usage-cache.json", home.join("usage-cache.json")),
         ] {
             std::fs::copy(FIXTURES.join(from), to).ok();
         }
+        write_usage_cache(&home.join("usage-cache.json"), 64, 52);
         std::fs::write(
             state.join("tick-model"),
             "claude-opus-5-5 claude-sonnet-5-2\n",
         )
         .ok();
-        std::fs::write(state.join("model-cooldown/claude-sonnet-5-2"), "").ok();
+        std::fs::write(state.join("model-cooldown/claude:claude-sonnet-5-2"), "").ok();
         std::fs::write(
             state.join("locks/claim.2501"),
             format!("2501 {} 2026-11-26T01:10:00Z\n", std::process::id()),
@@ -212,6 +212,28 @@ impl FixtureHarness {
     /// never run: it may be any text, quoting that does not parse included.
     #[cfg(target_os = "linux")]
     pub fn start_fake_tick(&mut self, issue: i64, slot: i64, tool_command: &str) -> i64 {
+        self.start_marked_tick(
+            issue,
+            slot,
+            tool_command,
+            "claude",
+            "claude-opus-5-5",
+            "work",
+        )
+    }
+
+    /// A fake tick as the runner starts one: `HARNESS_TICK` naming this state directory, its
+    /// slot, agent, model and kind, with the slot lock open.
+    #[cfg(target_os = "linux")]
+    pub fn start_marked_tick(
+        &mut self,
+        issue: i64,
+        slot: i64,
+        tool_command: &str,
+        agent: &str,
+        model: &str,
+        kind: &str,
+    ) -> i64 {
         use std::os::unix::process::CommandExt as _;
         let escaped = tool_command.replace('\'', "'\"'\"'");
         let tool_argument = self.home.join(format!("tool_argument_{slot}.txt"));
@@ -233,12 +255,20 @@ impl FixtureHarness {
         let child = Command::new("bash")
             .args([
                 "-c",
-                "exec 9>\"$1\" >\"$2\"; exec -a claude bash -p \"$3\" \"This tick runs on claude-opus-5-5: never claim\" --model claude-opus-5-5",
+                "exec 9>\"$1\" >\"$2\"; exec -a \"$4\" bash \"$3\"",
                 "_",
             ])
             .arg(&lock)
             .arg(&log)
             .arg(&script)
+            .arg(agent)
+            .env(
+                "HARNESS_TICK",
+                format!(
+                    "state={} slot={slot} agent={agent} model={model} kind={kind}",
+                    self.state.display()
+                ),
+            )
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
@@ -366,6 +396,18 @@ impl FixtureHarness {
         }
         (holder_pid, waiter_pid)
     }
+}
+
+/// A claude usage cache read now, with these window percentages.
+fn write_usage_cache(path: &Path, five_hour: u32, weekly: u32) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    std::fs::write(
+        path,
+        format!(r#"{{"timestamp":{now_ms},"data":{{"fiveHourPercent":{five_hour},"fiveHourResetsAt":"2026-11-26T04:00:00Z","weeklyPercent":{weekly}}}}}"#),
+    )
+    .ok();
 }
 
 /// A fake gh answering the dashboard's read-only queries from the fixtures, logging each call.
@@ -693,20 +735,40 @@ fn every_panel_has_data() {
         Some(json!("chain"))
     );
     let usage = &snapshot["usage"];
+    assert_eq!(usage["agents"].as_array().map(Vec::len), Some(1));
+    let claude = &usage["agents"][0];
     assert_eq!(
-        (
-            &usage["five_hour_pct"],
-            &usage["five_hour_band"],
-            &usage["allowed_band"]
-        ),
-        (&json!(64.0), &json!("half"), &json!("half"))
+        (&claude["agent"], &claude["reading"]["state"]),
+        (&json!("claude"), &json!("fresh"))
     );
-    assert_eq!(usage["age_s"], 120);
+    let windows: Vec<(Value, Value, Value)> = claude["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|window| {
+            (
+                window["name"].clone(),
+                window["used_pct"].clone(),
+                window["cap"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        windows,
+        [
+            (json!("five_hour"), json!(64.0), json!(4)),
+            (json!("weekly"), json!(52.0), json!(8))
+        ]
+    );
+    assert_eq!(
+        (&claude["cap"], &usage["pool_cap"], &usage["width"]),
+        (&json!(4), &json!(4), &json!(8))
+    );
     let harness = &snapshot["harness"];
     assert_eq!(harness["last_allowed"], 10);
     assert_eq!(
         harness["tick_models"],
-        json!(["claude-opus-5-5", "claude-sonnet-5-2"])
+        json!(["claude:claude-opus-5-5", "claude:claude-sonnet-5-2"])
     );
     let cooling = harness["cooling_models"]
         .as_array()
@@ -714,8 +776,16 @@ fn every_panel_has_data() {
         .unwrap_or_default();
     assert_eq!(cooling.len(), 1);
     assert_eq!(
-        (&cooling[0]["model"], &cooling[0]["label"]),
-        (&json!("claude-sonnet-5-2"), &json!("Sonnet 5.2"))
+        (
+            &cooling[0]["entry"],
+            &cooling[0]["agent"],
+            &cooling[0]["label"]
+        ),
+        (
+            &json!("claude:claude-sonnet-5-2"),
+            &json!("claude"),
+            &json!("claude Sonnet 5.2")
+        )
     );
     assert!(
         cooling[0]["remaining_s"]
@@ -1000,7 +1070,10 @@ fn finds_a_live_tick_with_slot_log_issue_and_tool_call() {
     let pid = harness.start_fake_tick(2464, 3, "sleep 30");
     let scanner = ProcessScanner::new(&harness.state);
     let processes = scanner.scan_processes().expect("/proc reads");
-    let candidates = scanner.find_ticks(&processes);
+    let states = [harness.state.display().to_string()];
+    let candidates = scanner
+        .find_ticks(&processes, &states, super::collector::wall_clock())
+        .expect("/proc reads");
     assert_eq!(
         candidates
             .iter()
@@ -1041,9 +1114,9 @@ fn finds_a_live_tick_with_slot_log_issue_and_tool_call() {
         (
             tick.model.as_str(),
             tick.model_label.as_str(),
-            tick.lane.as_str()
+            tick.kind.as_str()
         ),
-        ("claude-opus-5-5", "Opus 5.5", "standard")
+        ("claude-opus-5-5", "Opus 5.5", "work")
     );
     assert_eq!(tick.doing.as_deref(), Some("sleep 30"));
     assert_eq!(tick.tool_shells, 1);
@@ -1067,7 +1140,14 @@ fn ignores_claude_p_outside_the_harness() {
         .expect("bash starts");
     std::thread::sleep(Duration::from_millis(200));
     let scanner = ProcessScanner::new(&harness.state);
-    let ticks = scanner.find_ticks(&scanner.scan_processes().expect("/proc reads"));
+    let states = [harness.state.display().to_string()];
+    let ticks = scanner
+        .find_ticks(
+            &scanner.scan_processes().expect("/proc reads"),
+            &states,
+            super::collector::wall_clock(),
+        )
+        .expect("/proc reads");
     kill_group(&mut process);
     assert!(ticks.is_empty());
 }
@@ -2866,4 +2946,249 @@ fn the_server_listens_on_loopback_only() {
         address.ip(),
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
     );
+}
+
+#[test]
+fn every_agents_windows_are_weighed_into_the_pool() {
+    let harness = FixtureHarness::new();
+    let sessions = harness.home.join("codex/sessions/2026/11/28");
+    std::fs::create_dir_all(&sessions).ok();
+    let resets = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+        + 86_400;
+    std::fs::write(
+        sessions.join("rollout-2026-11-28T00-00-00-x.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": 82.0, "window_minutes": 10080, "resets_at": resets}, "secondary": null}}})
+        ),
+    )
+    .ok();
+    std::fs::remove_file(harness.state.join("tick-model")).ok();
+    let mut config = harness.config();
+    config.usage_settings = vec![
+        (
+            "TICK_MODELS".to_owned(),
+            "claude:claude-opus-5-5 codex:gpt-5.5 gemini:gemini-2.5-pro".to_owned(),
+        ),
+        ("MAX_SLOTS".to_owned(), "6".to_owned()),
+        (
+            "USAGE_SOURCE_codex".to_owned(),
+            format!(
+                "codex-sessions:{}",
+                harness.home.join("codex/sessions").display()
+            ),
+        ),
+    ];
+    let collector = harness.collector_with(config, pinned());
+    let snapshot = collector.snapshot();
+    let usage = &snapshot["usage"];
+    let agents: Vec<(Value, Value, Value)> = usage["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|agent| {
+            (
+                agent["agent"].clone(),
+                agent["reading"]["state"].clone(),
+                agent["cap"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        agents,
+        [
+            (json!("claude"), json!("fresh"), json!(3)),
+            (json!("codex"), json!("fresh"), json!(3)),
+            (json!("gemini"), json!("unmetered"), json!(6)),
+        ]
+    );
+    assert_eq!(usage["agents"][1]["windows"][0]["name"], "primary");
+    assert_eq!(
+        (&usage["pool_cap"], &usage["width"]),
+        (&json!(6), &json!(6))
+    );
+    assert_eq!(
+        snapshot["harness"]["tick_models"],
+        json!([
+            "claude:claude-opus-5-5",
+            "codex:gpt-5.5",
+            "gemini:gemini-2.5-pro"
+        ])
+    );
+    let rendered = page(&snapshot);
+    for text in [
+        "claude five_hour",
+        "claude weekly",
+        "codex primary",
+        "82 % &middot; cap 3",
+        "unmetered",
+        "pool 6 of 6",
+        "codex gpt-5.5",
+    ] {
+        assert!(rendered.contains(text), "{text}");
+    }
+}
+
+#[test]
+fn a_missing_reading_shows_as_unreadable_and_allows_nothing() {
+    let harness = FixtureHarness::new();
+    std::fs::remove_file(harness.home.join("usage-cache.json")).ok();
+    let snapshot = harness.collector().snapshot();
+    let claude = &snapshot["usage"]["agents"][0];
+    assert_eq!(claude["reading"]["state"], "unreadable");
+    assert_eq!(
+        (&claude["cap"], &snapshot["usage"]["pool_cap"]),
+        (&json!(0), &json!(0))
+    );
+    assert_eq!(snapshot["harness"]["work_waiting"], false);
+    assert!(page(&snapshot).contains("unreadable: "));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn marked_ticks_of_any_agent_show_with_their_kind() {
+    use std::os::unix::process::CommandExt as _;
+    let mut harness = FixtureHarness::new();
+    let work = harness.start_marked_tick(2464, 1, "sleep 30", "claude", "claude-opus-5-5", "work");
+    let lane = harness.start_marked_tick(2490, 2, "sleep 30", "codex", "gpt-5.5", "lane");
+    let landing =
+        harness.start_marked_tick(2201, 3, "sleep 30", "gemini", "gemini-2.5-pro", "landing");
+    // Not ticks: a marker naming another state directory, though it holds one of this one's
+    // locks, and a marker of this one holding no lock.
+    let elsewhere = Command::new("bash")
+        .args(["-c", "exec 9>\"$1\"; sleep 30", "_"])
+        .arg(harness.state.join("locks/slot4.lock"))
+        .env(
+            "HARNESS_TICK",
+            "state=/elsewhere/state slot=4 agent=claude model=m kind=work",
+        )
+        .process_group(0)
+        .spawn()
+        .expect("bash starts");
+    let unlocked = Command::new("sleep")
+        .arg("30")
+        .env(
+            "HARNESS_TICK",
+            format!(
+                "state={} slot=5 agent=claude model=m kind=work",
+                harness.state.display()
+            ),
+        )
+        .process_group(0)
+        .spawn()
+        .expect("sleep starts");
+    let decoys = [i64::from(elsewhere.id()), i64::from(unlocked.id())];
+    harness.helpers.push(elsewhere);
+    harness.helpers.push(unlocked);
+    std::thread::sleep(Duration::from_millis(200));
+    let collector = harness.collector();
+    collector.refresh_github_in_place();
+    let snapshot = collector.snapshot();
+    let ticks: HashMap<i64, (Value, Value, Value, Value)> = snapshot["ticks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tick| {
+            Some((
+                tick["pid"].as_i64()?,
+                (
+                    tick["agent"].clone(),
+                    tick["kind"].clone(),
+                    tick["slot"].clone(),
+                    tick["issue"].clone(),
+                ),
+            ))
+        })
+        .collect();
+    assert_eq!(ticks.len(), 3, "{ticks:?}");
+    assert_eq!(
+        ticks[&work],
+        (json!("claude"), json!("work"), json!(1), json!(2464))
+    );
+    assert_eq!(
+        ticks[&lane],
+        (json!("codex"), json!("lane"), json!(2), json!(2490))
+    );
+    assert_eq!(
+        ticks[&landing],
+        (json!("gemini"), json!("landing"), json!(3), json!(2201))
+    );
+    for decoy in decoys {
+        assert!(!ticks.contains_key(&decoy));
+    }
+    let cards: HashMap<i64, Value> = snapshot["flow"]["cards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|card| Some((card["issue"].as_i64()?, card.clone())))
+        .collect();
+    assert_eq!(cards[&2201]["column"], "landing");
+    assert!(
+        cards[&2464]["chips"]
+            .as_array()
+            .is_some_and(|chips| chips.contains(&json!("claude Opus 5.5")))
+    );
+    let rendered = page(&snapshot);
+    for text in [
+        "codex gpt-5.5 lane",
+        "gemini gemini-2.5-pro landing",
+        "claude Opus 5.5",
+    ] {
+        assert!(rendered.contains(text), "{text}");
+    }
+}
+
+#[test]
+fn the_model_list_and_usage_keys_come_from_the_env_file_expanded() {
+    let harness = FixtureHarness::new();
+    let env_file = harness.home.join("instance/harness.env");
+    let text = std::fs::read_to_string(&env_file).unwrap_or_default();
+    std::fs::write(
+        &env_file,
+        format!(
+            "{text}TICK_MODELS=\"claude:claude-opus-5-5 codex:gpt-5.5\"\nTICK_AGENT=claude\nMAX_SLOTS=4\nTICK_WIDTH=3\n\
+             MODEL_COOLDOWN_S=600\nUSAGE_SOURCE_codex=codex-sessions:$HOME/codex\nUSAGE_STEPS_SHORT=\"50 60 70\"\n\
+             AGENT_FLAGS_codex=--full-auto\nUNRELATED=1\n"
+        ),
+    )
+    .ok();
+    let config = config_of(&harness.home, &[("HOME", "/home/someone".to_owned())]);
+    let settings: HashMap<&str, &str> = config
+        .usage_settings
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    assert_eq!(
+        settings["TICK_MODELS"],
+        "claude:claude-opus-5-5 codex:gpt-5.5"
+    );
+    assert_eq!(
+        settings["USAGE_SOURCE_codex"],
+        "codex-sessions:/home/someone/codex"
+    );
+    assert_eq!(settings["USAGE_STEPS_SHORT"], "50 60 70");
+    assert_eq!(settings["AGENT_FLAGS_codex"], "--full-auto");
+    assert_eq!(
+        (
+            settings["MAX_SLOTS"],
+            settings["TICK_WIDTH"],
+            settings["LANE_MODEL"]
+        ),
+        ("4", "3", "claude-sonnet-5-2")
+    );
+    assert!(!settings.contains_key("UNRELATED"));
+    assert!((config.model_cooldown_s - 600.0).abs() < f64::EPSILON);
+    for key in [
+        "USAGE_FETCH_codex",
+        "AGENT_BIN_gemini",
+        "TICK_MODELS",
+        "MODEL_COOLDOWN_S",
+        "GH_TOKEN",
+    ] {
+        assert!(super::wanted_key(key), "{key}");
+    }
+    assert!(!super::wanted_key("OTHER_SECRET"));
 }

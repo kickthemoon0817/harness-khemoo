@@ -8,12 +8,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::Value;
 
 use super::models::{
-    AllocatorLine, ClaimRecord, ContainerInfo, DeviceProcess, DeviceReading, HostHealthRow,
-    HostStreak, LeaseSlot, LeaseStatus, LeaseWait, MachineProbe, RemoteCard, StallLine,
-    UsageReading,
+    AgentUsageLine, AllocatorLine, ClaimRecord, ContainerInfo, DeviceProcess, DeviceReading,
+    HostHealthRow, HostStreak, LeaseSlot, LeaseStatus, LeaseWait, MachineProbe, RemoteCard,
+    StallLine, UsageWindowLine,
 };
 use super::text::{is_word_char, optional_float, optional_int, parse_iso, split_lines};
 
@@ -43,6 +42,8 @@ static WAIT: LazyLock<Regex> = LazyLock::new(|| {
 static STALL: LazyLock<Regex> = LazyLock::new(|| regex(r"^(\S+) STALL (\S+) (\S+) ?(.*)$"));
 static ALLOCATOR: LazyLock<Regex> = LazyLock::new(|| regex(r"^([0-9]{8}T[0-9]{6}Z) (.*)$"));
 static ALLOCATOR_FIELD: LazyLock<Regex> = LazyLock::new(|| regex(r"([a-z_]+)=([^\s%]+)%?"));
+static USAGE_PART: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?:^|\s)([a-z0-9_]{1,32})=([0-9]{1,9})\[([^\]\s]*)\]"));
 static ALLOCATOR_SLOT: LazyLock<Regex> = LazyLock::new(|| regex(r"^(slot[0-9]+) "));
 static SPAWNING: LazyLock<Regex> = LazyLock::new(|| regex(r"-> spawning ([0-9]+)"));
 static MODEL: LazyLock<Regex> =
@@ -235,7 +236,23 @@ pub fn parse_allocator(text: &str, limit: usize) -> Vec<AllocatorLine> {
         } else {
             "other"
         };
-        let mut fields = allocator_fields(rest);
+        // The agents' parts first: their windows hold `%` and `:`, which no field does.
+        let mut usage = Vec::new();
+        let mut plain = rest.to_owned();
+        for found in USAGE_PART.captures_iter(rest) {
+            let (Some(whole), Some(agent), Some(cap), Some(windows)) =
+                (found.get(0), found.get(1), found.get(2), found.get(3))
+            else {
+                continue;
+            };
+            usage.push(AgentUsageLine {
+                agent: agent.as_str().to_owned(),
+                cap: cap.as_str().parse().unwrap_or_default(),
+                windows: usage_windows(windows.as_str()),
+            });
+            plain.replace_range(whole.range(), &" ".repeat(whole.len()));
+        }
+        let mut fields = allocator_fields(&plain);
         if let Some(spawning) = SPAWNING.captures(rest).and_then(|found| group(&found, 1)) {
             fields.insert("spawning".to_owned(), spawning.to_owned());
         }
@@ -247,6 +264,7 @@ pub fn parse_allocator(text: &str, limit: usize) -> Vec<AllocatorLine> {
                 .and_then(|slot| group(&slot, 1))
                 .map(str::to_owned),
             fields,
+            usage,
             text: rest.to_owned(),
         });
     }
@@ -278,33 +296,22 @@ fn allocator_fields(text: &str) -> BTreeMap<String, String> {
     fields
 }
 
-/// A JSON number other than a boolean, as a float.
-pub fn number_or_none(value: Option<&Value>) -> Option<f64> {
-    value.and_then(Value::as_f64)
-}
-
-/// Parses `~/.claude/usage-cache.json`: the two windows' percentages, their reset times and
-/// when the reading was taken.
-pub fn parse_usage_cache(text: &str) -> Result<UsageReading, String> {
-    let document: Value =
-        serde_json::from_str(text).map_err(|error| format!("JSONDecodeError: {error}"))?;
-    let Value::Object(document) = document else {
-        return Err("ValueError: usage cache is not a JSON object".to_owned());
-    };
-    let empty = serde_json::Map::new();
-    let data = document
-        .get("data")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let string = |key: &str| data.get(key).and_then(Value::as_str).map(str::to_owned);
-    Ok(UsageReading {
-        five_hour_pct: number_or_none(data.get("fiveHourPercent")),
-        weekly_pct: number_or_none(data.get("weeklyPercent")),
-        five_hour_resets_at: string("fiveHourResetsAt"),
-        weekly_resets_at: string("weeklyResetsAt"),
-        taken_at_epoch: number_or_none(document.get("timestamp"))
-            .map(|milliseconds| milliseconds / 1000.0),
-    })
+/// The windows of an agent's part, `five_hour:10%,weekly:68%`; none for `unknown`.
+fn usage_windows(text: &str) -> Option<Vec<UsageWindowLine>> {
+    if text == "unknown" {
+        return None;
+    }
+    Some(
+        text.split(',')
+            .filter_map(|window| {
+                let (name, used) = window.split_once(':')?;
+                Some(UsageWindowLine {
+                    name: name.to_owned(),
+                    used_pct: optional_float(used.strip_suffix('%')?)?,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Parses one `state/locks/claim.<issue>` file: `<issue> <pid> <since>`.
@@ -669,7 +676,28 @@ mod tests {
         );
         assert_eq!(lines[0].time, "2026-11-26T01:00:13Z");
         assert_eq!(lines[0].slot.as_deref(), Some("slot2"));
-        assert_eq!(lines[1].fields["week"], "50");
+        assert_eq!(lines[1].usage.len(), 2);
+        assert_eq!(
+            lines[1].usage[1],
+            AgentUsageLine {
+                agent: "codex".to_owned(),
+                cap: 2,
+                windows: Some(vec![UsageWindowLine {
+                    name: "primary".to_owned(),
+                    used_pct: 71.5
+                }]),
+            }
+        );
+        assert_eq!(
+            lines[1].usage[0]
+                .windows
+                .as_ref()
+                .map(|windows| windows[1].used_pct),
+            Some(50.0)
+        );
+        assert_eq!(lines[4].usage[1].windows, None);
+        assert!(!lines[1].fields.contains_key("claude"));
+        assert_eq!(lines[1].fields["allowed"], "10");
         assert_eq!(lines[1].fields["spawning"], "1");
         assert_eq!(lines[4].fields["ready"], "1");
         assert_eq!(lines[5].fields["claimable"], "2");
@@ -678,17 +706,6 @@ mod tests {
             glued.keys().map(String::as_str).collect::<Vec<_>>(),
             ["b", "d", "pct"]
         );
-    }
-
-    #[test]
-    fn usage_cache() {
-        let reading = parse_usage_cache(&fixture_text("usage-cache.json")).expect("parses");
-        assert_eq!(
-            (reading.five_hour_pct, reading.weekly_pct),
-            (Some(64.0), Some(52.0))
-        );
-        assert_eq!(reading.taken_at_epoch, Some(1_795_657_080.0));
-        assert!(parse_usage_cache("[]").is_err());
     }
 
     #[test]

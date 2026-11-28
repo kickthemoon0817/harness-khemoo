@@ -22,7 +22,7 @@ static COMMENT: LazyLock<Regex> =
 
 /// The wanted keys the file assigns, each to its unquoted value; a missing or unreadable file
 /// yields none.
-pub fn read_keys(env_path: &Path, wanted_keys: &[&str]) -> HashMap<String, String> {
+pub fn read_keys(env_path: &Path, wanted: impl Fn(&str) -> bool) -> HashMap<String, String> {
     let Ok(text) = read_text(env_path) else {
         return HashMap::new();
     };
@@ -34,7 +34,7 @@ pub fn read_keys(env_path: &Path, wanted_keys: &[&str]) -> HashMap<String, Strin
         let (Some(key), Some(value)) = (found.get(1), found.get(2)) else {
             continue;
         };
-        if wanted_keys.contains(&key.as_str()) {
+        if wanted(key.as_str()) {
             values.insert(key.as_str().to_owned(), unquote(value.as_str()));
         }
     }
@@ -112,7 +112,7 @@ mod tests {
             "GH_REPO=first/repo\nexport GH_TOKEN='abc 123'\nGH_REPO=owner/name  # comment\nSECRET=zzz\n# GH_TOKEN=commented\n",
         )
         .ok();
-        let values = read_keys(&env_path, &["GH_TOKEN", "GH_REPO"]);
+        let values = read_keys(&env_path, |key| ["GH_TOKEN", "GH_REPO"].contains(&key));
         let expected: HashMap<String, String> =
             [("GH_TOKEN", "abc 123"), ("GH_REPO", "owner/name")]
                 .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -122,7 +122,11 @@ mod tests {
 
     #[test]
     fn missing_file_reads_nothing() {
-        assert!(read_keys(Path::new("/nonexistent/harness.env"), &["GH_TOKEN"]).is_empty());
+        assert!(
+            read_keys(Path::new("/nonexistent/harness.env"), |key| key
+                == "GH_TOKEN")
+            .is_empty()
+        );
     }
 
     #[test]
