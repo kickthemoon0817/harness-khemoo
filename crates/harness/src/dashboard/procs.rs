@@ -1,8 +1,8 @@
 //! Finds the harness's live ticks and the issue each one works.
 //!
-//! A tick is what [`crate::ticks::scan`] finds: the topmost process carrying this state
-//! directory's `HARNESS_TICK` marker while it holds its slot's lock, a local agent CLI or
-//! `fleet dispatch` alike. The marker names its slot, agent, model and kind. Its issue comes,
+//! A tick is what [`crate::ticks::scan`] finds: the process a slot file of this state directory
+//! records while it lives, a local agent CLI or `fleet dispatch` alike. The record names its slot,
+//! agent, model and kind. Its issue comes,
 //! cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then from a lease it
 //! holds, then from a cached GitHub claim-comment lookup the caller supplies.
 
@@ -100,47 +100,38 @@ impl ProcessScanner {
         Ok(processes)
     }
 
-    /// The live ticks whose marker names one of `states`, oldest first, with the process table's
-    /// view of each and its log when its stdout is a tick log of this state directory.
-    pub fn find_ticks(
-        &self,
-        processes: &ProcessTable,
-        states: &[String],
-        now: f64,
-    ) -> io::Result<Vec<TickCandidate>> {
+    /// The live ticks of this state directory, oldest first, with the process table's view of
+    /// each and its log when its stdout is a tick log of this state directory.
+    pub fn find_ticks(&self, processes: &ProcessTable, now: f64) -> io::Result<Vec<TickCandidate>> {
         let logs_prefix = format!("{}/logs/tick-", self.state_dir.display());
-        let mut candidates: Vec<TickCandidate> = Vec::new();
-        for state in states {
-            for tick in crate::ticks::scan(state)? {
-                let pid = i64::from(tick.pid);
-                if candidates
-                    .iter()
-                    .any(|candidate| candidate.process.pid == pid)
-                {
-                    continue;
-                }
-                #[allow(clippy::cast_precision_loss)]
-                let process = processes.get(&pid).cloned().unwrap_or_else(|| ProcessInfo {
-                    pid,
-                    ppid: 0,
-                    start_epoch: now - tick.age_s as f64,
-                    argv: Vec::new(),
-                });
-                let log = self
-                    .descriptor_targets(pid)
-                    .get(&1)
-                    .filter(|target| target.starts_with(&logs_prefix))
-                    .map(|target| basename(target).to_owned());
-                candidates.push(TickCandidate {
-                    process,
-                    slot: Some(i64::from(tick.slot)),
-                    agent: tick.agent,
-                    model: tick.model,
-                    kind: tick.kind.as_str().to_owned(),
-                    log,
-                });
-            }
-        }
+        let mut candidates: Vec<TickCandidate> =
+            crate::ticks::scan(&self.state_dir.to_string_lossy())?
+                .into_iter()
+                .map(|tick| {
+                    let pid = i64::from(tick.pid);
+                    #[allow(clippy::cast_precision_loss)]
+                    let process = processes.get(&pid).cloned().unwrap_or_else(|| ProcessInfo {
+                        pid,
+                        ppid: 0,
+                        start_epoch: now - tick.age_s as f64,
+                        argv: Vec::new(),
+                    });
+                    // A non-dumpable agent keeps its descriptors private: it shows without its log.
+                    let log = self
+                        .descriptor_targets(pid)
+                        .get(&1)
+                        .filter(|target| target.starts_with(&logs_prefix))
+                        .map(|target| basename(target).to_owned());
+                    TickCandidate {
+                        process,
+                        slot: Some(i64::from(tick.slot)),
+                        agent: tick.agent,
+                        model: tick.model,
+                        kind: tick.kind.as_str().to_owned(),
+                        log,
+                    }
+                })
+                .collect();
         candidates.sort_by(|a, b| {
             a.process
                 .start_epoch

@@ -748,7 +748,7 @@ fn due_command(env: Lookup, settings: &Settings, paths: &Paths) -> Result<ExitCo
 
 /// The earliest window reset still ahead, a number of Unix seconds or an ISO time, across every agent of the model list.
 fn next_reset(env: Lookup, now: u64) -> Option<u64> {
-    let pool = usage::pool(env, false).ok()?;
+    let pool = usage::pool(env).ok()?;
     pool.agents
         .iter()
         .flat_map(|agent| agent.windows.iter())

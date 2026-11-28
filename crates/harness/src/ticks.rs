@@ -1,17 +1,12 @@
 //! `harness ticks`: the live ticks of one harness state directory.
 //!
-//! The runner starts every tick, a local agent CLI or `fleet dispatch`, with
-//! `HARNESS_TICK="state=<HARNESS_STATE> slot=<n> agent=<agent> model=<model> kind=<kind>"` in its
-//! environment. A tick is the topmost process carrying it: one whose parent does not. Everything a
-//! tick starts inherits the variable, a node shim's native agent and every tool shell alike, so each
-//! resolves to the process the runner started. Only this user's processes are read, and only markers
-//! naming this state directory count, so two installations on one host never count each other's.
-//!
-//! A daemon a tick leaves behind (an ssh master, a gpg or build agent) keeps the marker once its
-//! parent is gone, so a tick must also hold its slot's lock open, as the descriptor the runner's
-//! process inherits does; a daemon closes the descriptors it was started with.
+//! The runner starts each tick, a local agent CLI or `fleet dispatch`, as its own child and records
+//! it in `<state>/locks/slot<n>.tick` as `pid starttime agent model kind` until it ends, so a slot
+//! holds one tick at most; the supervisor records its own in `<state>/locks/supervisor.tick`, read
+//! as slot 0. A tick is live while `/proc/<pid>/stat` gives the same start time, which a reused pid
+//! does not. Only `stat` is read, never the process's environment or descriptors: an
+//! agent CLI that marks itself non-dumpable, as the release Codex CLI does, keeps both private.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
@@ -22,13 +17,11 @@ use serde::Serialize;
 
 use crate::home::{env_nonempty, harness_home};
 
-/// Linux caps argv and the environment together at a quarter of the stack limit: 2 MiB under the
-/// usual 8 MiB stack. Past this the marker may be missed, and the process is not counted.
-const ENVIRON_LIMIT: u64 = 4 << 20;
 const STAT_LIMIT: u64 = 4 << 10;
-const MARKER: &[u8] = b"HARNESS_TICK=";
-/// How many of a process's open descriptors are looked at for its slot lock.
-const FD_LIMIT: usize = 4096;
+/// A slot file holds one short line.
+const SLOT_FILE_LIMIT: u64 = 1 << 10;
+/// How many entries of the locks directory are looked at.
+const LOCKS_LIMIT: usize = 4096;
 
 #[derive(clap::Args)]
 #[command(after_help = "\
@@ -74,40 +67,6 @@ impl Kind {
     }
 }
 
-/// What a `HARNESS_TICK` value says.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Marker {
-    pub state: String,
-    pub slot: u32,
-    pub agent: String,
-    pub model: String,
-    pub kind: Kind,
-}
-
-impl Marker {
-    /// Parses a `HARNESS_TICK` value. The state directory comes first and may hold spaces, so the
-    /// four fields after it are split off from the right.
-    pub fn parse(value: &str) -> Option<Self> {
-        let rest = value.strip_prefix("state=")?;
-        let mut fields = rest.rsplitn(5, ' ');
-        let kind = Kind::parse(fields.next()?.strip_prefix("kind=")?)?;
-        let model = fields.next()?.strip_prefix("model=")?;
-        let agent = fields.next()?.strip_prefix("agent=")?;
-        let slot = fields.next()?.strip_prefix("slot=")?.parse().ok()?;
-        let state = fields.next()?;
-        if state.is_empty() || agent.is_empty() || model.is_empty() {
-            return None;
-        }
-        Some(Self {
-            state: state.to_owned(),
-            slot,
-            agent: agent.to_owned(),
-            model: model.to_owned(),
-            kind,
-        })
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Tick {
     pub pid: u32,
@@ -136,7 +95,7 @@ pub fn run(args: &Args) -> ExitCode {
     let ticks = match scan(&state.to_string_lossy()) {
         Ok(ticks) => ticks,
         Err(error) => {
-            eprintln!("harness ticks: cannot read /proc: {error}");
+            eprintln!("harness ticks: {error}");
             return ExitCode::from(1);
         }
     };
@@ -164,100 +123,107 @@ pub fn run(args: &Args) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The live ticks whose marker names `state`, oldest first.
+/// The live ticks recorded under `state`, oldest first.
 pub fn scan(state: &str) -> io::Result<Vec<Tick>> {
-    scan_in(Path::new("/proc"), state)
+    scan_in(Path::new("/proc"), Path::new(state))
 }
 
-struct Process {
-    ppid: u32,
+/// What a slot file records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Record {
+    pid: u32,
     start_ticks: u64,
-    marker: Option<Marker>,
+    agent: String,
+    model: String,
+    kind: Kind,
 }
 
-fn scan_in(proc_root: &Path, state: &str) -> io::Result<Vec<Tick>> {
+impl Record {
+    fn parse(text: &str) -> Option<Self> {
+        let mut fields = text.split_whitespace();
+        let record = Self {
+            pid: fields.next()?.parse().ok().filter(|pid| *pid > 1)?,
+            start_ticks: fields.next()?.parse().ok()?,
+            agent: fields.next()?.to_owned(),
+            model: fields.next()?.to_owned(),
+            kind: Kind::parse(fields.next()?)?,
+        };
+        fields.next().is_none().then_some(record)
+    }
+}
+
+fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
+    let entries = match std::fs::read_dir(state.join("locks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
     let uid = rustix::process::getuid().as_raw();
+    let mut found = Vec::new();
+    for entry in entries.take(LOCKS_LIMIT).flatten() {
+        let name = entry.file_name();
+        // The supervisor, which holds no slot, records its tick beside them as slot 0.
+        let Some(slot) = name.to_str().and_then(|name| match name {
+            "supervisor.tick" => Some(0),
+            _ => name
+                .strip_prefix("slot")?
+                .strip_suffix(".tick")?
+                .parse::<u32>()
+                .ok(),
+        }) else {
+            continue;
+        };
+        // The runner writes it 0600 in this user's state directory; any other file is not its.
+        if !entry
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.uid() == uid)
+        {
+            continue;
+        }
+        let Some(record) = read_limited(&entry.path(), SLOT_FILE_LIMIT)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| Record::parse(&text))
+        else {
+            continue;
+        };
+        if start_ticks(proc_root, record.pid) == Some(record.start_ticks) {
+            found.push((slot, record));
+        }
+    }
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
     let uptime = uptime_s(proc_root)?;
     #[allow(clippy::cast_precision_loss)]
     let clock_ticks = rustix::param::clock_ticks_per_second() as f64;
-    let mut processes = HashMap::new();
-    for entry in std::fs::read_dir(proc_root)? {
-        let Ok(entry) = entry else { continue };
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .filter(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        // A process that exits mid-read is simply left out.
-        if !entry.metadata().is_ok_and(|meta| meta.uid() == uid) {
-            continue;
-        }
-        let Some((ppid, start_ticks)) = read_limited(&entry.path().join("stat"), STAT_LIMIT)
-            .ok()
-            .and_then(|stat| parse_stat(&stat))
-        else {
-            continue;
-        };
-        let marker = read_limited(&entry.path().join("environ"), ENVIRON_LIMIT)
-            .ok()
-            .and_then(|environ| marker_of(&environ))
-            .filter(|marker| marker.state == state);
-        processes.insert(
-            pid,
-            Process {
-                ppid,
-                start_ticks,
-                marker,
-            },
-        );
-    }
-    let locks = Path::new(state).join("locks");
-    let locks = std::fs::canonicalize(&locks).unwrap_or(locks);
-    let mut ticks: Vec<Tick> = processes
-        .iter()
-        .filter_map(|(pid, process)| {
-            let marker = process.marker.as_ref()?;
-            let parent_marked = processes
-                .get(&process.ppid)
-                .is_some_and(|parent| parent.marker.is_some());
-            let lock = if marker.kind == Kind::Supervisor {
-                locks.join("supervisor.lock")
-            } else {
-                locks.join(format!("slot{}.lock", marker.slot))
-            };
-            if parent_marked || !holds(proc_root, *pid, &lock) {
-                return None;
-            }
+    let mut ticks: Vec<Tick> = found
+        .into_iter()
+        .map(|(slot, record)| {
             #[allow(clippy::cast_precision_loss)]
-            let started = process.start_ticks as f64 / clock_ticks;
+            let started = record.start_ticks as f64 / clock_ticks;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let age_s = (uptime - started).max(0.0) as u64;
-            Some(Tick {
-                pid: *pid,
+            Tick {
+                pid: record.pid,
                 age_s,
-                slot: marker.slot,
-                agent: marker.agent.clone(),
-                model: marker.model.clone(),
-                kind: marker.kind,
-            })
+                slot,
+                agent: record.agent,
+                model: record.model,
+                kind: record.kind,
+            }
         })
         .collect();
-    ticks.sort_by(|a, b| b.age_s.cmp(&a.age_s).then(a.pid.cmp(&b.pid)));
+    ticks.sort_by(|a, b| b.age_s.cmp(&a.age_s).then(a.slot.cmp(&b.slot)));
     Ok(ticks)
 }
 
-/// Whether process `pid` has `lock` open.
-fn holds(proc_root: &Path, pid: u32, lock: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(proc_root.join(pid.to_string()).join("fd")) else {
-        return false;
-    };
-    entries
-        .take(FD_LIMIT)
-        .flatten()
-        .any(|entry| std::fs::read_link(entry.path()).is_ok_and(|target| target == lock))
+/// The start time of process `pid` in clock ticks, from `/proc/<pid>/stat`, which stays readable
+/// for a non-dumpable process.
+fn start_ticks(proc_root: &Path, pid: u32) -> Option<u64> {
+    read_limited(&proc_root.join(pid.to_string()).join("stat"), STAT_LIMIT)
+        .ok()
+        .and_then(|stat| parse_start(&stat))
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -275,24 +241,12 @@ fn uptime_s(proc_root: &Path) -> io::Result<f64> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no uptime in /proc/uptime"))
 }
 
-/// The parent pid and the start time in clock ticks, from `/proc/<pid>/stat`. The command name in
-/// parentheses may hold spaces and parentheses itself, so the fields are read after the last `)`.
-fn parse_stat(stat: &[u8]) -> Option<(u32, u64)> {
+/// The start time in clock ticks, field 22 of `/proc/<pid>/stat`. The command name in parentheses
+/// may hold spaces and parentheses itself, so the fields are counted after the last `)`.
+fn parse_start(stat: &[u8]) -> Option<u64> {
     let text = String::from_utf8_lossy(stat);
     let (_, rest) = text.rsplit_once(')')?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    // After the name: state, ppid, ..., starttime as the 20th.
-    let ppid = fields.get(1)?.parse().ok()?;
-    let start = fields.get(19)?.parse().ok()?;
-    Some((ppid, start))
-}
-
-fn marker_of(environ: &[u8]) -> Option<Marker> {
-    environ
-        .split(|&byte| byte == 0)
-        .find_map(|entry| entry.strip_prefix(MARKER))
-        .and_then(|value| std::str::from_utf8(value).ok())
-        .and_then(Marker::parse)
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
 #[cfg(test)]
@@ -300,49 +254,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_marker_parses_with_spaces_in_its_state() {
-        let marker =
-            Marker::parse("state=/srv/my harness/state slot=3 agent=codex model=gpt-5.5 kind=lane")
-                .unwrap();
+    fn a_slot_record_parses() {
         assert_eq!(
-            marker,
-            Marker {
-                state: "/srv/my harness/state".to_owned(),
-                slot: 3,
+            Record::parse("4242 123456 codex gpt-5.5 lane\n"),
+            Some(Record {
+                pid: 4242,
+                start_ticks: 123_456,
                 agent: "codex".to_owned(),
                 model: "gpt-5.5".to_owned(),
                 kind: Kind::Lane,
-            }
+            })
         );
     }
 
     #[test]
-    fn a_malformed_marker_is_none() {
-        for value in [
+    fn a_malformed_slot_record_is_none() {
+        for text in [
             "",
-            "slot=1 agent=a model=m kind=work",
-            "state=/s slot=x agent=a model=m kind=work",
-            "state=/s slot=1 agent=a model=m kind=other",
-            "state=/s slot=1 agent= model=m kind=work",
-            "state= slot=1 agent=a model=m kind=work",
-            "state=/s slot=1 model=m kind=work",
+            "4242 123456 codex gpt-5.5",
+            "x 123456 codex m work",
+            "1 123456 codex m work",
+            "4242 -1 codex m work",
+            "4242 123456 codex m other",
+            "4242 123456 codex m work extra",
         ] {
-            assert_eq!(Marker::parse(value), None, "{value:?}");
+            assert_eq!(Record::parse(text), None, "{text:?}");
         }
-    }
-
-    #[test]
-    fn the_marker_is_found_among_the_environment() {
-        let environ =
-            b"PATH=/bin\0HARNESS_TICK=state=/s slot=1 agent=claude model=m kind=work\0X=1\0";
-        assert_eq!(marker_of(environ).unwrap().agent, "claude");
-        assert_eq!(marker_of(b"PATH=/bin\0NOT_HARNESS_TICK=state=/s\0"), None);
     }
 
     #[test]
     fn stat_is_read_after_the_last_parenthesis() {
         let stat = b"42 (a) b (c) S 7 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 123456 0 0";
-        assert_eq!(parse_stat(stat), Some((7, 123_456)));
-        assert_eq!(parse_stat(b"42 (short) S 7"), None);
+        assert_eq!(parse_start(stat), Some(123_456));
+        assert_eq!(parse_start(b"42 (short) S 7"), None);
+    }
+
+    #[test]
+    fn a_state_without_locks_has_no_ticks() {
+        let missing = std::env::temp_dir().join(format!("ticks-none-{}", std::process::id()));
+        assert_eq!(scan_in(Path::new("/proc"), &missing).unwrap(), []);
     }
 }

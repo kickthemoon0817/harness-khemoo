@@ -1,24 +1,21 @@
-//! `harness::ticks::scan` against real processes that carry the runner's marker.
+//! `harness::ticks::scan` against real processes recorded in slot files, as the runner records them.
 #![cfg(target_os = "linux")]
 
-use std::fs::File;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::ticks::{Kind, Tick, scan};
 
-/// Children killed, and their process groups with them, when the test ends.
+/// Children killed, with their process groups, when the test ends.
 struct Procs(Vec<Child>);
 
 impl Procs {
-    /// Starts `command` holding `lock` open, as a tick holds its slot's lock, or holding none.
-    fn spawn(&mut self, command: &mut Command, lock: Option<&Path>) -> u32 {
-        let stdout = lock.map_or_else(Stdio::null, |lock| Stdio::from(File::create(lock).unwrap()));
+    fn spawn(&mut self, command: &mut Command) -> u32 {
+        use std::os::unix::process::CommandExt as _;
         let child = command
             .stdin(Stdio::null())
-            .stdout(stdout)
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
             .spawn()
@@ -41,19 +38,32 @@ impl Drop for Procs {
     }
 }
 
-/// A state directory, with its locks directory, that no other test or installation names.
-fn unique_state(name: &str) -> String {
+/// A scratch directory, with a state directory and its locks, that no other test names.
+fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ticks-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("state/locks")).unwrap();
+    dir
+}
+
+fn state_of(dir: &Path) -> String {
     dir.join("state").to_string_lossy().into_owned()
 }
 
-fn slot_lock(state: &str, slot: u32) -> PathBuf {
-    Path::new(state).join(format!("locks/slot{slot}.lock"))
+/// Field 22 of `/proc/<pid>/stat`, read as the runner reads it.
+fn start_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, rest) = stat.rsplit_once(')').unwrap();
+    rest.split_whitespace().nth(19).unwrap().parse().unwrap()
 }
 
-fn marker(state: &str, slot: u32, agent: &str, kind: &str) -> String {
-    format!("state={state} slot={slot} agent={agent} model=model-{slot} kind={kind}")
+/// Records `pid` as slot `slot`'s tick, as the runner does once it has started the agent.
+fn record(dir: &Path, slot: u32, pid: u32, start: u64, agent: &str, kind: &str) {
+    std::fs::write(
+        dir.join(format!("state/locks/slot{slot}.tick")),
+        format!("{pid} {start} {agent} model-{slot} {kind}\n"),
+    )
+    .unwrap();
 }
 
 /// Polls the scan until `done` holds for its result, for at most ten seconds.
@@ -68,45 +78,23 @@ fn until(state: &str, done: impl Fn(&[Tick]) -> bool) -> Vec<Tick> {
     }
 }
 
-/// Waits until the process group `group` holds at least `count` processes.
-fn wait_for_group(group: u32, count: usize) {
-    let start = Instant::now();
-    let size = || {
-        std::fs::read_dir("/proc")
-            .unwrap()
-            .flatten()
-            .filter_map(|entry| std::fs::read_to_string(entry.path().join("stat")).ok())
-            .filter(|stat| {
-                stat.rsplit_once(')')
-                    .and_then(|(_, rest)| rest.split_whitespace().nth(2)?.parse::<u32>().ok())
-                    == Some(group)
-            })
-            .count()
-    };
-    while size() < count {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "group {group} never reached {count}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn pids(ticks: &[Tick]) -> Vec<u32> {
     ticks.iter().map(|tick| tick.pid).collect()
 }
 
+fn sleeper() -> Command {
+    let mut command = Command::new("sleep");
+    command.arg("30");
+    command
+}
+
 #[test]
-fn a_marked_process_is_a_tick_with_its_fields() {
-    let state = unique_state("fields");
+fn a_recorded_live_process_is_a_tick_with_its_fields() {
+    let dir = scratch("fields");
     let mut procs = Procs(Vec::new());
-    let pid = procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&state, 2, "codex", "landing")),
-        Some(&slot_lock(&state, 2)),
-    );
-    let ticks = until(&state, |ticks| !ticks.is_empty());
+    let pid = procs.spawn(&mut sleeper());
+    record(&dir, 2, pid, start_ticks(pid), "codex", "landing");
+    let ticks = scan(&state_of(&dir)).unwrap();
     assert_eq!(
         ticks,
         [Tick {
@@ -123,117 +111,114 @@ fn a_marked_process_is_a_tick_with_its_fields() {
 
 #[test]
 fn another_state_directory_is_never_counted() {
-    let ours = unique_state("ours");
-    let theirs = unique_state("theirs");
+    let ours = scratch("ours");
+    let theirs = scratch("theirs");
     let mut procs = Procs(Vec::new());
-    let mine = procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&ours, 1, "claude", "work")),
-        Some(&slot_lock(&ours, 1)),
-    );
-    let other = procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&theirs, 1, "claude", "work")),
-        Some(&slot_lock(&theirs, 1)),
-    );
-    assert_eq!(pids(&until(&ours, |ticks| !ticks.is_empty())), [mine]);
-    assert_eq!(pids(&until(&theirs, |ticks| !ticks.is_empty())), [other]);
-    // A state that merely starts with ours is another directory.
-    let prefixed = format!("{ours}-2");
-    assert!(scan(&prefixed).unwrap().is_empty());
+    let mine = procs.spawn(&mut sleeper());
+    let other = procs.spawn(&mut sleeper());
+    record(&ours, 1, mine, start_ticks(mine), "claude", "work");
+    record(&theirs, 1, other, start_ticks(other), "claude", "work");
+    assert_eq!(pids(&scan(&state_of(&ours)).unwrap()), [mine]);
+    assert_eq!(pids(&scan(&state_of(&theirs)).unwrap()), [other]);
 }
 
 #[test]
-fn the_topmost_marked_process_is_the_tick_and_its_children_are_not() {
-    let state = unique_state("topmost");
+fn a_stale_or_reused_pid_is_not_a_tick() {
+    let dir = scratch("stale");
     let mut procs = Procs(Vec::new());
-    // A shell that starts a tool shell, which starts a command: three marked generations.
-    let shell = procs.spawn(
-        Command::new("sh")
-            .args(["-c", "sh -c 'sleep 30 & wait' & wait"])
-            .env("HARNESS_TICK", marker(&state, 1, "claude", "work")),
-        Some(&slot_lock(&state, 1)),
-    );
-    let ticks = until(&state, |ticks| !ticks.is_empty());
-    // Read again once the grandchildren run: they must not show.
-    wait_for_group(shell, 3);
-    let again = scan(&state).unwrap();
-    assert_eq!(pids(&ticks), [shell]);
-    assert_eq!(pids(&again), [shell]);
+    let live = procs.spawn(&mut sleeper());
+    // A reused pid: the process lives, but started after the tick the file recorded.
+    record(&dir, 1, live, start_ticks(live) - 1, "claude", "work");
+    // A tick that ended: its process is gone.
+    let mut gone = Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    record(&dir, 2, gone_pid, 1, "claude", "work");
+    // Malformed and misnamed files are not ticks either.
+    std::fs::write(dir.join("state/locks/slot3.tick"), "not a record\n").unwrap();
+    std::fs::write(
+        dir.join("state/locks/slotx.tick"),
+        format!("{live} {} claude m work\n", start_ticks(live)),
+    )
+    .unwrap();
+    assert_eq!(scan(&state_of(&dir)).unwrap(), []);
+}
+
+/// Builds tests/fixtures/nodump.c: a stand-in agent that marks itself non-dumpable, as the release
+/// Codex CLI does, then runs a tool shell and sleeps.
+fn nodump(dir: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/nodump.c");
+    let exe = dir.join("nodump");
+    let built = Command::new("cc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(built.success(), "cc builds the stand-in agent");
+    exe
 }
 
 #[test]
-fn a_node_shim_resolves_to_the_shim_not_its_native_agent() {
-    let state = unique_state("shim");
-    let dir = PathBuf::from(state.trim_end_matches("/state"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let script = dir.join("agent.js");
-    std::fs::write(&script, "sleep 30 &\nwait\n").unwrap();
+fn a_non_dumpable_agent_is_a_tick() {
+    let dir = scratch("nodump");
+    let exe = nodump(&dir);
     let mut procs = Procs(Vec::new());
-    // argv[0] is node and argv[1] the script, as an npm-installed agent CLI runs.
-    let shim = procs.spawn(
-        Command::new("/bin/sh")
-            .arg0("node")
-            .arg(&script)
-            .env("HARNESS_TICK", marker(&state, 4, "gemini", "work")),
-        Some(&slot_lock(&state, 4)),
-    );
-    let ticks = until(&state, |ticks| !ticks.is_empty());
-    wait_for_group(shim, 2);
-    let again = scan(&state).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(pids(&ticks), [shim]);
-    assert_eq!(pids(&again), [shim]);
-    assert_eq!(again[0].agent, "gemini");
+    let pid = procs.spawn(Command::new(&exe).args(["sleep 30", "30"]));
+    // Give it time to mark itself, then confirm what a reader may no longer see.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read(format!("/proc/{pid}/environ")).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in never became non-dumpable"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    record(&dir, 1, pid, start_ticks(pid), "codex", "work");
+    assert_eq!(pids(&scan(&state_of(&dir)).unwrap()), [pid]);
 }
 
 #[test]
-fn a_child_whose_marked_parent_is_another_installation_is_a_tick() {
-    let ours = unique_state("nested-ours");
-    let theirs = unique_state("nested-theirs");
+fn a_tool_child_that_outlives_its_parent_is_never_a_second_tick() {
+    let dir = scratch("orphans");
     let mut procs = Procs(Vec::new());
-    let inner = format!(
-        "HARNESS_TICK='{}' sleep 30 >'{}' & wait",
-        marker(&ours, 1, "claude", "work"),
-        slot_lock(&ours, 1).display()
+    let marker = dir.join("orphan-started");
+    // The agent starts a nohup'd child and a subshell's background child, both of which outlive it.
+    let agent = procs.spawn(Command::new("sh").arg("-c").arg(format!(
+        "nohup sleep 30 >/dev/null 2>&1 & (sleep 30 &); touch '{}'; exec sleep 30",
+        marker.display()
+    )));
+    record(&dir, 1, agent, start_ticks(agent), "claude", "work");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never started its children"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(pids(&until(&state_of(&dir), |t| !t.is_empty())), [agent]);
+    // The agent ends; its children live on, and the slot holds no tick.
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(agent).unwrap()).unwrap(),
+        rustix::process::Signal::KILL,
     );
-    let outer = procs.spawn(
-        Command::new("sh")
-            .args(["-c", &inner])
-            .env("HARNESS_TICK", marker(&theirs, 1, "claude", "work")),
-        Some(&slot_lock(&theirs, 1)),
-    );
-    let ticks = until(&ours, |ticks| !ticks.is_empty());
-    assert_eq!(ticks.len(), 1);
-    assert_ne!(ticks[0].pid, outer);
-    assert_eq!(pids(&scan(&theirs).unwrap()), [outer]);
+    // Reaped, as the runner's wait reaps it.
+    procs.0[0].wait().unwrap();
+    assert_eq!(until(&state_of(&dir), <[Tick]>::is_empty), []);
 }
 
 #[test]
-fn a_marked_process_without_its_slot_lock_is_not_a_tick() {
-    let state = unique_state("daemon");
+fn the_supervisor_is_read_from_its_own_file_as_slot_0() {
+    let dir = scratch("supervisor");
     let mut procs = Procs(Vec::new());
-    // A daemon a tick left behind: it kept the marker and closed the descriptors it started with.
-    procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&state, 1, "claude", "landing")),
-        None,
-    );
-    // Another slot's lock is not its own.
-    procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&state, 2, "claude", "work")),
-        Some(&slot_lock(&state, 3)),
-    );
-    let tick = procs.spawn(
-        Command::new("sleep")
-            .arg("30")
-            .env("HARNESS_TICK", marker(&state, 3, "claude", "work")),
-        Some(&slot_lock(&state, 3)),
-    );
-    assert_eq!(pids(&until(&state, |ticks| !ticks.is_empty())), [tick]);
+    let pid = procs.spawn(&mut sleeper());
+    std::fs::write(
+        dir.join("state/locks/supervisor.tick"),
+        format!("{pid} {} claude model-s supervisor\n", start_ticks(pid)),
+    )
+    .unwrap();
+    let ticks = scan(&state_of(&dir)).unwrap();
+    assert_eq!(pids(&ticks), [pid]);
+    assert_eq!((ticks[0].slot, ticks[0].kind), (0, Kind::Supervisor));
 }

@@ -22,6 +22,8 @@ case $prompt in
     "You are the supervisor"*)
         printf '%s\n' "$prompt" > "$FAKE_SUP_PROMPT"
         printf '%s\n' "${HARNESS_TICK:-unset}" "token=${GH_TOKEN:-unset}" > "$FAKE_SUP_ENV"
+        "$HARNESS_BIN" ticks > "$FAKE_SUP_TICKS"
+        "$HARNESS_HOME/libexec/claim.sh" acquire 5 > "$FAKE_SUP_CLAIM" 2>&1; echo "rc=$?" >> "$FAKE_SUP_CLAIM"
         [ -e "$FAKE_SUP_CRASH" ] && exit 3
         [ -s "$FAKE_DIRECTIVE" ] && "$HARNESS_BIN" directive apply "$FAKE_DIRECTIVE"
         exit 0 ;;
@@ -66,7 +68,7 @@ write_env 1
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" \
     FAKE_LANES="$H/lanes.txt" FAKE_ARGS="$H/args.txt" FAKE_SUP_PROMPT="$H/sup-prompt.txt" FAKE_SUP_ENV="$H/sup-env.txt" \
-    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json"
+    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json" FAKE_SUP_TICKS="$H/sup-ticks.txt" FAKE_SUP_CLAIM="$H/sup-claim.txt"
 S="$H/state"; L="$S/locks"; LOG="$S/logs/allocator.log"; DLOG="$S/logs/directive.log"; SUP="$S/supervisor"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -105,10 +107,13 @@ check "the supervisor tick carries its marker and never GH_TOKEN, nor does its p
     'grep -qx "state=$S slot=0 agent=claude model=model-b kind=supervisor" "$FAKE_SUP_ENV" && grep -qx "token=unset" "$FAKE_SUP_ENV" && ! grep -q ghp_FAKE "$FAKE_SUP_PROMPT"' \
     "$(cat "$FAKE_SUP_ENV" 2>/dev/null)"
 
+check "while it runs, the supervisor is a tick of its own kind in slot 0, and it takes no claim" \
+    'grep -qE "^[0-9]+ [0-9]+ 0 claude model-b supervisor$" "$FAKE_SUP_TICKS" && grep -qx "rc=2" "$FAKE_SUP_CLAIM" && [ ! -e "$L/claim.5" ] && [ ! -e "$L/supervisor.tick" ]' \
+    "ticks=$(cat "$FAKE_SUP_TICKS" 2>/dev/null) claim=$(cat "$FAKE_SUP_CLAIM" 2>/dev/null)"
 launch
 check "the minimum interval keeps a second supervisor tick from starting" '[ "$(wc -l < "$SUP/runs.log")" -eq 1 ]' "$(cat "$SUP/runs.log")"
 check "width: one tick starts where the windows allow three" \
-    '[ "$(ticks_run)" = 1 ] && grep -q "allowed=1 " "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+    '[ "$(ticks_run)" = 1 ] && grep -q "spawning 1$" "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
 check "models: the tick runs on the directive's entry" 'grep -q -- "--model model-b" "$FAKE_ARGS" && ! grep -q model-a "$FAKE_ARGS"' "$(cat "$FAKE_ARGS")"
 check "focus and avoid reach the lane line" \
     'grep -q "prefer #12, #15\." "$FAKE_LANES" && grep -q "do not claim #7\." "$FAKE_LANES"' "$(cat "$FAKE_LANES")"
@@ -116,7 +121,7 @@ check "focus and avoid reach the lane line" \
 apply "{\"version\": 1, \"reason\": \"wide\", \"expires_at\": \"$(at 3600)\", \"width\": 3}"
 usage 65
 launch
-check "width is clamped to the usage cap" '[ "$(ticks_run)" = 2 ] && grep -q "allowed=2 " "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+check "width is clamped to the usage cap" '[ "$(ticks_run)" = 2 ] && grep -q "room=2 .*spawning 2$" "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
 usage 10
 
 # --- pause, wake_at and the human's pause --------------------------------------------------------
@@ -164,11 +169,11 @@ check "a model outside the configured list is refused" '[ "$rc" -eq 1 ] && [[ "$
 # --- with SUPERVISOR unset, nothing of it applies ------------------------------------------------
 apply "{\"version\": 1, \"reason\": \"hold off\", \"expires_at\": \"$(at 3600)\", \"pause\": {\"until\": \"$(at 1800)\", \"reason\": \"x\"}}"
 write_env ""
-runs=$(wc -l < "$SUP/runs.log")
+runs_before=$(wc -l < "$SUP/runs.log")
 rm -f "$SUP/last_start"
 launch
 check "SUPERVISOR unset: the directive is not read and no supervisor tick starts" \
-    '[ "$(ticks_run)" = 3 ] && [ "$(wc -l < "$SUP/runs.log")" = "$runs" ] && ! grep -q "supervisor\\|directive" "$LOG"' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+    '[ "$(ticks_run)" = 3 ] && [ "$(wc -l < "$SUP/runs.log")" = "$runs_before" ] && ! grep -q "supervisor\\|directive" "$LOG"' "lanes=$(cat "$FAKE_LANES") runs_before=$runs_before log=$(cat "$LOG")"
 "$HARNESS_BIN" directive clear >/dev/null
 reset_at=$(( $(date +%s) + 5400 ))
 usage 85 "$reset_at"
@@ -178,7 +183,7 @@ check "every cap at 0 with a reset ahead is logged once, naming the reset" \
     "$(cat "$S/logs/allocator.log")"
 usage 10
 write_env 1
-echo "$(date +%s)" > "$SUP/last_start"
+date +%s > "$SUP/last_start"
 
 # --- notes reach the tick through usage-ok.sh ----------------------------------------------------
 apply "{\"version\": 1, \"reason\": \"steer\", \"expires_at\": \"$(at 3600)\", \"notes\": {\"42\": \"rebase on the base branch first\"}}"
@@ -194,13 +199,21 @@ check "another tick on the issue is shown the note too" '[[ "$other" == *"SUPERV
 rm -f "$L/claim.42"
 
 # --- stop ----------------------------------------------------------------------------------------
-# A stand-in tick in a process group of its own, holding its slot's lock open as a tick does.
-HARNESS_TICK="state=$S slot=9 agent=claude model=model-a kind=work" setsid sleep 60 9>"$L/slot9.lock" & tick=$!; holders+=("$tick")
-until_ok grep -qa "^HARNESS_TICK=" <(tr '\0' '\n' < "/proc/$tick/environ" 2>/dev/null)
+# Records process $1 as slot $2's tick of state directory $3, as the runner does.
+record() {
+    local stat; local -a f
+    mkdir -p "$3/locks"
+    stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
+    printf '%s %s claude model-a work\n' "$1" "${f[19]}" > "$3/locks/slot$2.tick"
+}
+# A stand-in tick in a process group of its own, as the runner's setsid gives it; a process no slot
+# file records; and another installation's tick.
+setsid sleep 60 & tick=$!; holders+=("$tick")
+until_ok bash -c "[ \"\$(ps -o pgid= -p $tick | tr -d ' ')\" = $tick ]"
+record "$tick" 9 "$S"
 sleep 60 & plain=$!; holders+=("$plain")
-mkdir -p "$H/other/locks"
-HARNESS_TICK="state=$H/other slot=9 agent=claude model=model-a kind=work" setsid sleep 60 9>"$H/other/locks/slot9.lock" & foreign=$!; holders+=("$foreign")
-until_ok grep -qa "^HARNESS_TICK=" <(tr '\0' '\n' < "/proc/$foreign/environ" 2>/dev/null)
+sleep 60 & foreign=$!; holders+=("$foreign")
+record "$foreign" 9 "$H/other"
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $plain, \"reason\": \"x\"}]}"
 check "a pid that is no tick is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"not a live tick of this installation"* ]]' "rc=$rc $out"
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $foreign, \"reason\": \"x\"}]}"

@@ -43,13 +43,14 @@ Code, Codex or Gemini) with the composed prompt on stdin: the lane line, `prompt
 then the instance's `prompts/tick.md`. If no slot is free it exits silently — losing the race is
 a normal outcome, not an error.
 
-The runner starts every tick with `HARNESS_TICK` in its environment, naming the state directory,
-slot, agent, model and kind (work, lane or landing). A tick is the topmost process carrying it:
-an agent's node shim and its native process, and every tool shell, inherit the variable, so all of
-them resolve to the process the runner started. `harness ticks` counts live ticks this way, and
-`libexec/tick-pid.sh` finds the tick a claim belongs to; a dispatched tick on a device carries
-fleetd's `FLEET_SESSION` instead. Counting by marker rather than by command line keeps two
-installations on one host, and an operator's own agent sessions, out of each other's counts.
+The runner starts every tick as its own child and records it in its slot's
+`state/locks/slot<n>.tick`: pid, start time, agent, model and kind (work, lane or landing). A tick is
+live while its pid has that start time, so a reused pid is never mistaken for one, and a slot holds
+one tick at most, so a tool child that outlives its tick is never a second. `harness ticks` counts
+live ticks from these files, and `libexec/tick-pid.sh` gives a claim to the first ancestor a slot
+file records; on a device, to the process fleetd started. Both read only `/proc/<pid>/stat`, which
+stays readable for an agent CLI that marks itself non-dumpable, as the release Codex CLI does. Two
+installations on one host, and an operator's own agent sessions, stay out of each other's counts.
 
 With `FLEET_DISPATCH=1` the runner hands the same prompt to `fleet dispatch --wait` on stdin
 instead ([`docs/FLEET.md`](FLEET.md)). The slot, the model order, the cooldown and chaining stay
@@ -86,7 +87,8 @@ instance logged a stall, one issue was claimed by three ticks in six hours, an o
 or when `SUPERVISOR_INTERVAL_S` passed. It never starts sooner than `SUPERVISOR_MIN_INTERVAL_S`
 after its last start, waits that interval doubled for each failed run in a row, and starts only
 while its agent has room for one more tick under its usage windows. At most one runs, under
-`state/locks/supervisor.lock`, outside the slots, within `SUPERVISOR_BUDGET_MIN`. Its prompt is
+`state/locks/supervisor.lock` and recorded in `state/locks/supervisor.tick`, outside the slots,
+within `SUPERVISOR_BUDGET_MIN`. Its prompt is
 `prompts/supervisor-core.md` and the instance's `prompts/supervisor.md`, then the output of
 `harness health --json`: one bounded snapshot of usage, live ticks, recent tick outcomes, the
 signals above, the queue, failing PRs of this repository's branches, this host, the directive and

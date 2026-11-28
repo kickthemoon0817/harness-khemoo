@@ -29,19 +29,30 @@ out=$(HARNESS_STATE="$H/st" "$CLAIM" acquire 12); check "the claim lives under H
 "$CLAIM" acquire abc >/dev/null 2>&1; rc=$?; check "a non-numeric issue is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 "$CLAIM" take 7 >/dev/null 2>&1; rc=$?; check "an unknown command is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 
-# With libexec/tick-pid.sh beside it, the claim belongs to the tick that the runner marked, whatever
-# agent runs it, and a shell outside any tick of this harness takes none.
+# With libexec/tick-pid.sh beside it, the claim belongs to the tick the runner recorded in its slot
+# file, whatever agent runs it, a non-dumpable one included, and a shell outside any tick takes none.
 cp "$here/libexec/tick-pid.sh" "$H/libexec/"
+cc -o "$H/nodump" "$here/tests/fixtures/nodump.c" || { echo "FAIL cc cannot build the non-dumpable stand-in"; exit 1; }
 export HARNESS_STATE="$H/state" CLAIM H
 unset HARNESS_TICK FLEET_SESSION
-HARNESS_TICK="state=$H/state slot=1 agent=gemini model=m kind=work" \
-    bash -c 'echo $$ > "$H/tick"; bash -c "\"\$CLAIM\" acquire 13 > \"\$H/out\""; true'
-check "a tool shell's claim belongs to its marked tick" \
-    'grep -qx ACQUIRED "$H/out" && grep -q "^13 $(cat "$H/tick") " "$L/claim.13"' "$(cat "$H/out") $(cat "$L/claim.13" 2>/dev/null)"
-HARNESS_TICK="state=$H/elsewhere slot=1 agent=gemini model=m kind=work" \
-    bash -c 'echo $$ > "$H/tick"; bash -c "\"\$CLAIM\" acquire 14 > \"\$H/out\" 2>&1; echo rc=\$? >> \"\$H/out\""; true'
-check "a tick of another state directory takes no claim here" \
-    '! grep -q "^14 $(cat "$H/tick") " "$L/claim.14" 2>/dev/null' "$(cat "$H/out")"
+record() {  # $1 = pid: recorded as slot 1's tick, as the runner records the agent it starts
+    local stat; local -a f
+    stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
+    printf '%s %s codex m work\n' "$1" "${f[19]}" > "$L/slot1.tick"
+}
+"$H/nodump" 'until [ -s "$H/state/locks/slot1.tick" ]; do sleep 0.05; done; "$CLAIM" acquire 13 > "$H/out" 2>&1' 3 &
+agent=$!
+sleep 0.2; record "$agent"
+for _ in $(seq 100); do [ -s "$H/out" ] && break; sleep 0.05; done
+status=$("$CLAIM" status 13)
+check "a non-dumpable agent's tool shell claims for the agent, held while it runs" \
+    'grep -qx ACQUIRED "$H/out" && grep -q "^13 $agent " "$L/claim.13" && [[ "$status" == "HELD 13 $agent "* ]]' \
+    "$(cat "$H/out") $(cat "$L/claim.13" 2>/dev/null) status=$status"
+kill "$agent" 2>/dev/null; wait "$agent" 2>/dev/null
+rm -f "$L/slot1.tick"
+bash -c 'bash -c "\"\$CLAIM\" acquire 14 > \"\$H/out\" 2>&1; echo rc=\$? >> \"\$H/out\""; true'
+check "a shell that no slot file records takes no claim" \
+    'grep -qx "rc=2" "$H/out" && [ ! -e "$L/claim.14" ]' "$(cat "$H/out")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

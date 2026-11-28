@@ -150,8 +150,6 @@ pub struct Config {
     pub harness_bin: String,
     pub title: String,
     pub lane_model: String,
-    /// The state directory as a tick's `HARNESS_TICK` may name it.
-    pub tick_states: Vec<String>,
     /// harness.env's model list, usage and agent keys, which win over the environment's.
     pub usage_settings: Vec<(String, String)>,
     pub labels: QueueLabels,
@@ -211,7 +209,6 @@ impl Config {
             harness_bin: "harness".to_owned(),
             title: "Harness status".to_owned(),
             lane_model: String::new(),
-            tick_states: Vec::new(),
             usage_settings: Vec::new(),
             labels: QueueLabels::default(),
             usage_cache: PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -747,13 +744,8 @@ impl Collector {
             self.refresh_resource_status_in_place();
         }
         let started = self.now();
-        let states = if self.config.tick_states.is_empty() {
-            vec![self.config.state_dir().display().to_string()]
-        } else {
-            self.config.tick_states.clone()
-        };
         let found = self.scanner.scan_processes().and_then(|processes| {
-            let ticks = self.scanner.find_ticks(&processes, &states, self.now())?;
+            let ticks = self.scanner.find_ticks(&processes, self.now())?;
             Ok((processes, ticks))
         });
         match found {
