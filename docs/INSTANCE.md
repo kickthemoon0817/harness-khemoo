@@ -61,8 +61,10 @@ The instance is usable when the required files are readable, `TARGET_REPO` is a 
 `WORKTREE_ROOT` exists or its nearest existing parent is a writable directory, `GH_REPO` is set or
 derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is set, and each agent
 of the model list and the lane has a local profile whose `AGENT_BIN_<agent>` resolves on the PATH
-(with `FLEET_DISPATCH=1`, `FLEET_BIN` instead, and any agent). Until then the launcher starts
-nothing. It logs `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log`
+(with `FLEET_DISPATCH=1`, `FLEET_BIN` instead, and any agent), and the config sets none of the keys
+an older `harness.env` holds that the harness does not read (`CLAUDE_BIN`, `CLAUDE_FLAGS`,
+`TICK_AGENT_EXES`, `FIVE_*_AT`, `WEEK_*_AT`, `USAGE_TICK_STOP_WEEK_PCT`; `check` names the key to set
+instead). Until then the launcher starts nothing. It logs `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log`
 at most once an hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, the
 default agent, where ticks run, each agent's command line, models, lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
 `present but not readable (ignored)`), the hold state,
@@ -139,8 +141,10 @@ past one, 2 without a fresh reading. Both read the keys below from the environme
 Claude's defaults to `USAGE_FETCH` (default `~/.claude/scripts/usage-fetch.sh`). A reading older
 than `USAGE_MAX_AGE` (default 1800 s) is stale. A codex reading is as new as the newest codex
 session on the host, which records every change, so it stays true past its age while every window
-gives `resets_at`. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. Codex use
-on another host is not seen.
+gives `resets_at`. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. The
+rollouts hold only this host's codex use: an instance whose codex ticks run on fleet devices, or
+whose codex account works on other hosts too, reads codex from `json:` with a fetch that covers the
+account.
 
 A window under a day long steps by `USAGE_STEPS_SHORT` (default `60 70 80`), a longer one by
 `USAGE_STEPS_LONG` (default `80 85 88`), and `USAGE_STEPS_<agent>_<name>` sets one window's steps:
@@ -148,7 +152,8 @@ under the first point the window allows `TICK_WIDTH` (default `MAX_SLOTS`) ticks
 half of it, under the third one, and from there none. No window may reach `USAGE_CEILING_PCT`
 (default 90). An agent's cap is its tightest window's, `TICK_WIDTH` with no windows, and 0 with no
 fresh reading from a source other than `none`. The pool's cap is the agents' caps summed, at most
-`TICK_WIDTH`; slots past it and up to `MAX_SLOTS` are left for the landing tick. A running tick
+`TICK_WIDTH`, leaving out an agent each of whose entries cools down, and an agent only the lane
+names while no lane tick is wanted; slots past it and up to `MAX_SLOTS` are left for the landing tick. A running tick
 stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
 `USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
 
@@ -252,7 +257,7 @@ The prompt's first line tells the tick which issues it may claim:
 | `This tick runs on <model>.` | the model lane is off |
 | `This tick runs on <model>: never claim an issue labelled <LANE_LABEL>; those are worked on the model lane.` | the lane is on and this tick is not a lane tick |
 | `This tick runs on <LANE_MODEL>, the model lane: claim only an issue labelled <LANE_LABEL>. ...` | claimable lane issues outnumber the young lane ticks |
-| `This tick runs on <model>. <LANE_MODEL> is cooling down on its usage limit, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down |
+| `This tick runs on <model>. <LANE_MODEL> cannot run now, on its usage limit or windows, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down, or its agent's windows allow no tick |
 | `This tick is the merge slot's landing tick: claim only an issue labelled <READY_LABEL>. ...` | a landing tick started past the usage width while every allowed slot is held |
 
 The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, it needs `QUEUE_DEPTH_CMD`

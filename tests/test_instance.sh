@@ -189,6 +189,10 @@ check_with "TICK_MODELS='fake-model codex:model-x gemini:model-g'" "AGENT_BIN_co
 check "check prints each agent's command line, with the prompt on stdin, and its usage" \
     '[ "$rc" -eq 0 ] && grep -qxF "agent codex: $H/fakebin/codex exec --model <model> --dangerously-bypass-approvals-and-sandbox - < prompt" "$H/check.txt" && grep -qxF "agent gemini: $H/fakebin/gemini --model <model> --yolo < prompt" "$H/check.txt" && grep -qxF "agent claude: $H/fakebin/claude -p --model <model> < prompt" "$H/check.txt" && grep -qx "usage:         pool: 1 of 1" "$H/check.txt"' \
     "rc=$rc $(cat "$H/check.txt")"
+check_with "CLAUDE_FLAGS=" "WEEK_HALF_AT=64" "TICK_AGENT_EXES=claude:-p"
+check "check names each key it does not read, and the key to set instead" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: .*CLAUDE_FLAGS is not read; set AGENT_FLAGS_claude instead" "$H/check.txt" && grep -q "WEEK_HALF_AT is not read; set USAGE_STEPS_LONG instead" "$H/check.txt" && grep -q "TICK_AGENT_EXES is not read; remove it" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
 check_with "HARNESS_BIN=$H/plain-file"
 check "check fails when HARNESS_BIN is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable HARNESS_BIN ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "GH_REPO="
@@ -287,6 +291,15 @@ echo 0 > "$FAKE_LANE"
 launch
 check "with no lane issue, the tick leaves lane issues alone" \
     'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on fake-model: never claim an issue labelled \`ai:lane\`"' "$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
+write_env
+# A lane whose agent's windows allow no tick leaves its issues to the work ticks, and says so.
+write_env "LANE_MODEL=claude:lane-model" "LANE_LABEL=ai:lane" "TICK_MODELS=codex:model-x" "AGENT_BIN_codex=$H/fakebin/codex"
+echo 1 > "$FAKE_LANE"; usage 80
+launch
+check "a lane that cannot run opens its issues to the work ticks" \
+    'head -1 "$FAKE_AGENTS/codex.stdin" | grep -qx "This tick runs on model-x. lane-model cannot run now, on its usage limit or windows, so an issue labelled \`ai:lane\` may be claimed too." && grep -q "claude:lane-model cannot run" "$LOG" && grep -q "^[^ ]* codex=1\[five_hour:10%\] allowed=1 " "$LOG"' \
+    "log=$(cat "$LOG") stdin=$(head -1 "$FAKE_AGENTS/codex.stdin" 2>/dev/null)"
+usage 10; echo 0 > "$FAKE_LANE"
 write_env
 
 # hooks/hold: exit 0 holds and logs its reason once; exit 1 or a hang holds nothing.

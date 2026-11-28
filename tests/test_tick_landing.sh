@@ -57,10 +57,11 @@ hold() {
 }
 held() { ! flock -n "$L/slot$1.lock" true; }
 # Starts a stand-in tick of kind $1 for state directory $2 (default this home's) in the background,
-# and returns once its environment carries the runner's marker.
+# holding its slot's lock open as a tick does, and returns once its environment carries the marker.
 live() {
-    local pid
-    HARNESS_TICK="state=${2:-$H/state} slot=9 agent=claude model=fake-model kind=$1" sleep 30 & pid=$!; holders+=("$pid")
+    local pid state=${2:-$H/state}
+    mkdir -p "$state/locks"
+    HARNESS_TICK="state=$state slot=9 agent=claude model=fake-model kind=$1" sleep 30 9>"$state/locks/slot9.lock" & pid=$!; holders+=("$pid")
     until_ok grep -qa "^HARNESS_TICK=" <(tr '\0' '\n' < "/proc/$pid/environ")
 }
 release_all() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); }

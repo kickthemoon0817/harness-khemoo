@@ -13,6 +13,9 @@
 # runners to fill it. Every step is ordered cheapest-first so the common case (nothing
 # to do) costs no API calls.
 set -u
+# Started from inside a tick, the launcher is still no part of it: its runners and their ticks must
+# not inherit that tick's marker.
+unset HARNESS_TICK FLEET_SESSION FLEET_ADAPTER
 
 # shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
@@ -126,7 +129,9 @@ list_agents() {
     done | awk '!seen[$0]++'
 }
 
-# Runs `harness usage` with what it reads: harness.env is sourced here, not exported.
+# Runs `harness usage` with what it reads: harness.env is sourced here, not exported. The lane's
+# entry counts toward the pool only while pool_lane names it.
+pool_lane=""
 harness_usage() {
     (
         vars=$(compgen -v USAGE_)
@@ -134,13 +139,13 @@ harness_usage() {
         [ -n "$vars" ] && export $vars
         [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
         export MAX_SLOTS MODEL_COOLDOWN_S
-        TICK_MODELS=$(model_list) LANE_MODEL=$(lane_on && printf '%s' "$lane_entry") exec "$HARNESS_BIN" usage "$@"
+        TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" usage "$@"
     )
 }
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
-    local root argv a bin
+    local root argv a bin k name
     if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
     else
         if [ -z "${TARGET_REPO:-}" ]; then echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
@@ -172,6 +177,17 @@ instance_missing() {
             done
         fi
     fi
+    # Keys this harness does not read, which an older harness.env may still set: a tick would run
+    # without what they ask for, so each must move to the key named after it.
+    for k in CLAUDE_BIN:AGENT_BIN_claude CLAUDE_FLAGS:AGENT_FLAGS_claude TICK_AGENT_EXES: \
+        FIVE_HALF_AT:USAGE_STEPS_SHORT FIVE_ONE_AT:USAGE_STEPS_SHORT FIVE_NONE_AT:USAGE_STEPS_SHORT \
+        WEEK_HALF_AT:USAGE_STEPS_LONG WEEK_ONE_AT:USAGE_STEPS_LONG WEEK_NONE_AT:USAGE_STEPS_LONG \
+        USAGE_TICK_STOP_WEEK_PCT:USAGE_TICK_STOP_LONG_PCT; do
+        name=${k%%:*}
+        [ -n "${!name+x}" ] || continue
+        if [ -n "${k#*:}" ]; then echo "$HARNESS_ENV_FILE: $name is not read; set ${k#*:} instead"
+        else echo "$HARNESS_ENV_FILE: $name is not read; remove it"; fi
+    done
     # A tick runs the lint through it before every post, and the launcher counts ticks and usage with it.
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
@@ -196,6 +212,8 @@ export -n GH_TOKEN
 compute_allowed() {
     local doc err
     allowed=0; usage_line="usage=unknown"; unknown=""
+    # A lane agent with no lane tick to run would size the pool for runners that find no entry.
+    pool_lane=""; lane_wanted && pool_lane=$lane_entry
     err=$(mktemp)
     if doc=$(harness_usage --json 2>"$err"); then
         { read -r allowed; read -r usage_line; read -r unknown; } < <(jq -r '
@@ -248,8 +266,13 @@ compute_want() {
 # agent runs fewer ticks than its usage windows allow (harness usage pick). Further arguments go to
 # the pick: --landing, --entry <entry>.
 pick_model() {
-    local tried=$1; shift
-    harness_usage pick --tried "$tried" "$@"
+    local tried=$1 out err rc; shift
+    err=$(mktemp)
+    out=$(harness_usage pick --tried "$tried" "$@" 2>"$err"); rc=$?
+    [ "$rc" -le 1 ] || log_changed "ERROR harness usage pick failed ($(tail -n 1 "$err" | cut -c1-200)); nothing run"
+    rm -f "$err"
+    printf '%s' "$out"
+    return "$rc"
 }
 
 cron_active() { crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh'; }
@@ -300,13 +323,16 @@ queue_depth() {  # $1 = the label to count
     queue_n=$out
 }
 
-lane_cooling() {
+# True while no lane tick can start: the lane's entry cools down on its usage limit, or its agent's
+# windows allow none.
+lane_closed() {
     local stamp="$MODEL_COOL/$lane_entry"
-    [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
+    [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ] && return 0
+    ! pick_model "" --entry "$lane_entry" --landing >/dev/null
 }
 lane_wanted() {  # true when this tick should run on the model lane
     lane_on && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
-    lane_cooling && return 1
+    lane_closed && return 1
     local want_l
     if ! queue_depth "$LANE_LABEL"; then
         log_changed "ERROR lane queue count failed ($queue_error); no lane tick"
@@ -318,8 +344,8 @@ lane_wanted() {  # true when this tick should run on the model lane
     # to be still choosing its issue stands for one of them (compute_want's rule).
     read_ticks
     [ "$(young_ticks lane)" -lt "$want_l" ] || return 1
-    # The lane's agent needs room under its usage windows like any other.
-    pick_model "" --entry "$lane_entry" >/dev/null 2>&1
+    # The lane's agent needs room under its cap like any other.
+    pick_model "" --entry "$lane_entry" >/dev/null
 }
 
 # A merge slot's landing tick: it may start past the width the usage windows allow, so it
@@ -406,7 +432,7 @@ if [ "${1:-}" = check ]; then
         else echo "agent $a: no local profile"; fi
     done
     echo "models:        $(model_list)"
-    if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; else echo "model lane:    off"; fi
+    if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; pool_lane=$lane_entry; else echo "model lane:    off"; fi
     # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
     for h in env.sh hold worktree-busy worktree-remove; do
         f="$HARNESS_INSTANCE_DIR/hooks/$h"
@@ -490,7 +516,7 @@ if [ "${1:-}" = "runner" ]; then
         while :; do
             if [ -n "$landing" ]; then
                 kind=landing
-                entry=$(pick_model "$tried" --landing 2>>"$log")
+                entry=$(pick_model "$tried" --landing)
                 lane="$LANDING_LANE"
             elif lane_wanted && [[ " $tried " != *" $lane_entry "* ]]; then
                 kind=lane
@@ -498,17 +524,20 @@ if [ "${1:-}" = "runner" ]; then
                 lane="This tick runs on ${lane_entry#*:}, the model lane: claim only an issue labelled \`$LANE_LABEL\`. If none is claimable, print a one-line summary and end."
             else
                 kind=work
-                entry=$(pick_model "$tried" 2>>"$log")
+                entry=$(pick_model "$tried")
                 if ! lane_on; then
                     lane="This tick runs on ${entry#*:}."
-                elif lane_cooling; then
-                    lane="This tick runs on ${entry#*:}. ${lane_entry#*:} is cooling down on its usage limit, so an issue labelled \`$LANE_LABEL\` may be claimed too."
+                elif lane_closed; then
+                    # A lane that cannot run must not leave its issues to no one.
+                    log_changed "$lane_entry cannot run (its usage limit or windows); work ticks may claim $LANE_LABEL issues"
+                    lane="This tick runs on ${entry#*:}. ${lane_entry#*:} cannot run now, on its usage limit or windows, so an issue labelled \`$LANE_LABEL\` may be claimed too."
                 else
                     lane="This tick runs on ${entry#*:}: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
                 fi
             fi
             if [ -z "$entry" ]; then
-                echo "[tick.sh] no entry of '$(model_list)' can run: each is cooling down or its agent is at its usage cap; nothing run" >>"$log"
+                # Logged once, not as a tick log of its own: those would push real ones out.
+                log_changed "no entry of '$(model_list)' can run: each cools down or its agent is at its usage cap; nothing run"
                 break
             fi
             agent=${entry%%:*}; model=${entry#*:}
