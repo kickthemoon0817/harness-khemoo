@@ -60,6 +60,26 @@
 #          It prints YIELDED (exit 1) and joins the line. Needs no tick.
 #   lease.sh release <issue>   -> drops every slot this tick's pid holds
 #   lease.sh status            -> every slot's holder and whether its pid is alive
+#   Idle holds: a harness tick's single-slot kit hold, or its whole-card --all / --all-remote hold,
+#       is idle while its slot containers are down and nothing under the tick brings a kit up or runs
+#       one (iter.sh up or kit, arm_queue.sh, scenario_run.py, a docker run naming the slot's
+#       container); a compile is idle. Every acquire and status samples the holds and keeps
+#       idle-since.K, the time slot K's hold was first seen idle; status prints `idle N s` before a
+#       held slot's (alive). Sampling releases nothing. A hold idle IDLE_HOLD_S (600 s) on end is taken
+#       only on demand, by an acquire of another issue number that finds no slot it can use: a free
+#       slot on any card comes first. The acquire writes its own lease over the idle one in the same
+#       locked step, so the slot never sits free under the old holder's export line, and iter.sh
+#       refuses that line from then on. A single-slot acquire takes a one-slot hold; a whole-card
+#       acquire takes the idle holds on the card it needs, once nothing else holds it there. The taker
+#       prints RECLAIMED slot=K from <issue> to <issue> (no kit for N s) on stderr, a line a slot,
+#       and appends it to state/logs/lease.log. A local slot's container is read on this host's
+#       daemon, a remote slot's on that slot's host over ssh. A whole-card hold is idle only while
+#       every slot it holds is. The clock starts again when the hold is seen busy, when the slot
+#       changes holder or is released, when its daemon or the process table cannot be read, and when
+#       no call has looked for IDLE_SAMPLE_GAP_S (300 s). Device leases, whole-card reservations,
+#       named holders (anything but a `claude -p` tick) and holds of an issue the operator named
+#       (`prioritize`) keep no clock and are never taken. IDLE_HOLD_S=0 turns the rule off.
+#       bin/card_dispatch.sh reads status every minute, so the samples are never far apart.
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 : "${GPU_SLOTS:=3}"
@@ -293,11 +313,13 @@ SEED_IMAGE="${WORV_BUILDER_IMAGE:-worv-builder:isaac6}"
 slot_cache() { [ "$1" -eq 1 ] || echo "$CACHE_BASE/cache-slot$1"; }
 # A single-slot run the local card cannot take goes to the remote card: this
 # tick's own remote slot, else a free one while that card's kits and its one
-# rendering kit allow it and no one else is first in line. Prints the grant and
-# exits 0, or returns 1. A remote slot's cache stays under /tmp on that host.
+# rendering kit allow it and no one else is first in line. Failing a free slot on
+# every card, it takes another issue's idle hold on one, unless free_only is set.
+# Prints the grant and exits 0, or returns 1. A remote slot's cache stays under
+# /tmp on that host.
 remote_grant() {
   [ -n "$REMOTE_CARD_HOSTS" ] || return 1
-  local s f hp take="" host="" first i free_r stale_r kits_r render_r render_busy
+  local s f hp take="" host="" first i free_r stale_r kits_r render_r render_busy idle_r taking="" old="" pass
   # This tick's own remote slot first, on whichever host holds it.
   for s in $(remote_slots); do
     f=$(slot_file $s); [ -s "$f" ] || continue
@@ -305,36 +327,45 @@ remote_grant() {
     if [ "$hp" = "$pid" ] && kill -0 "$hp" 2>/dev/null; then take=$s; host=$(slot_host $s); break; fi
   done
   if [ -z "$take" ]; then
-    for i in $(host_order); do
-      # Each host keeps its own line: a render wait holds no place on a host
-      # whose rendering kit is live.
-      render_busy=0
-      slots_render_live $(host_slots $i) && render_busy=1
-      first=$(slot_first_issue)
-      [ -n "$first" ] && [ "$first" != "$issue" ] && continue
-      free_r=""; stale_r=""; kits_r=0; render_r=0
-      for s in $(host_slots $i); do
-        f=$(slot_file $s); hp=""
-        [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
-        if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
-          # A whole-card reservation runs no kit, and it lapses as a local one does.
-          if [[ "$(cat "$f")" == *" reserved-for-all" ]]; then
-            [ -z "$stale_r" ] && lapsed "$f" && stale_r=$s
-            continue
+    for pass in free idle; do
+      [ "$pass" = idle ] && [ -n "${free_only:-}" ] && break
+      for i in $(host_order); do
+        # Each host keeps its own line: a render wait holds no place on a host
+        # whose rendering kit is live.
+        render_busy=0
+        slots_render_live $(host_slots $i) && render_busy=1
+        first=$(slot_first_issue)
+        [ -n "$first" ] && [ "$first" != "$issue" ] && continue
+        free_r=""; stale_r=""; kits_r=0; render_r=0; idle_r=""
+        for s in $(host_slots $i); do
+          f=$(slot_file $s); hp=""
+          [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+          if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+            # A whole-card reservation runs no kit, and it lapses as a local one does.
+            if [[ "$(cat "$f")" == *" reserved-for-all" ]]; then
+              [ -z "$stale_r" ] && lapsed "$f" && stale_r=$s
+              continue
+            fi
+            kits_r=$(( kits_r + 1 ))
+            [[ "$(cat "$f")" == *" render" ]] && render_r=1
+            [ -z "$idle_r" ] && takeable_single "$s" && idle_r=$s
+          elif [ -z "$free_r" ]; then
+            free_r=$s
           fi
-          kits_r=$(( kits_r + 1 ))
-          [[ "$(cat "$f")" == *" render" ]] && render_r=1
-        elif [ -z "$free_r" ]; then
-          free_r=$s
+        done
+        free_r=${free_r:-$stale_r}; taking=""
+        if ! { [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ]; }; then
+          [ "$pass" = idle ] && [ -n "$idle_r" ] || continue
+          free_r=$idle_r; taking=1
+        elif [ "$pass" = idle ]; then
+          continue
         fi
+        [ -n "$render" ] && [ "$render_r" = 1 ] && continue
+        # A remote host may be shared: a slot is granted only while the host has
+        # the memory for it beside whatever else runs there.
+        REMOTE_CARD_HOST="$(remote_host $i)" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || continue
+        take=$free_r; host=$(remote_host $i); break 2
       done
-      free_r=${free_r:-$stale_r}
-      [ -n "$free_r" ] && [ "$kits_r" -lt "$REMOTE_KITS_MAX" ] || continue
-      [ -n "$render" ] && [ "$render_r" = 1 ] && continue
-      # A remote host may be shared: a slot is granted only while the host has
-      # the memory for it beside whatever else runs there.
-      REMOTE_CARD_HOST="$(remote_host $i)" "$H/bin/remote_room.sh" ${render:+--render} >/dev/null 2>&1 || continue
-      take=$free_r; host=$(remote_host $i); break
     done
     [ -n "$take" ] || return 1
   else
@@ -342,7 +373,9 @@ remote_grant() {
   fi
   f=$(slot_file $take)
   local c="worv-iter-$take" d=$(( 76 + take )) cr="$CACHE_BASE/cache-slot$take"
+  [ -n "$taking" ] && old=$(cat "$f")
   echo "$issue $pid $(date -u +%FT%TZ) domain=$d remote${render:+ render}" > "$f"
+  [ -n "$taking" ] && note_taken "$take" "$old"
   rm -f "$LOCKS/slot-wait.$issue"
   echo "ACQUIRED slot=$take file=$f container=$c domain=$d cache=$cr remote=$host"
   echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d WORV_ITER_CACHE_ROOT=$cr DOCKER_HOST=ssh://$host PATH=$H/bin/remote-docker:\$PATH"
@@ -373,13 +406,140 @@ drop_whole_card() {
   done
   return $held
 }
+# A tick that compiles or writes between runs holds no card meanwhile: another issue's acquire that
+# finds no slot it can use takes a tick's hold that has been idle IDLE_HOLD_S on end (see the header).
+# A taken hold goes straight to the taker, so its old holder's export line names a lease held by
+# another issue, which iter.sh refuses; the slot never sits free under that line.
+: "${IDLE_HOLD_S:=600}"
+: "${IDLE_SAMPLE_GAP_S:=300}"
+LEASE_LOG="$H/state/logs/lease.log"
+reclaim_by=""
+# Filled by sample_idle, per slot of an idle tick hold: the hold's idle seconds (a whole-card hold's
+# slots share the least of theirs), its issue, its pid, and whether it is one slot or a whole card.
+declare -A IDLE_S=() IDLE_ISSUE=() IDLE_PID=() IDLE_KIND=()
+PROC_TABLE=""
+idle_file() { echo "$LOCKS/idle-since.$1"; }
+operator_named() { [ -s "$OPERATOR_FILE" ] && tr ' ' '\n' < "$OPERATOR_FILE" | grep -qxF -- "$1"; }
+# A tick is a `claude -p` process, as bin/tick-pid.sh tells one: that script names the pid itself
+# when the pid is a tick. A named holder (the owner's session, a script holding the lease for its
+# run) is never taken from.
+holder_is_tick() { [ -x "$H/bin/tick-pid.sh" ] && [ "$("$H/bin/tick-pid.sh" "$1" 2>/dev/null)" = "$1" ]; }
+# The daemon that runs slot $1's containers: this host's, or the remote host the slot belongs to.
+slot_daemon() { if [ "$1" -le "$GPU_SLOTS" ]; then echo local; else slot_host "$1"; fi; }
+# The names of a daemon's running containers, one a line; fails when the daemon cannot be read.
+# This host's daemon is read whatever DOCKER_HOST the caller carries (bin/remote-env.sh), and
+# `timeout` runs the docker binary, never an exported docker function.
+running_names() {
+  if [ "$1" = local ]; then
+    DOCKER_HOST='' timeout 15 docker ps --format '{{.Names}}' 2>/dev/null
+  else
+    timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=5 "$1" "docker ps --format '{{.Names}}'" 2>/dev/null
+  fi
+}
+# True while a process under holder pid $1 brings a kit up or runs one for container $2: a remote
+# bring-up copies its mounts for minutes before the container exists. A compile is not a kit. The
+# holder's own command line is a tick's prompt, which may name any of these, so it is not read. A
+# process table that cannot be read counts as busy.
+holder_runs_kit() {
+  [ -n "$PROC_TABLE" ] || PROC_TABLE=$(ps -e -ww -o pid=,ppid=,args= 2>/dev/null) || { PROC_TABLE=""; return 0; }
+  [ -n "$PROC_TABLE" ] || return 0
+  awk -v root="$1" -v c="$2" '
+    { p = $1; parent[p] = $2; $1 = ""; $2 = ""; args[p] = " " substr($0, 3) " " }
+    END {
+      mine[root] = 1
+      do { grown = 0; for (p in parent) if (!(p in mine) && (parent[p] in mine)) { mine[p] = 1; grown = 1 } } while (grown)
+      for (p in mine) {
+        if (p == root) continue
+        a = args[p]
+        if (a ~ /iter\.sh (up|kit) / || index(a, "arm_queue.sh") || index(a, "scenario_run.py")) exit 0
+        if (a ~ /docker run / && (index(a, " " c " ") || index(a, "=" c " "))) exit 0
+      }
+      exit 1
+    }' <<< "$PROC_TABLE"
+}
+# Samples every tick hold and keeps its idle-since.K clock; it releases nothing. Runs under the lease
+# lock. A hold is busy while its slot container runs or its holder brings a kit up; busy, unread, or
+# exempt (a reservation, a named holder, an issue the operator named), it keeps no clock.
+sample_idle() {
+  IDLE_S=(); IDLE_ISSUE=(); IDLE_PID=(); IDLE_KIND=()
+  [[ "$IDLE_HOLD_S" =~ ^[0-9]+$ ]] && [ "$IDLE_HOLD_S" -gt 0 ] || return 0
+  local now s f line hi hp d key since last ri rp out
+  local -a slots=() keys=()
+  local -A read_ok=() names=() gslots=() gidle=() gbusy=() gissue=() gpid=() gkind=()
+  now=$(date -u +%s)
+  for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
+    f=$(slot_file "$s"); line=$(cat "$f" 2>/dev/null); hi=""; hp=""
+    read -r hi hp _ <<< "$line"
+    if [ -z "$line" ] || ! kill -0 "$hp" 2>/dev/null || [[ "$line" == *" reserved-for-all" ]] \
+        || operator_named "$hi" || ! holder_is_tick "$hp"; then
+      rm -f "$(idle_file "$s")"; continue
+    fi
+    slots+=("$s")
+  done
+  [ "${#slots[@]}" -gt 0 ] || return 0
+  # One read a daemon a call.
+  for s in "${slots[@]}"; do
+    d=$(slot_daemon "$s")
+    [ -n "${read_ok[$d]+x}" ] && continue
+    if out=$(running_names "$d"); then read_ok[$d]=1; names[$d]=$'\n'"$out"$'\n'; else read_ok[$d]=0; fi
+  done
+  for s in "${slots[@]}"; do
+    f=$(slot_file "$s"); line=$(cat "$f" 2>/dev/null); hi=""; hp=""
+    read -r hi hp _ <<< "$line"
+    d=$(slot_daemon "$s")
+    case "$line" in
+      *" exclusive"|*" held-for-all"|*" remote-all"*) key="card $hp $d"; gkind[$key]=card ;;
+      *) key="slot $s"; gkind[$key]=slot ;;
+    esac
+    [ -n "${gslots[$key]+x}" ] || keys+=("$key")
+    gslots[$key]+="$s "; gissue[$key]=$hi; gpid[$key]=$hp
+    if [ "${read_ok[$d]}" != 1 ] || [[ "${names[$d]}" == *$'\n'"$(slot_container "$s")"$'\n'* ]] \
+        || holder_runs_kit "$hp" "$(slot_container "$s")"; then
+      rm -f "$(idle_file "$s")"; gbusy[$key]=1; continue
+    fi
+    since=""; last=""; ri=""; rp=""
+    [ -s "$(idle_file "$s")" ] && read -r since last ri rp < "$(idle_file "$s")"
+    if ! [[ "$since" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || [ "$ri" != "$hi" ] || [ "$rp" != "$hp" ] \
+        || [ $(( now - last )) -gt "$IDLE_SAMPLE_GAP_S" ]; then
+      since=$now
+    fi
+    echo "$since $now $hi $hp" > "$(idle_file "$s")"
+    if [ -z "${gidle[$key]:-}" ] || [ $(( now - since )) -lt "${gidle[$key]}" ]; then gidle[$key]=$(( now - since )); fi
+  done
+  for key in "${keys[@]}"; do
+    [ -z "${gbusy[$key]:-}" ] || continue
+    for s in ${gslots[$key]}; do
+      IDLE_S[$s]=${gidle[$key]}; IDLE_ISSUE[$s]=${gissue[$key]}; IDLE_PID[$s]=${gpid[$key]}; IDLE_KIND[$s]=${gkind[$key]}
+    done
+  done
+  return 0
+}
+# Slot $1 holds another issue's tick hold, idle IDLE_HOLD_S on end, that this acquire may take. Only
+# an issue-number taker: iter.sh's fence refuses an old holder only when the lease names another
+# issue number.
+takeable() {
+  [[ "$issue" =~ ^[0-9]+$ ]] && [ -n "${IDLE_S[$1]:-}" ] && [ "${IDLE_S[$1]}" -ge "$IDLE_HOLD_S" ] \
+    && [ "${IDLE_ISSUE[$1]}" != "$issue" ] && [ "${IDLE_PID[$1]}" != "$pid" ]
+}
+# A single-slot acquire takes only a one-slot hold; a whole card is taken by a whole-card acquire.
+takeable_single() { takeable "$1" && [ "${IDLE_KIND[$1]}" = slot ]; }
+# Reports slot $1, just written to this acquire, as taken from the hold whose lease line was $2.
+note_taken() {
+  local msg="RECLAIMED slot=$1 from ${2%% *} to $issue (no kit for ${IDLE_S[$1]:-?} s)"
+  rm -f "$(idle_file "$1")"
+  echo "$msg" >&2
+  mkdir -p "${LEASE_LOG%/*}" 2>/dev/null
+  echo "$(date -u +%FT%TZ) $msg [$2] -> [$(cat "$(slot_file "$1")" 2>/dev/null)] by ${reclaim_by:-lease.sh}" >> "$LEASE_LOG" 2>/dev/null
+}
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
     case "$issue" in -*) echo "usage: lease.sh acquire <issue> [domain|--all --render|--all-remote [--no-cost]|--device]: an issue number comes first, not $issue" >&2; exit 2 ;; esac
     stated="${3:-}"
+    reclaim_by="acquire $issue${stated:+ $stated}"
     if [ "$stated" = "--device" ]; then
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      sample_idle
       for s in $(card_slots); do
         f=$(slot_file $s)
         if [ -s "$f" ] && [[ "$(cat "$f")" == *" exclusive" || "$(cat "$f")" == *" held-for-all" ]] \
@@ -422,14 +582,19 @@ case "${1:-}" in
       no_cost=""; room=--alone
       if [ "${4:-}" = --no-cost ]; then no_cost=" no-cost"; room=--alone-card; fi
       exec 8>"$K"; flock 8
+      sample_idle
       [ -n "$REMOTE_CARD_HOSTS" ] || { echo "BUSY no remote card is named"; exit 1; }
       n=$(remote_count)
+      # takes_r: the slots of that card held by another issue's idle hold, taken with the card.
+      takes_r=""
       grant_remote_all() {
-        local i=$1 h=$2 s0 s f
+        local i=$1 h=$2 s0 s f old
         s0=$(host_slots "$i" | head -1)
         for s in $(host_slots "$i"); do
-          f=$(slot_file "$s")
+          f=$(slot_file "$s"); old=""
+          case " $takes_r " in *" $s "*) old=$(cat "$f") ;; esac
           echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) remote-all${no_cost} render" > "$f"
+          [ -n "$old" ] && note_taken "$s" "$old"
         done
         rm -f "$LOCKS/slot-wait.$issue" "$LOCKS/cost-wait.$issue"
         f=$(slot_file "$s0")
@@ -458,21 +623,28 @@ case "${1:-}" in
           if [[ "${t:-}" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - t )) -le "${COST_WAIT_FRESH_S:-120}" ]; then prio=$n; prio_want=$w; break; fi
         done
       fi
-      for i in $(host_order); do
-        free=1
-        for s in $(host_slots "$i"); do
-          f=$(slot_file "$s"); hp=""
-          [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
-          if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then free=0; break; fi
+      # A card free of every hold first; then one whose holds are all another issue's idle ones.
+      for pass in free idle; do
+        for i in $(host_order); do
+          free=1; takes_r=""
+          for s in $(host_slots "$i"); do
+            f=$(slot_file "$s"); hp=""
+            [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
+            if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+              takeable "$s" && { takes_r+="$s "; continue; }
+              free=0; break
+            fi
+          done
+          [ "$free" = 1 ] || continue
+          if [ "$pass" = free ]; then [ -z "$takes_r" ] || continue; else [ -n "$takes_r" ] || continue; fi
+          if [ -n "$prio" ] && [ -z "$reserved" ] && { [ "$prio_want" = any ] || [ "$prio_want" = "$(remote_host "$i")" ]; }; then
+            reserved=$i; continue
+          fi
+          # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
+          [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
+          REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
+          grant_remote_all "$i" "$(remote_host "$i")"
         done
-        [ "$free" = 1 ] || continue
-        if [ -n "$prio" ] && [ -z "$reserved" ] && { [ "$prio_want" = any ] || [ "$prio_want" = "$(remote_host "$i")" ]; }; then
-          reserved=$i; continue
-        fi
-        # LEASE_WANT_HOST (user@host) keeps a fresh grant to that one remote card.
-        [ -z "${LEASE_WANT_HOST:-}" ] || [ "$(remote_host "$i")" = "$LEASE_WANT_HOST" ] || continue
-        REMOTE_CARD_HOST="$(remote_host "$i")" "$H/bin/remote_room.sh" "$room" >/dev/null 2>&1 || continue
-        grant_remote_all "$i" "$(remote_host "$i")"
       done
       # A cost read left waiting names the card it waits for (or any), so bin/build_host.sh keeps
       # compiles off that card until it is quiet. The runner asks every 30 s and refreshes it.
@@ -488,6 +660,7 @@ case "${1:-}" in
         exit 2
       fi
       exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+      sample_idle
       first_issue=$(priority_issue)
       if [ -n "$first_issue" ] && [ "$first_issue" != "$issue" ]; then
         # Yield to the issue with priority and keep the wait on record. A holder
@@ -511,11 +684,13 @@ case "${1:-}" in
         note_wait "$issue"
         echo "YIELDING to operator-priority issue $op"; exit 1
       fi
-      mine=0; primary=""; others=""
+      mine=0; primary=""; others=""; takes=""
       for s in $(card_slots); do
         f=$(slot_file $s); hp=""
         [ -s "$f" ] && hp=$(awk '{print $2}' "$f")
         if [ -n "$hp" ] && [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null; then
+          # Another issue's idle hold is taken only once nothing else keeps this tick from the card.
+          takeable "$s" && { takes+="$s "; continue; }
           others="$others[$(cat "$f")] "; continue
         fi
         # Free, dead or already ours: reserve it for this tick.
@@ -530,6 +705,11 @@ case "${1:-}" in
         note_wait "$issue"
         echo "RESERVING held=$mine/$(card_slots | wc -l) waiting for $others"; exit 1
       fi
+      for s in $takes; do
+        f=$(slot_file $s); old=$(cat "$f")
+        echo "$issue $pid $(date -u +%FT%TZ) domain=$(( 76 + s )) reserved-for-all" > "$f"
+        note_taken "$s" "$old"
+      done
       rm -f "$LOCKS/all-wait.$issue" "$LOCKS/slot-wait.$issue"
       [ -z "$primary" ] && primary=$(card_slots | head -1)
       f=$(slot_file $primary); c=$(slot_container $primary); d=$(( 76 + primary ))
@@ -550,6 +730,7 @@ case "${1:-}" in
       exit 0
     fi
     exec 8>"$K"; flock 8; exec 9>"$G"; flock 9
+    sample_idle
     render=""
     if [ "$stated" = "--render" ]; then render=1; stated=""; fi
     render_live && render_busy=1
@@ -600,7 +781,17 @@ case "${1:-}" in
       [[ "$(cat "$f")" == *" reserved-for-all" ]] && continue
       hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && kits=$(( kits + 1 ))
     done
-    if [ -n "$held" ] && [ "$held" != "$own" ]; then
+    # With no local slot it can use, an acquire takes a free remote slot, else another issue's idle
+    # hold on this card, else (below, through remote_grant) one on a remote card.
+    take=""
+    if [ -z "$own" ] && { [ -z "$held" ] || [ "$kits" -ge "$GPU_KITS_MAX" ]; }; then
+      for s in $(seq 1 "$GPU_SLOTS"); do takeable_single "$s" && { take=$s; break; }; done
+      if [ -n "$take" ]; then
+        free_only=1 remote_grant
+        held=$take
+      fi
+    fi
+    if [ -n "$held" ] && [ "$held" != "$own" ] && [ -z "$take" ]; then
       if [ "$kits" -ge "$GPU_KITS_MAX" ]; then
         remote_grant
         note_wait "$issue" slot-wait
@@ -654,7 +845,9 @@ case "${1:-}" in
     if [ -n "$cr" ] && ! seed_cache "$cr"; then
       echo "ERROR: could not seed $cr from $CACHE_BASE/cache" >&2; exit 1
     fi
+    [ -n "$take" ] && old=$(cat "$f")
     echo "$issue $pid $(date -u +%FT%TZ) domain=$d${render:+ render}" > "$f"
+    [ -n "$take" ] && note_taken "$held" "$old"
     rm -f "$LOCKS/slot-wait.$issue"
     echo "ACQUIRED slot=$held file=$f container=$c domain=$d${cr:+ cache=$cr}"
     echo "export MANURE_GATE_LEASE_FILE=$f WORV_ITER_CONTAINER=$c ROS_DOMAIN_ID=$d${cr:+ WORV_ITER_CACHE_ROOT=$cr}$(grant_env)"
@@ -677,7 +870,7 @@ case "${1:-}" in
     out="NOT-HOLDER"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
-      if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f"; out="RELEASED slot=$s"; fi
+      if [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ]; then rm -f "$f" "$(idle_file "$s")"; out="RELEASED slot=$s"; fi
     done
     if [ -s "$DEVICE_FILE" ] && [ "$(awk '{print $2}' "$DEVICE_FILE")" = "$pid" ]; then rm -f "$DEVICE_FILE"; out="RELEASED device"; fi
     echo "$out"
@@ -723,6 +916,8 @@ case "${1:-}" in
     esac
     ;;
   status)
+    # A status that cannot take the lock within a few seconds lists the slots without sampling them.
+    if { exec 8>"$K"; } 2>/dev/null && flock -w 5 8; then reclaim_by=status; sample_idle; exec 8>&-; fi
     for i in $(seq 1 "$(remote_count)"); do
       echo "remote card: $(remote_host $i) (slots $(host_slots $i | head -1)-$(host_slots $i | tail -1))"
     done
@@ -731,7 +926,7 @@ case "${1:-}" in
       && echo "local host: off (builds and tests go to the remote host)"
     for s in $(seq 1 "$GPU_SLOTS") $(remote_slots); do
       f=$(slot_file $s)
-      if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f") (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
+      if [ -s "$f" ]; then hp=$(awk '{print $2}' "$f"); kill -0 "$hp" 2>/dev/null && echo "slot $s HELD $(cat "$f")${IDLE_S[$s]:+ idle ${IDLE_S[$s]} s} (alive)" || echo "slot $s ORPHAN $(cat "$f") (pid dead)"
       else echo "slot $s free"; fi
     done
     if [ -s "$DEVICE_FILE" ]; then

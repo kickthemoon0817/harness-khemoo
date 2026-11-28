@@ -21,6 +21,8 @@ L="$H/state/locks"; LEASE="$H/bin/lease.sh"
 ago() { date -u -d "-$1 sec" +%FT%TZ; }
 reset() { rm -f "$L"/resource.lease* "$L"/slot-wait.* "$L"/device.lease; }
 mkdir -p "$H/fakebin"; export PATH="$H/fakebin:$PATH"
+# The idle-hold reclaim reads each daemon's running containers: none run here, and no case lasts IDLE_HOLD_S.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$H/fakebin/docker"; chmod +x "$H/fakebin/docker"
 card() { printf '#!/usr/bin/env bash\ncase "$*" in *memory.used*) echo %s;; *memory.total*) echo 16303;; esac\n' "$1" > "$H/fakebin/nvidia-smi"; chmod +x "$H/fakebin/nvidia-smi"; }
 card 6600
 pass=0; fail=0

@@ -8,6 +8,7 @@ mkdir -p "$T/h/bin" "$T/h/state/locks" "$T/h/state/logs" "$T/ev"
 cp "$here/bin/card_dispatch.sh" "$T/h/bin/"
 cat > "$T/h/bin/lease.sh" <<'L'
 #!/usr/bin/env bash
+[ -n "${LEASE_CALLS:-}" ] && echo "$*" >> "$LEASE_CALLS"
 echo "remote card: a@one (slots 4-5)"
 echo "remote card: b@two (slots 6-7)"
 for s in ${HELD_SLOTS:-4}; do echo "slot $s HELD 2511 1 t domain=80 remote-all render (alive)"; done
@@ -35,6 +36,9 @@ queue() {  # <packet name> <runs> <want> <bar 0|1> <minutes BUSY>
     for m in $(seq "$5" -1 0); do echo "$(iso "$m") BUSY no remote card is free, alone and quiet"; done; } > "$r/lease.log"
 }
 reset() { rm -rf "$T/ev/"*; : > "$S/stalls.log"; rm -f "$S/locks/operator-priority" "$S/locks/local-card-issues"; }
+
+reset; probes 0; LEASE_CALLS="$T/lease.calls" "$D"
+check "a pass with no waiting queue still reads lease.sh status, which keeps the idle-hold clocks" 'grep -qx status "$T/lease.calls"' "$(cat "$T/lease.calls" 2>/dev/null)"
 
 reset; probes 0; queue 2026-11-26-2504-lanes runs-w03 a@one 0 8; "$D"
 check "a queue pinned to a held card 5+ min is unpinned onto the free idle quiet card" \

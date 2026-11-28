@@ -348,6 +348,35 @@ overridden below.
      - then poll again.
      Re-acquire only between runs, never during one. A queue that held a slot for hours starved every capture
      while an advisory yield was ignored.
+   - **Hold a card only while a kit or device run of yours is on it (operator, 2026-11-28).** Before a build,
+     host cases or writing, bring your container down (`tools/dev/iter.sh down`, under your export line) and
+     release the slot with `lease.sh release <issue>`, which drops every slot and the device lease your tick
+     holds. Take it again with `lease.sh acquire` for the next run. Never release while your container is up.
+     The lease reclaims a hold left idle for `IDLE_HOLD_S` (600 s): while your slot's container is down and
+     nothing under your tick brings a kit up or runs one, another issue's acquire that finds no free slot
+     takes the slot straight to itself and prints `RECLAIMED slot=K from <you> to <it>`. `iter.sh` then
+     refuses your export line; acquire again before any `iter.sh up`, and use the slot or wait it gives you.
+   - **Overlap within the issue (operator, 2026-11-28).** Once an arm's build is done, start its queues in the
+     background and run host cases, mutations and packet writing beside them. Queue every arm the order names
+     in one go. Identity runs and device cases take whichever card is free. A timing read takes one host at a
+     time (worker-03's pairs, then this host's), so the other host stays free for compiles and identity runs;
+     the rule that a gain is read on both cards stands. While a timing queue (`--host-load`) runs on a host,
+     the operator freezes that host's card-less compiles and resumes them when it ends, so give a compile a
+     timeout that covers such a wait.
+   - **Several issues run at once (owner, 2026-11-28).** The operator releases an issue beside others when its
+     code merges cleanly with theirs (`git merge-tree`, version and changelog lines aside), so two issues never
+     change the same code at once. The stash list is shared by every worktree of the repository: resume only
+     the entry that starts `On <your branch>:`, never the top one.
+   - **Never pause for an operator ruling (owner, 2026-11-28).** When a stop rule fires, decide and go on, in
+     this order: (1) a remedy the order, a ruling or the design names; (2) the owner's standing rules (exact
+     first; no phase slower on any card, and a mode that cannot meet that stays behind its setting, default
+     `off`; a generic engine; a gain read against its parent on both cards); (3) a design change no one has
+     named: a Fable 5.2 subagent writes it at once (the Agent tool, model `fable`) from the readings, files and
+     bar, you build it, and the Fable 5.2 review at sign-off judges it; (4) a choice only the owner can make:
+     take the rule-compliant default, name the choice for the owner, and go on. Write each as **Decided:**
+     what, and why, with the readings. Add `ai:operator` only for a safety risk (a crashed or hung kit, a GPU
+     fault, a host that stops answering), an outside blocker no tool here clears, or a stop the owner asked for
+     by name. The sign-off review stays.
    - **Poll the lease from the tick's own shell,** in a bounded foreground loop. `lease.sh` records the
      tick's PID by walking up to it. A detached background loop has no tick above it, so `lease.sh`
      refuses it (exit 2). A lease recorded under the loop's own PID would read as dead the moment the

@@ -82,6 +82,13 @@ immediately.
 This is the single most important pattern in the harness: **ownership is proven by process
 liveness, never by elapsed time.** The same rule governs issue claims.
 
+A GPU slot adds one condition for a live tick holder: a kit must be on it. A tick's hold whose
+slot containers are down, with nothing under the tick bringing a kit up, for `IDLE_HOLD_S` on end
+can be taken by another issue's acquire that finds no free slot, because a card held with no kit
+on it starves every tick waiting for one. The take writes the new holder over the old in one
+locked step, so the slot never sits free under the old holder's export line, which the
+simulator's lease fence then refuses. Sampling alone (`lease.sh status`) releases nothing.
+
 ### Issue queue as the work protocol
 
 Issues are the queue, labels are the state machine (`ai` = queued, `ai:wip` = claimed), and PRs

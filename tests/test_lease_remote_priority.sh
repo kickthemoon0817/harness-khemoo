@@ -9,7 +9,9 @@ trap 'kill $A 2>/dev/null; rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/state/locks" "$T/cache"
 cp "$here/bin/lease.sh" "$T/bin/"; printf '#!/usr/bin/env bash\necho ok\n' > "$T/bin/remote_room.sh"; chmod +x "$T/bin/"*.sh
 printf 'a@one\nb@two\n' > "$T/state/locks/remote-card"
-export HARNESS_HOME="$T" GPU_SLOTS=3 LEASE_CACHE_BASE="$T/cache"
+# The idle-hold reclaim reads a held remote host's running containers over ssh: none run there.
+mkdir -p "$T/fakebin"; printf '#!/usr/bin/env bash\nexit 0\n' > "$T/fakebin/ssh"; chmod +x "$T/fakebin/ssh"
+export HARNESS_HOME="$T" GPU_SLOTS=3 LEASE_CACHE_BASE="$T/cache" PATH="$T/fakebin:$PATH"
 L="$T/state/locks"; LEASE="$T/bin/lease.sh"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }

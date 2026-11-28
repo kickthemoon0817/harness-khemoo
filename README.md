@@ -138,7 +138,7 @@ in-flight ticks finish on their own.
 | `prompts/glossary.md` | the project's terms, in the words a body uses to define them on first use |
 | `bin/public_record_lint.py` | blocks a body that cites a host path, a host, a PID, a slot or a harness file; `--audit` tables the last N bodies |
 | `tests/` | the harness's own tests, one script per tool (`bash tests/test_<tool>.sh`, `python3 tests/test_<tool>.py`) |
-| `state/logs/` | one log per tick, plus `allocator.log` |
+| `state/logs/` | one log per tick, plus `allocator.log` and `lease.log` (each idle GPU hold another issue's acquire took over) |
 | `state/locks/` | slot locks, GPU slot leases (`resource.lease`, `resource.lease.2`, …), heartbeat stamp |
 | `state/tick-model` | model priority list, best first |
 | `state/model-cooldown/` | one stamp per model that hit its usage limit |
@@ -147,7 +147,7 @@ in-flight ticks finish on their own.
 | `bin/host_health.sh` | cron every 3 min: probes the remote hosts into `state/host_health.tsv` and orders the harness hosts, degraded ones last |
 | `bin/stall_watch.sh` | cron every 5 min: long lock waits, idle cards with work waiting and demoted hosts, to `state/stalls.log` |
 | `bin/pr_sweep.sh` | cron every 30 min: closes open `ai/<n>-…` pull requests whose issue is closed |
-| `bin/card_dispatch.sh` | cron every minute: unpins a queue waiting 5+ min on a busy card when another card is free, idle and quiet (`PULL` lines in `state/stalls.log`) |
+| `bin/card_dispatch.sh` | cron every minute: reads `lease.sh status`, which keeps the lease's idle-hold clocks, and unpins a queue waiting 5+ min on a busy card when another card is free, idle and quiet (`PULL` lines in `state/stalls.log`) |
 | `bin/build_host.sh` | prints the `DOCKER_HOST` and `WORV_DEV_BUILD_LOCK` exports for the host whose compile lock is free |
 | `bin/arm_queue.sh` | runs a packet's queue of scenario arms under one GPU lease it holds, then stops the kit and releases |
 | `bin/dashboard.sh` | starts the status dashboard (`bin/dashboard.py`, `bin/dashboard_lib/`) on 127.0.0.1 and prints its URL |
