@@ -116,7 +116,9 @@ answer` applies it:
 - the directive through `harness directive apply`'s validation;
 - at most five GitHub actions (a comment, a label change, a parked question), performed by the
   harness with `gh`, only on open issues carrying `ISSUE_LABEL`;
-- labels only from `FIRST_LABEL`, `LOW_LABEL`, `LANE_LABEL` and `OPERATOR_LABEL`;
+- a `label` action adds or removes only `FIRST_LABEL` and `LOW_LABEL`; `OPERATOR_LABEL` goes on only
+  through `park`, with a question, and never comes off by the supervisor's hand: it is the human's hold;
+  the lane, long-budget, sign-off, ready, claim and queue labels are never the supervisor's;
 - every body masked, linted as a tick's comment is, and headed as the supervisor's.
 
 A directive narrows or reorders what the configuration allows, never widens it:

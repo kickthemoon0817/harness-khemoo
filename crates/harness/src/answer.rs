@@ -107,16 +107,26 @@ pub fn last_answer(text: &str) -> Option<Answer> {
     })
 }
 
-/// The labels the supervisor may set or remove: the configured take-first, take-last, lane and
-/// operator labels, those set.
+/// The labels a `label` action may add or remove: the configured take-first and take-last labels,
+/// which set the order work is taken in. The operator's label goes on only through `park`, with
+/// a question, and never comes off by the supervisor's hand: it is the human's hold. The lane and
+/// long-budget labels are the operator's, and the sign-off, ready, claim and queue labels the
+/// harness's own, so none of them is the supervisor's, even when a priority label is set to one.
 pub fn allowed_labels(env: Lookup) -> BTreeSet<String> {
-    ["FIRST_LABEL", "LOW_LABEL", "LANE_LABEL"]
+    let label = |key: &str, default: &str| env(key).unwrap_or_else(|| default.to_owned());
+    let protected = [
+        label("OPERATOR_LABEL", "ai:operator"),
+        label("LANE_LABEL", ""),
+        label("LONG_LABEL", "ai:long"),
+        label("SIGNOFF_LABEL", "ai:signoff"),
+        label("READY_LABEL", "ai:ready"),
+        label("WIP_LABEL", "ai:wip"),
+        label("ISSUE_LABEL", "ai"),
+    ];
+    ["FIRST_LABEL", "LOW_LABEL"]
         .iter()
         .filter_map(|key| env(key))
-        .chain(std::iter::once(
-            env("OPERATOR_LABEL").unwrap_or_else(|| "ai:operator".to_owned()),
-        ))
-        .filter(|label| !label.trim().is_empty())
+        .filter(|name| !name.trim().is_empty() && !protected.contains(name))
         .collect()
 }
 
@@ -449,7 +459,7 @@ mod tests {
     use serde_json::json;
 
     fn allowed() -> BTreeSet<String> {
-        ["ai:first", "ai:low", "ai:operator"]
+        ["ai:first", "ai:low"]
             .iter()
             .map(|label| (*label).to_owned())
             .collect()
@@ -528,7 +538,16 @@ mod tests {
             (done.add, done.remove),
             (vec!["ai:first".to_owned()], vec!["ai:low".to_owned()])
         );
-        for label in ["ai:ready", "ai:signoff", "ai:wip", "ai", "ai:long"] {
+        // The operator's hold, the lane and long budget, and the harness's own labels.
+        for label in [
+            "ai:operator",
+            "ai:lane",
+            "ai:long",
+            "ai:ready",
+            "ai:signoff",
+            "ai:wip",
+            "ai",
+        ] {
             assert!(
                 plan_of(json!({"label": {"issue": 7, "add": [label]}})).is_err(),
                 "{label}"
@@ -559,15 +578,45 @@ mod tests {
     }
 
     #[test]
-    fn the_allowed_labels_are_the_configured_ones() {
+    fn only_the_priority_labels_are_the_supervisors() {
         let env = |key: &str| match key {
             "FIRST_LABEL" => Some("ai:first".to_owned()),
+            "LOW_LABEL" => Some("ai:low".to_owned()),
+            "LANE_LABEL" => Some("ai:lane".to_owned()),
             "OPERATOR_LABEL" => Some("ai:op".to_owned()),
             _ => None,
         };
         assert_eq!(
             allowed_labels(&env).into_iter().collect::<Vec<_>>(),
-            ["ai:first", "ai:op"]
+            ["ai:first", "ai:low"]
+        );
+        // A priority label set to a protected one is not the supervisor's either.
+        let clash = |key: &str| match key {
+            "FIRST_LABEL" => Some("ai:operator".to_owned()),
+            "LOW_LABEL" => Some("ai:long".to_owned()),
+            _ => None,
+        };
+        assert!(allowed_labels(&clash).is_empty());
+    }
+
+    #[test]
+    fn the_operators_hold_goes_on_only_by_park_and_never_comes_off() {
+        assert!(
+            plan_of(json!({"label": {"issue": 7, "remove": ["ai:operator"]}}))
+                .is_err_and(|why| why.contains("ai:operator"))
+        );
+        assert!(plan_of(json!({"label": {"issue": 7, "add": ["ai:operator"]}})).is_err());
+        assert_eq!(
+            plan_of(json!({"park": {"issue": 7, "question": "Is this in scope?"}}))
+                .unwrap()
+                .add,
+            ["ai:operator"]
+        );
+        assert!(
+            plan_of(json!({"park": {"issue": 7, "question": "q"}}))
+                .unwrap()
+                .remove
+                .is_empty()
         );
     }
 
