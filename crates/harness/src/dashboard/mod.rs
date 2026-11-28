@@ -237,13 +237,15 @@ fn harness_bin(harness_home: &Path, from_file: Option<&str>, lookup: Lookup<'_>)
 /// the launcher derives it; empty when none is derived or the loader fails. The library is
 /// sourced by bash, the one place the dashboard runs a shell, with a fixed script.
 fn derived_repo(harness_home: &Path, lookup: Lookup<'_>) -> String {
-    let Some(library) = checkout_of_binary()
+    // The checkout holding the binary, else the harness home: an installed binary, or one built
+    // under CARGO_TARGET_DIR, sits in no checkout.
+    let Some(library) = [checkout_of_binary(), Some(harness_home.to_path_buf())]
+        .into_iter()
+        .flatten()
         .map(|checkout| checkout.join("lib").join("instance.sh"))
-        .filter(|library| library.is_file())
+        .find(|library| library.is_file())
     else {
-        eprintln!(
-            "harness dashboard: no checkout with lib/instance.sh holds this binary; GH_REPO is not derived"
-        );
+        eprintln!("harness dashboard: no lib/instance.sh to derive GH_REPO with");
         return String::new();
     };
     let argv = [

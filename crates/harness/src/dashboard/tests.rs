@@ -1745,16 +1745,15 @@ fn labels_come_from_the_env_file_and_the_flag_overrides_the_queue_label() {
 
 #[test]
 fn an_empty_gh_repo_is_derived_through_instance_lib() {
-    if !super::checkout_of_binary()
-        .is_some_and(|checkout| checkout.join("lib/instance.sh").is_file())
-    {
-        eprintln!(
-            "SKIP an_empty_gh_repo_is_derived_through_instance_lib: the test binary is outside its checkout (CARGO_TARGET_DIR)"
-        );
-        return;
-    }
     let directory = TempDir::new();
     let root = directory.path();
+    // The harness home's library serves when the test binary sits outside its checkout.
+    std::fs::create_dir_all(root.join("lib")).ok();
+    std::fs::copy(
+        super::testkit::REPO_ROOT.join("lib/instance.sh"),
+        root.join("lib/instance.sh"),
+    )
+    .ok();
     let target = root.join("target-repo");
     let git = |arguments: &[&str]| {
         Command::new("git")
