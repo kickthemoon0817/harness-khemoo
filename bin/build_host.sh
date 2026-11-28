@@ -15,9 +15,14 @@
 # Only when every host is left out are they all candidates again. The first host whose lock is free
 # wins. When every lock is taken, the host with the fewest waiters wins, the earlier on a tie.
 #
+#   build_host.sh --free-only   the first lane of the same choice whose lock is free with no waiter, or
+#                               nothing (exit 1); a host left out is never named, even when every one is
+#                               (bin/build.sh asks it whether a waiting build may move)
+#
 #   BUILD_LOCK_NAMES  "<user@host>=<name> …" (config/harness.env; a host left out is named from its address)
 #   BUILD_LOCK_DIR    where the locks live (default /tmp)
 set -u
+free_only=""; [ "${1:-}" = --free-only ] && free_only=1
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 S="${HARNESS_STATE:-$H/state}"
 # Only this one key is taken from config/harness.env, in a subshell, so the caller's environment
@@ -38,6 +43,14 @@ lock_of() {
   [ -n "$name" ] || name=$(printf '%s' "${h#*@}" | tr -c 'A-Za-z0-9' '-')
   echo "$BUILD_LOCK_DIR/worv-dev-build-remote-$name.lock"
 }
+waiters_of() { lslocks -n -o PATH,BLOCKER 2>/dev/null | awk -v p="$1" '$1 == p && $2 != "" { n++ } END { print n + 0 }'; }
+export_line() {
+  if [ "$1" = local ]; then
+    echo "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$(lock_of local) WORV_BUILDER_IMAGE=$local_image WORV_LOCAL_LANE=1"
+  else
+    echo "export DOCKER_HOST=ssh://$1 WORV_DEV_BUILD_LOCK=$(lock_of "$1") WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE="
+  fi
+}
 held=$("$H/bin/lease.sh" status < /dev/null 2>/dev/null | awk '
     /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
     /^slot [0-9]+ HELD / && / remote-all / && !/ no-cost / && /\(alive\)$/ { held[$2] = 1 }
@@ -49,6 +62,14 @@ for h in "${hosts[@]}"; do
   grep -qxF "$h" <<< "$waited" && continue
   cands+=("$h")
 done
+if [ -n "$free_only" ]; then
+  [ -n "$local_image" ] && cands+=(local)
+  for h in ${cands[@]+"${cands[@]}"}; do
+    l=$(lock_of "$h")
+    flock -n "$l" true 2>/dev/null && [ "$(waiters_of "$l")" = 0 ] && { export_line "$h"; exit 0; }
+  done
+  exit 1
+fi
 if [ -z "$local_image" ]; then
   [ "${#cands[@]}" -gt 0 ] || for h in "${hosts[@]}"; do grep -qxF "$h" <<< "$held" || cands+=("$h"); done
   [ "${#cands[@]}" -gt 0 ] || cands=("${hosts[@]}")
@@ -59,11 +80,7 @@ best="" best_wait=""
 for h in "${cands[@]}"; do
   l=$(lock_of "$h")
   if flock -n "$l" true 2>/dev/null; then best=$h; break; fi
-  w=$(lslocks -n -o PATH,BLOCKER 2>/dev/null | awk -v p="$l" '$1 == p && $2 != "" { n++ } END { print n + 0 }')
+  w=$(waiters_of "$l")
   if [ -z "$best_wait" ] || [ "$w" -lt "$best_wait" ]; then best=$h; best_wait=$w; fi
 done
-if [ "$best" = local ]; then
-  echo "export DOCKER_HOST=unix:///var/run/docker.sock WORV_DEV_BUILD_LOCK=$(lock_of local) WORV_BUILDER_IMAGE=$local_image WORV_LOCAL_LANE=1"
-else
-  echo "export DOCKER_HOST=ssh://$best WORV_DEV_BUILD_LOCK=$(lock_of "$best") WORV_BUILDER_IMAGE=worv-builder:isaac6 WORV_LOCAL_LANE="
-fi
+export_line "$best"
