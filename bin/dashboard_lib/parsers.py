@@ -162,6 +162,9 @@ class StateParsers:
                 local_card_off = True
             elif line.startswith("local host: off"):
                 continue
+            elif line.startswith("cost-read host limit:"):
+                # The slots it summarises are parsed on their own lines.
+                continue
             elif line.startswith("operator priority:"):
                 operator_priority = tuple(line.split(":", 1)[1].split())
             elif wait_match:
