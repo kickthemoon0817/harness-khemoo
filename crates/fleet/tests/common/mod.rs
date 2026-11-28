@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -396,9 +395,32 @@ pub fn fake_ssh(dir: &Path, mode: FakeSsh<'_>) -> PathBuf {
         argv.display()
     );
     let path = dir.join("ssh");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, &script);
     path
+}
+
+/// Writes an executable from a child process. A file this process held open for writing could
+/// still be open in a child that another test thread forked and has not yet exec'd, and running
+/// it then fails with ETXTBSY.
+fn write_executable(path: &Path, text: &str) {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "writing {}",
+        path.display()
+    );
 }
 
 pub fn recorded_argv(dir: &Path) -> Vec<String> {
