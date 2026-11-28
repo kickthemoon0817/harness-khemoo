@@ -9,14 +9,25 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytes = "1"
 clap.workspace = true
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.2"
+glob = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 regex = "1.13.2"
 # The engines under regex: anchored searches over a span, for the lint's look-around.
 regex-automata = "0.4.19"
 regex-syntax = "0.8.12"
-rustix.workspace = true
+rustix = { workspace = true, features = ["param", "system"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+subtle = "2.6"
+time.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
 
 [lints]
 workspace = true
