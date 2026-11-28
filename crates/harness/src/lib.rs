@@ -5,3 +5,5 @@ pub mod dashboard;
 mod gh;
 mod home;
 pub mod lint;
+pub mod ticks;
+pub mod usage;
