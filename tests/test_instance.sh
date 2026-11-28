@@ -9,7 +9,8 @@ H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
 I="$H/instance"
 mkdir -p "$H/bin" "$H/prompts" "$I/prompts" "$I/hooks" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin"
-cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+mkdir -p "$H/lib"
+cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"
 cp "$here/tests/fixtures/instance/prompts/tick.md" "$I/prompts/tick.md"
 cat > "$H/prompts/tick-core.md" <<'EOF'
 Core rules for {{GH_REPO}}: budget {{TICK_BUDGET_MIN}} min, lane `{{LANE_LABEL}}`, {{UNKNOWN}} stays.

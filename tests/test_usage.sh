@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Exercises the usage ceiling (bin/usage-lib.sh, bin/usage_ok.sh) against a scratch cache, with
+# Exercises the usage ceiling (lib/usage.sh, libexec/usage-ok.sh) against a scratch cache, with
 # no fetch script, so no API call is made.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
 # A scratch harness home with no config, so the real cache and fetch script are never read.
-mkdir -p "$H/bin"
-cp "$here/bin/usage-lib.sh" "$here/bin/usage_ok.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+mkdir -p "$H/lib" "$H/libexec"
+cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"; cp "$here/libexec/usage-ok.sh" "$H/libexec/"
 export USAGE_CACHE="$H/usage-cache.json" USAGE_FETCH="$H/no-fetch" HARNESS_HOME="$H"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -16,7 +16,7 @@ cache() {  # $1 five, $2 week, $3 age in seconds (default 0)
         "$(( $(date +%s) - ${3:-0} ))" "$1" "$2" > "$USAGE_CACHE"
 }
 # shellcheck source=/dev/null
-. "$H/bin/usage-lib.sh"
+. "$H/lib/usage.sh"
 MAX_SLOTS=8
 slots() { cache "$1" "$2" "${3:-0}"; compute_allowed; echo "$allowed"; }
 
@@ -36,24 +36,24 @@ check "no reading at all starts nothing" '[ "$allowed" -eq 0 ] && [ "$pct" = "?"
 cache 92 10; FIVE_NONE_AT=95 compute_allowed
 check "the ceiling holds whatever the steps say" '[ "$allowed" -eq 0 ]' "allowed=$allowed"
 
-cache 87 87; out=$("$H/bin/usage_ok.sh"); rc=$?
-check "usage_ok under the stand-down point exits 0" '[ "$rc" -eq 0 ] && [[ "$out" == *": go on" ]]' "rc=$rc $out"
-cache 88 10; out=$("$H/bin/usage_ok.sh"); rc=$?
-check "usage_ok two under the 5-hour ceiling exits 1" '[ "$rc" -eq 1 ] && [[ "$out" == *"start nothing"* ]]' "rc=$rc $out"
-cache 10 88; out=$("$H/bin/usage_ok.sh"); rc=$?
-check "usage_ok two under the weekly ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
-cache 10 95; out=$("$H/bin/usage_ok.sh"); rc=$?
-check "usage_ok past the ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+cache 87 87; out=$("$H/libexec/usage-ok.sh"); rc=$?
+check "usage-ok.sh under the stand-down point exits 0" '[ "$rc" -eq 0 ] && [[ "$out" == *": go on" ]]' "rc=$rc $out"
+cache 88 10; out=$("$H/libexec/usage-ok.sh"); rc=$?
+check "usage-ok.sh two under the 5-hour ceiling exits 1" '[ "$rc" -eq 1 ] && [[ "$out" == *"start nothing"* ]]' "rc=$rc $out"
+cache 10 88; out=$("$H/libexec/usage-ok.sh"); rc=$?
+check "usage-ok.sh two under the weekly ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+cache 10 95; out=$("$H/libexec/usage-ok.sh"); rc=$?
+check "usage-ok.sh past the ceiling exits 1" '[ "$rc" -eq 1 ]' "rc=$rc $out"
 # A weekly stand-down point of its own, above a 5-hour point set well under the ceiling.
-own() { USAGE_CEILING_PCT=95 USAGE_TICK_STOP_PCT=90 USAGE_TICK_STOP_WEEK_PCT=93 "$H/bin/usage_ok.sh"; }
+own() { USAGE_CEILING_PCT=95 USAGE_TICK_STOP_PCT=90 USAGE_TICK_STOP_WEEK_PCT=93 "$H/libexec/usage-ok.sh"; }
 cache 89 92; out=$(own); rc=$?
-check "usage_ok lets the weekly window pass the 5-hour point up to its own" '[ "$rc" -eq 0 ]' "rc=$rc $out"
+check "usage-ok.sh lets the weekly window pass the 5-hour point up to its own" '[ "$rc" -eq 0 ]' "rc=$rc $out"
 cache 90 10; out=$(own); rc=$?
-check "usage_ok stops at the 5-hour point when the weekly one is higher" '[ "$rc" -eq 1 ]' "rc=$rc $out"
+check "usage-ok.sh stops at the 5-hour point when the weekly one is higher" '[ "$rc" -eq 1 ]' "rc=$rc $out"
 cache 10 93; out=$(own); rc=$?
-check "usage_ok stops at the weekly point" '[ "$rc" -eq 1 ] && [[ "$out" == *"week_stop=93%"* ]]' "rc=$rc $out"
-cache 10 10 4000; out=$("$H/bin/usage_ok.sh"); rc=$?
-check "usage_ok with a stale reading exits 2" '[ "$rc" -eq 2 ] && [[ "$out" == "usage unknown"* ]]' "rc=$rc $out"
+check "usage-ok.sh stops at the weekly point" '[ "$rc" -eq 1 ] && [[ "$out" == *"week_stop=93%"* ]]' "rc=$rc $out"
+cache 10 10 4000; out=$("$H/libexec/usage-ok.sh"); rc=$?
+check "usage-ok.sh with a stale reading exits 2" '[ "$rc" -eq 2 ] && [[ "$out" == "usage unknown"* ]]' "rc=$rc $out"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Exercises bin/public_record_lint.py on bodies written here: every blocking rule fires on a body
+# Exercises libexec/public-record-lint.py on bodies written here: every blocking rule fires on a body
 # written for the dev host, a body written to prompts/public-record.md is clean, a comment keeps
 # its protocol line and its Harness trace block, and an installation's rules file adds to the core.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-LINT="$here/bin/public_record_lint.py"
+LINT="$here/libexec/public-record-lint.py"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # The core rules alone, whatever instance the checkout holds.
 mkdir -p "$T/no-instance"

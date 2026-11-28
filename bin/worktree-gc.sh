@@ -13,11 +13,11 @@
 # names it (one directory per line, e.g. what containers mount); a busy hook that
 # fails or outlasts WORKTREE_BUSY_TIMEOUT_S removes nothing, since what it would
 # have named is unknown. What git cannot delete goes to hooks/worktree-remove.
-#   worktree_gc.sh           dry run: prints what it would remove
-#   worktree_gc.sh --apply   removes, and logs to $HARNESS_STATE/logs/worktree_gc.log
+#   worktree-gc.sh           dry run: prints what it would remove
+#   worktree-gc.sh --apply   removes, and logs to $HARNESS_STATE/logs/worktree-gc.log
 set -u
 # shellcheck source=/dev/null
-. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
 # Cron gives no environment: every key exported, so gh reads GH_TOKEN from the config.
 set -a; harness_load; set +a
 export PATH="$HARNESS_INSTANCE_DIR/bin:${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
@@ -26,7 +26,7 @@ REPO="${TARGET_REPO:?set TARGET_REPO in the instance harness.env}"
 : "${KEEP_HEADS:=3}"; : "${KEEP_HOURS:=6}"; : "${WORK_BRANCH:=}"; : "${WORKTREE_KEEP:=}"
 : "${BRANCH_PREFIX:=ai/}"; : "${WORKTREE_BUSY_TIMEOUT_S:=30}"
 apply=0; [ "${1:-}" = "--apply" ] && apply=1
-LOG="$HARNESS_STATE/logs/worktree_gc.log"; mkdir -p "$(dirname "$LOG")"
+LOG="$HARNESS_STATE/logs/worktree-gc.log"; mkdir -p "$(dirname "$LOG")"
 gh_repo=(); [ -n "${GH_REPO:-}" ] && gh_repo=(-R "$GH_REPO")
 open=$(cd "$REPO" && gh issue list ${gh_repo[@]+"${gh_repo[@]}"} --state open --limit 500 --json number --jq '.[].number' 2>/dev/null) \
   || { echo "gh unavailable; nothing removed" >&2; exit 1; }

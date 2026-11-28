@@ -29,7 +29,7 @@ Ordered cheapest-first because it runs every couple of minutes:
 3. Count held slot locks. If none are free, exit — no API calls at all.
 4. Refresh usage telemetry only if the cache is older than `USAGE_REFRESH_AFTER`.
 5. Map utilization to a slot cap.
-6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `bin/claimable.sh`).
+6. Ask GitHub how many labeled issues are unclaimed (`QUEUE_DEPTH_CMD`, e.g. `libexec/claimable.sh`).
 7. `spawn = clamp(allowed − busy, 0, unclaimed)`, plus a rate-limited heartbeat when the queue
    is empty.
 
@@ -74,7 +74,7 @@ window cannot mask an exhausted weekly one. A window steps down to half width, t
 then none, and stops well under the ceiling, because the ticks already running keep spending
 until they end: the 5-hour window fills several times faster, so it stops at 80 % and the
 weekly one at 88 %. With no fresh reading nothing starts. The ceiling itself is held inside
-the ticks: each runs `bin/usage_ok.sh` before starting work and pauses two points under it, so
+the ticks: each runs `libexec/usage-ok.sh` before starting work and pauses two points under it, so
 its wind-down stays under the ceiling too.
 
 Reading percentages rather than counting tokens keeps the harness honest about usage it did
@@ -84,8 +84,8 @@ not cause — the human's own sessions consume the same budget.
 
 A lock held for a long session is fragile: if the holder dies, others cannot tell whether the
 thing it guards is still in use. So the harness pairs a short `flock`, which serializes the
-handoff, with a record of `issue PID timestamp` held for the session. `bin/claim.sh` (one tick per
-issue) and `bin/merge-lock.sh` (one landing at a time) both work this way. Ownership is then testable
+handoff, with a record of `issue PID timestamp` held for the session. `libexec/claim.sh` (one tick per
+issue) and `libexec/merge-lock.sh` (one landing at a time) both work this way. Ownership is then testable
 by anyone with `kill -0`, and a dead owner's record is taken over at once.
 
 This is the single most important pattern in the harness: **ownership is proven by process

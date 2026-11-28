@@ -10,12 +10,12 @@ finds that line anywhere in a comment. Inside a closed fenced code block only th
 asides, an installation's rules marked prose, the warnings) are skipped, so quoted output does not block
 on harness vocabulary; every rule that identifies the machine still applies there.
 
-    public_record_lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
-    public_record_lint.py --kind comment -           lint a comment from stdin
-    public_record_lint.py --pr 2138                  lint a PR body fetched with gh
-    public_record_lint.py --issue 2137               lint an issue body fetched with gh
-    public_record_lint.py --audit prs --last 20      one line per body over the last 20 PRs
-    public_record_lint.py --self-test                the built-in samples, core rules only
+    public-record-lint.py --kind pr BODY.md          lint a file; exit 1 on a blocking hit
+    public-record-lint.py --kind comment -           lint a comment from stdin
+    public-record-lint.py --pr 2138                  lint a PR body fetched with gh
+    public-record-lint.py --issue 2137               lint an issue body fetched with gh
+    public-record-lint.py --audit prs --last 20      one line per body over the last 20 PRs
+    public-record-lint.py --self-test                the built-in samples, core rules only
 
 GH_REPO (or --repo) names the repository for --pr, --issue and --audit. PUBLIC_RECORD_PR_SECTIONS and
 PUBLIC_RECORD_ISSUE_SECTIONS (comma-separated heading names) override the sections a body must carry.
@@ -114,8 +114,8 @@ def core_rules(version_words: Sequence[str], labels: Sequence[str],
         Rule("process-id", re.compile(r"\bpid \d+\b"),
              "a process id belongs in a comment's Harness trace block", True),
         Rule("harness-file",
-             re.compile(r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage_ok|usage-lib|pr_sweep|worktree_gc|"
-                        r"instance-lib|public_record_lint|dashboard)\.(?:sh|py)\b|\bstate/(?:locks|logs|paused)\b"),
+             re.compile(r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage-ok|pr-sweep|worktree-gc|"
+                        r"public-record-lint|dashboard)\.(?:sh|py)\b|\blib/(?:instance|usage)\.sh\b|\bstate/(?:locks|logs|paused)\b"),
              "a harness file: name the repository command that does the same", True),
         Rule("tick-aside",
              re.compile(r"\(mine\)|\bbudget \d+ ?min\b|\bharness tick\b|\bresume recipe\b|"
@@ -502,13 +502,13 @@ class PublicRecordLint:
         if rules_file is None and os.path.isdir(instance):
             # An instance without its rules is likely a missed copy, and the lint then passes what
             # the project's rules would block, so say so on every run.
-            print(f"public_record_lint: no lint_rules.json in {instance}; only the core rules applied",
+            print(f"public-record-lint: no lint_rules.json in {instance}; only the core rules applied",
                   file=sys.stderr)
         if rules_file is not None:
             try:
                 version_words, extra_labels, installation_rules = load_rules_file(rules_file)
             except RulesFileError as error:
-                print(f"public_record_lint: {error}", file=sys.stderr)
+                print(f"public-record-lint: {error}", file=sys.stderr)
                 return 2
             labels += extra_labels
         lint: PublicRecordLint = PublicRecordLint(
@@ -533,7 +533,7 @@ class PublicRecordLint:
                 kind = args.kind
                 body = sys.stdin.read() if args.body == "-" else open(args.body, encoding="utf-8").read()
         except (RuntimeError, OSError, json.JSONDecodeError) as error:
-            print(f"public_record_lint: {error}", file=sys.stderr)
+            print(f"public-record-lint: {error}", file=sys.stderr)
             return 2
         findings: tuple[Finding, ...] = lint.lint(body, kind)
         print(lint.format(findings, kind))

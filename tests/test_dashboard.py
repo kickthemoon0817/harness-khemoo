@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Exercises bin/dashboard.py: the state-file parsers, the tick-to-issue mapping, the queue grouping, and the
+Exercises libexec/dashboard.py: the state-file parsers, the tick-to-issue mapping, the queue grouping, and the
 collector, page and HTTP server against a scratch harness home with a fake resource status command, claimable.sh
 and gh, and the dashboard with none of the instance's optional sources configured.
 """
@@ -33,7 +33,7 @@ from unittest.mock import patch
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 FIXTURES: Path = REPO_ROOT / "tests" / "fixtures" / "dashboard"
 FLEET_FIXTURES: Path = REPO_ROOT / "tests" / "fixtures" / "fleet"
-sys.path.insert(0, str(REPO_ROOT / "bin"))
+sys.path.insert(0, str(REPO_ROOT / "libexec"))
 
 import dashboard  # noqa: E402
 from dashboard_lib.collector import Collector, DashboardConfig  # noqa: E402
@@ -73,7 +73,7 @@ class FixtureHarness:
         self.tick_processes: list[subprocess.Popen[bytes]] = []
         self._slot_lock_files: list[Any] = []
         self.helper_processes: list[subprocess.Popen[bytes]] = []
-        for directory in (self.home / "bin", self.home / "instance", self.state / "locks", self.state / "logs",
+        for directory in (self.home / "bin", self.home / "libexec", self.home / "instance", self.state / "locks", self.state / "logs",
                           self.state / "model-cooldown", self.home / "evidence", self.home / "buildlocks"):
             directory.mkdir(parents=True)
         shutil.copy(FIXTURES / "host_health.tsv", self.state / "host_health.tsv")
@@ -113,7 +113,7 @@ class FixtureHarness:
             if [ -s "{self.home / 'lease_override.txt'}" ]; then cat "{self.home / 'lease_override.txt'}"
             else cat "{FIXTURES / 'lease_status.txt'}"; fi
         """)
-        self._write_script("claimable.sh", f"""\
+        self._write_script("../libexec/claimable.sh", f"""\
             #!/usr/bin/env bash
             echo "claimable.sh label=$ISSUE_LABEL token=${{GH_TOKEN:+set}} repo=$GH_REPO" >> "{self.calls_log}"
             [ -n "${{FAKE_CLAIMABLE_FAIL:-}}" ] && {{ echo "boom $GH_TOKEN" >&2; exit 3; }}
@@ -736,7 +736,7 @@ class QueueTest(unittest.TestCase):
 
 class ClaimableParityTest(unittest.TestCase):
     """
-    Runs the real bin/claimable.sh, behind a fake gh, on the same issues the queue panel groups, and requires the
+    Runs the real libexec/claimable.sh, behind a fake gh, on the same issues the queue panel groups, and requires the
     same claimable count.
     """
 
@@ -800,7 +800,7 @@ class ClaimableParityTest(unittest.TestCase):
                 for number in closed:
                     (root / "fx" / f"closed.{number}").touch()
                 completed = subprocess.run(
-                    [str(REPO_ROOT / "bin" / "claimable.sh")], capture_output=True, text=True, timeout=60,
+                    [str(REPO_ROOT / "libexec" / "claimable.sh")], capture_output=True, text=True, timeout=60,
                     env=dict(os.environ, PATH=f"{root / 'fake'}:{os.environ['PATH']}", HARNESS_HOME=str(root),
                              PARITY_FIXTURES=str(root / "fx"), GH_REPO="o/r", ISSUE_LABEL="ai:plan",
                              LANE_LABEL="ai:lane"),
@@ -1317,7 +1317,7 @@ class HttpServerTest(unittest.TestCase):
         harness: FixtureHarness = FixtureHarness()
         self.addCleanup(harness.close)
         completed = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), "--harness-home", str(harness.home),
+            [sys.executable, str(REPO_ROOT / "libexec" / "dashboard.py"), "--harness-home", str(harness.home),
              "--data-dir", str(harness.home / "data"), "--gh",
              str(harness.home / "bin" / "gh"), "--usage-cache", str(harness.home / "usage-cache.json"),
              "--remote-interval", "0", "--once"],
@@ -1688,7 +1688,7 @@ class BareInstanceTest(unittest.TestCase):
             fake_gh.write_text(self.FAKE_GH)
             fake_gh.chmod(0o755)
             completed = subprocess.run(
-                [sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), "--harness-home", str(root),
+                [sys.executable, str(REPO_ROOT / "libexec" / "dashboard.py"), "--harness-home", str(root),
                  "--gh", str(fake_gh), "--usage-cache", str(root / "usage-cache.json"), "--remote-interval", "0",
                  "--claimable-interval", "0", "--once"],
                 capture_output=True, text=True, timeout=60,
@@ -1831,7 +1831,7 @@ class InstanceConfigTest(unittest.TestCase):
             config = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(base)).config
             self.assertEqual((config.state_dir, config.usage_cache),
                              (harness.state, harness.home / "usage-cache.json"))
-            printed = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "dashboard.py"), *base,
+            printed = subprocess.run([sys.executable, str(REPO_ROOT / "libexec" / "dashboard.py"), *base,
                                       "--print-data-dir"], capture_output=True, text=True, timeout=30)
             self.assertEqual(printed.stdout.strip(), str(harness.state / "dashboard"))
 

@@ -2,7 +2,7 @@
 # Runs a tick through the real fleet and fleetd: bin/tick.sh in runner mode with FLEET_DISPATCH=1
 # dispatches to a fleetd on a unix socket, whose agent adapter is a script that records its stdin and
 # hits a usage limit on the first model. Then the dashboard reads the same fleet's status. Needs cargo
-# to build fleet/; without it the suite is skipped, except in CI, where that is a failure.
+# to build the workspace; without it the suite is skipped, except in CI, where that is a failure.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if ! command -v cargo >/dev/null 2>&1; then
@@ -10,9 +10,9 @@ if ! command -v cargo >/dev/null 2>&1; then
     echo "SKIP test_fleet_e2e.sh: cargo is not installed, so fleet and fleetd cannot be built"
     exit 0
 fi
-# The fleet workspace pins its toolchain in fleet/rust-toolchain.toml, which rustup reads from the cwd.
-(cd "$here/fleet" && cargo build --quiet --locked --bin fleet --bin fleetd) || { echo "FAIL cargo build"; exit 1; }
-target=$(cd "$here/fleet" && cargo metadata --format-version 1 --no-deps \
+# The workspace pins its toolchain in rust-toolchain.toml, which rustup reads from the cwd.
+(cd "$here" && cargo build --quiet --locked --bin fleet --bin fleetd) || { echo "FAIL cargo build"; exit 1; }
+target=$(cd "$here" && cargo metadata --format-version 1 --no-deps \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 FLEET="$target/debug/fleet"; FLEETD="$target/debug/fleetd"
 
@@ -21,7 +21,8 @@ daemon=""
 cleanup() { [ -n "$daemon" ] && kill "$daemon" 2>/dev/null; rm -rf "$H"; }
 trap cleanup EXIT
 mkdir -p "$H/bin" "$H/prompts" "$H/instance/prompts" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin"
-cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+mkdir -p "$H/lib"
+cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"
 echo "Core rules." > "$H/prompts/tick-core.md"
 cp "$here/tests/fixtures/instance/prompts/tick.md" "$H/instance/prompts/tick.md"
 git -C "$H/target" init -q
@@ -100,7 +101,7 @@ check "a usage-limit line cools the model down" \
     '[ -f "$H/state/model-cooldown/model-a" ] && [ ! -f "$H/state/model-cooldown/model-b" ] && grep -q "model-a hit its usage limit" "$H/state/logs/allocator.log"' \
     "$(ls "$H/state/model-cooldown" 2>/dev/null); $(cat "$H/state/logs/allocator.log" 2>/dev/null)"
 
-snapshot=$(python3 "$here/bin/dashboard.py" --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
+snapshot=$(python3 "$here/libexec/dashboard.py" --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
     --remote-interval 0 --claimable-interval 0 --once 2>"$H/dashboard.err")
 panel=$(printf '%s' "$snapshot" | python3 -c '
 import json, sys

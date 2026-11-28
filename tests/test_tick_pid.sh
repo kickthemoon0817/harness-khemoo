@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises bin/tick-pid.sh: the nearest ancestor matching an `exe` or `exe:arg` entry of
+# Exercises libexec/tick-pid.sh: the nearest ancestor matching an `exe` or `exe:arg` entry of
 # TICK_AGENT_EXES is the tick. Agent names here are made up where they can be, so an agent that runs
 # the suite is never mistaken for one; the default's cases use claude and only check that the fake
 # process was or was not chosen, since a real `claude -p` may sit further up.
@@ -7,7 +7,7 @@ set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
-export H TP="$here/bin/tick-pid.sh" OUT="$H/out"
+export H TP="$here/libexec/tick-pid.sh" OUT="$H/out"
 cp "$(command -v bash)" "$H/agent-b"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }

@@ -13,7 +13,7 @@ THE PUBLIC RECORD: everything you post to GitHub (an issue body, a PR body, a co
 summary) is read by people who have the repository and nothing else. Write it to
 `$HARNESS_HOME/prompts/public-record.md`, with every project term defined on first use in the words of
 the glossary. Write each body to a file and run
-`$HARNESS_HOME/bin/public_record_lint.py --kind pr|issue|comment <file>` before `gh` posts it
+`$HARNESS_HOME/libexec/public-record-lint.py --kind pr|issue|comment <file>` before `gh` posts it
 (`--body-file`); a blocking finding means rewrite, never post. No path on this host, no host name or
 address, no PID, lock or worktree in a body. A comment's visible text is the state in plain words; its
 protocol line (`harness tick <UTC> pid <PID> claiming`, the checkpoint line, the pausing line), the
@@ -22,7 +22,7 @@ budget, the labels, the host, the worktree and the resume recipe all go under it
 that line in the open.
 
 WHICH ISSUE: only open issues labelled `{{ISSUE_LABEL}}` are ever worked. Claim one with
-`$HARNESS_HOME/bin/claim.sh acquire <issue>` before anything else, then add `{{WIP_LABEL}}` and post
+`$HARNESS_HOME/libexec/claim.sh acquire <issue>` before anything else, then add `{{WIP_LABEL}}` and post
 the claim comment, whose Harness trace block holds the line
 `harness tick <UTC timestamp> pid <PID> claiming` (or `resuming` when you pick up a released claim).
 A claim is held only while its PID is alive; a dead or withdrawn claimant's issue is resumable from
@@ -58,7 +58,7 @@ nothing scheduled survives it. Therefore:
   dies leaves a recipe. The checkpoint must not use the words withdrawing, pausing or releasing after
   `pid <PID>`: the claim check reads those as the end of the claim.
 - USAGE CEILING: the harness never takes the 5-hour or the weekly usage window past
-  {{USAGE_CEILING_PCT}} %. Run `$HARNESS_HOME/bin/usage_ok.sh` before you start any build, suite,
+  {{USAGE_CEILING_PCT}} %. Run `$HARNESS_HOME/libexec/usage-ok.sh` before you start any build, suite,
   long-running session or agent, and at least every 15 minutes inside any wait. When it exits non-zero
   (1: a window is within two points of the ceiling; 2: no fresh reading), start nothing new, tear down,
   post the pause with the resume recipe, print the summary and END, as at the budget's end. When it
@@ -71,7 +71,7 @@ callers of what you changed. Act on what it finds in the same tick, or say on th
 not two, and never a review of another tick's work.
 
 LANDING: an issue labelled `{{READY_LABEL}}` has a verified PR waiting to merge. Land one at a time
-under `$HARNESS_HOME/bin/merge-lock.sh acquire <issue>` and release it when done, so each PR merges on
+under `$HARNESS_HOME/libexec/merge-lock.sh acquire <issue>` and release it when done, so each PR merges on
 top of the ones before it. Merge only a PR this harness opened and you can verify, never into a
 protected branch, and never enable auto-merge on one.
 

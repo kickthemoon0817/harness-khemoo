@@ -29,7 +29,7 @@ pgrep -cf '^claude -p'                     # live ticks
 tail -5 state/logs/allocator.log           # sizing decisions
 ls -lt state/logs | head                   # recent ticks (0 bytes = still running)
 cat state/locks/claim.* 2>/dev/null        # local claims: issue, PID, since
-bin/merge-lock.sh status                   # who holds the merge slot
+libexec/merge-lock.sh status                   # who holds the merge slot
 gh issue list --label ai:wip               # what is claimed right now
 ```
 
@@ -62,7 +62,7 @@ Usually not. Check in this order:
 
 ## Recovery
 
-**Orphaned claim or merge lock.** `bin/claim.sh status <issue>` and `bin/merge-lock.sh status`
+**Orphaned claim or merge lock.** `libexec/claim.sh status <issue>` and `libexec/merge-lock.sh status`
 print `ORPHAN` when the holder PID is dead. The next acquire takes it over, so there is nothing to
 delete. Clean up whatever the dead tick left running first.
 
@@ -91,7 +91,7 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
 
 - **Read the tick logs.** They are written for a human and contain the honest scope of each
   claim ("compile-verified only", "gate skipped because…"). Skimming PR titles is not the same.
-- **Audit the public record.** `bin/public_record_lint.py --audit prs --last 20 --base <branch>`
+- **Audit the public record.** `libexec/public-record-lint.py --audit prs --last 20 --base <branch>`
   (and `--audit issues --label <label>`) tables the last bodies with their blocking findings. A
   body with a blocking finding was posted around the lint, or by a hand that skipped it; the fix
   is a rewrite of that body, and a runbook line if the cause is a rule that asks for host detail.
@@ -104,7 +104,7 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
   which phase you are in at the top of the runbook.
 - **Watch the weekly window, not just the 5-hour one.** The 5-hour recovers on its own; the
   weekly is what actually ends a long run. The harness stops each window short of 90 %
-  (`USAGE_CEILING_PCT`); `bin/usage_ok.sh` prints the reading.
+  (`USAGE_CEILING_PCT`); `libexec/usage-ok.sh` prints the reading.
 - **Pausing.** `touch state/paused` (or comment out the `tick.sh` cron line): the launcher
   starts nothing and runners chain nothing. A tick already running finishes its claim, so
   stop one that must not go on by its PID.

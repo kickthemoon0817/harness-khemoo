@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Starts bin/dashboard.py detached on 127.0.0.1 and prints its URL, which carries this start's access token.
+# Starts libexec/dashboard.py detached on 127.0.0.1 and prints its URL, which carries this start's access token.
 #   dashboard.sh [dashboard.py options]   start it, or print the URL of the one already running
 #   dashboard.sh status                   print its pid and URL (exit 1 when it is not running)
 #   dashboard.sh stop                     stop it
@@ -14,7 +14,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 H="${HARNESS_HOME:-$(cd "$here/.." && pwd)}"
 # dashboard.py resolves the state directory, so this script and the server agree on it.
 DATA="${DASHBOARD_DATA_DIR:-}"
-[ -n "$DATA" ] || DATA=$(python3 "$here/dashboard.py" --harness-home "$H" --print-data-dir) || exit 1
+[ -n "$DATA" ] || DATA=$(python3 "$here/../libexec/dashboard.py" --harness-home "$H" --print-data-dir) || exit 1
 PORT="${DASHBOARD_PORT:-8787}"
 PIDFILE="$DATA/dashboard.pid"
 URLFILE="$DATA/dashboard.url"
@@ -57,7 +57,7 @@ if p=$(running_pid); then echo "already running (pid $p): $(running_url)"; exit 
 mkdir -p "$DATA"
 chmod 700 "$DATA"
 rm -f "$URLFILE"
-setsid nohup python3 "$here/dashboard.py" --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
+setsid nohup python3 "$here/../libexec/dashboard.py" --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
   >> "$LOG" 2>&1 < /dev/null &
 pid=$!
 echo "$pid $PORT" > "$PIDFILE"

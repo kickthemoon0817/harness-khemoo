@@ -50,7 +50,7 @@ class IssueQueue:
     """
     Sorts open issues into running, claimable, held, operator, signoff and other.
 
-    The claimable rule is bin/claimable.sh's. An issue is a candidate when it carries the queue label, no live
+    The claimable rule is libexec/claimable.sh's. An issue is a candidate when it carries the queue label, no live
     local claim holds it, it is not parked for sign-off or for the operator, and every `Depends on` issue is
     closed; an `ai:wip` issue whose claimant is gone is a candidate again. claimable.sh also reads each `ai:wip`
     issue's claim comments for a live claimant pid; here a live claimant is a live tick holding that issue's

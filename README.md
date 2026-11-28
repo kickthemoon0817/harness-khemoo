@@ -17,10 +17,10 @@ infrastructure live in an instance directory that you own.
   file) or exits quietly.
 - The runner composes the prompt (a lane line, `prompts/tick-core.md`, then the instance's
   `prompts/tick.md`) and runs `claude -p` on the best model that is not cooling down.
-- The tick claims an issue (`bin/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
-  worktree under `WORKTREE_ROOT`, lints every body with `bin/public_record_lint.py` before posting
-  it, and ends with a summary. It stays inside its budget and the usage ceiling (`bin/usage_ok.sh`).
-- A ready PR lands under `bin/merge-lock.sh`, one at a time.
+- The tick claims an issue (`libexec/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
+  worktree under `WORKTREE_ROOT`, lints every body with `libexec/public-record-lint.py` before posting
+  it, and ends with a summary. It stays inside its budget and the usage ceiling (`libexec/usage-ok.sh`).
+- A ready PR lands under `libexec/merge-lock.sh`, one at a time.
 - When a tick ends with work still queued, the runner starts the next tick at once on a fresh
   context. It stops after a short tick, after `MAX_CHAIN` ticks, or when the harness is paused,
   held or out of usage.
@@ -47,14 +47,18 @@ Label an issue `ai` and the next firing picks it up. The harness starts nothing 
 fresh usage reading (`USAGE_CACHE`, see `instance/harness.env`). Pause it with
 `touch state/paused` or by commenting out the cron line. Ticks already running finish their claim.
 
-Optional cron lines: `*/30 * * * * ~/harness/bin/pr_sweep.sh` closes PRs whose issue closed
-elsewhere, and `0 * * * * ~/harness/bin/worktree_gc.sh --apply` removes worktrees whose work is done.
+Optional cron lines: `*/30 * * * * ~/harness/bin/pr-sweep.sh` closes PRs whose issue closed
+elsewhere, and `0 * * * * ~/harness/bin/worktree-gc.sh --apply` removes worktrees whose work is done.
 
 ## Core and instance
 
 | Lives in | What |
 |---|---|
-| `bin/`, `prompts/` (core) | the launcher, claims, the merge lock, usage gating, the lint, the dashboard, and the rules every tick follows |
+| `bin/` (core) | what cron and operators run: `tick.sh`, `pr-sweep.sh`, `worktree-gc.sh`, `dashboard.sh` |
+| `libexec/` (core) | what the launcher and ticks call: claims, the merge lock, the usage check, the lint, the dashboard server |
+| `lib/` (core) | shell sourced by the scripts: loading the instance, the usage windows |
+| `prompts/` (core) | the rules every tick follows |
+| `crates/` (core) | the Rust workspace: `fleet`, `fleetd` and their protocol ([`docs/FLEET.md`](docs/FLEET.md)) |
 | `instance/harness.env` | required: paths, labels, pool sizing, models, the dashboard's optional sources |
 | `instance/prompts/tick.md` | required: the installation's mission, appended to the core prompt |
 | `instance/prompts/` | optional: `runbook.md`, `glossary.md`, `public-record.md`, which the tick reads |
@@ -62,7 +66,7 @@ elsewhere, and `0 * * * * ~/harness/bin/worktree_gc.sh --apply` removes worktree
 | `instance/bin/`, `instance/tests/` | optional: the project's scripts (first on PATH) and its suites |
 | `hooks/env.sh` | sourced before ticks run; what it exports reaches every tick |
 | `hooks/hold` | exit 0 holds the harness while something every tick needs is down |
-| `hooks/worktree-busy` | prints worktree directories in use, so `worktree_gc.sh` keeps them |
+| `hooks/worktree-busy` | prints worktree directories in use, so `worktree-gc.sh` keeps them |
 | `hooks/worktree-remove` | removes what `git worktree remove` left behind |
 
 `HARNESS_INSTANCE_DIR` points the core at another instance directory. [`docs/INSTANCE.md`](docs/INSTANCE.md)
@@ -74,7 +78,7 @@ gives each contract.
 an access token. It shows running ticks, the queue, landings, usage and the allocator log, plus
 the instance's devices, run queues and build locks when `harness.env` configures them.
 `bin/dashboard.sh status` prints the URL again, `bin/dashboard.sh stop` stops it, and
-`bin/dashboard.py --help` lists the options.
+`libexec/dashboard.py --help` lists the options.
 
 ## Fleet
 
@@ -96,7 +100,7 @@ It runs every `tests/test_*.sh` and `tests/test_*.py`, plus any suites under `in
 The shell suites need Linux: bash 4+, `flock`, `setsid` and `lslocks` (util-linux), `pgrep`
 (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git` and `python3`. On another OS,
 run them in a container started with `--init`, so killed processes are reaped.
-`tests/test_fleet_e2e.sh` also needs `cargo`, to build `fleet/`, and is skipped without it. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
+`tests/test_fleet_e2e.sh` also needs `cargo`, to build the Rust workspace, and is skipped without it. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
 
 ## Safety posture
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Exercises bin/claim.sh in a scratch harness home, with a sleeping process as a live holder.
+# Exercises libexec/claim.sh in a scratch harness home, with a sleeping process as a live holder.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 sleep 600 & A=$!
 trap 'kill $A 2>/dev/null; rm -rf "$H"' EXIT
-mkdir -p "$H/bin" "$H/state/locks"
-cp "$here/bin/claim.sh" "$H/bin/claim.sh"
+mkdir -p "$H/libexec" "$H/state/locks"
+cp "$here/libexec/claim.sh" "$H/libexec/claim.sh"
 export HARNESS_HOME="$H"
-L="$H/state/locks"; CLAIM="$H/bin/claim.sh"
+L="$H/state/locks"; CLAIM="$H/libexec/claim.sh"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 

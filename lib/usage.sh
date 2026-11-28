@@ -1,4 +1,4 @@
-# Sourced by tick.sh and usage_ok.sh: the rate-limit reading and the ceiling the harness keeps
+# Sourced by tick.sh and usage-ok.sh: the rate-limit reading and the ceiling the harness keeps
 # both windows under.
 
 : "${USAGE_CACHE:=$HOME/.claude/usage-cache.json}"
