@@ -34,6 +34,10 @@ libexec/merge-lock.sh status                   # who holds the merge slot
 gh issue list --label ai:wip               # what is claimed right now
 ```
 
+Runners keep the newest `LOG_RETENTION` (default 200) tick logs, `tick-*`, and remove older ones;
+they never remove `allocator.log`, `directive.log` or `pr-sweep.log`, whatever their age. Supervisor
+runs keep their newest 20 logs, `supervisor-*`.
+
 `allocator.log` is the fastest health check. A line reads:
 
 ```
