@@ -29,7 +29,7 @@ home=${0%/fakebin/*}
 case $prompt in
     "You are the supervisor"*)
         { echo "--- $name supervisor"; echo "argv: $*"
-          env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|GEMINI_|ANTHROPIC_|OPENAI_|HARNESS_)' | LC_ALL=C sort
+          env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|AGY_|ANTHROPIC_|OPENAI_|HARNESS_)' | LC_ALL=C sort
         } >> "$home/seen/runs"
         echo '{"directive": null, "github": []}'
         exit 0 ;;
@@ -39,7 +39,7 @@ slot=${HARNESS_TICK#* slot=}; slot=${slot%% *}
     echo "--- $name"
     echo "argv: $*"
     echo "lane: ${prompt%%$'\n'*}"
-    env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|GEMINI_|ANTHROPIC_|OPENAI_|HARNESS_TICK=|TICK_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort
+    env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|AGY_|ANTHROPIC_|OPENAI_|HARNESS_TICK=|TICK_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort
     cut -d' ' -f4- "$HARNESS_STATE/locks/slot$slot.tick"
     "$HARNESS_HOME/libexec/usage-ok.sh" | sed "s|$HARNESS_HOME|H|g"
 } >> "$HARNESS_HOME/seen/runs"
@@ -90,7 +90,7 @@ ENV
 # AGENT_TOOLSDIRECTORY) never reaches the output.
 # shellcheck disable=SC2046 # one name a word
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR \
-    $(compgen -v AGENT_) $(compgen -v CLAUDE_) $(compgen -v CODEX_) $(compgen -v GEMINI_) $(compgen -v TICK_) \
+    $(compgen -v AGENT_) $(compgen -v CLAUDE_) $(compgen -v CODEX_) $(compgen -v AGY_) $(compgen -v TICK_) \
     $(compgen -v USAGE_) $(compgen -v ANTHROPIC_) $(compgen -v OPENAI_) $(compgen -v SUPERVISOR_)
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 20}}\n' "$(date +%s)" > "$H/usage-cache.json"

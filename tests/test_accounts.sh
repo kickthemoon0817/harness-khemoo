@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercises several accounts per agent CLI (AGENT_ACCOUNTS_DIR, agent@account:model entries) in a
-# scratch harness home. Fake claude, codex and gemini record the folder variable each tick ran with,
+# scratch harness home. Fake claude and codex record the folder variable each tick ran with,
 # its marker, its slot record and its usage check, and end on their usage-limit message while
 # <account folder>/limit exists; claude's `auth status --json` and codex's `login status` answer as
 # the real CLIs do, signed out while <account folder>/signed-out exists (codex: while it has no
@@ -13,8 +13,7 @@ H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
 A="$H/agent-accounts"
 mkdir -p "$H/bin" "$H/lib" "$H/libexec" "$H/prompts" "$H/instance/prompts" "$H/state" "$H/target" "$H/fakebin" \
-    "$H/seen" "$H/home" "$A/claude/claude-work" "$A/claude/claude-home" "$A/codex/codex-work/sessions/2026/11/28" \
-    "$A/gemini/gemini-lab"
+    "$H/seen" "$H/home" "$A/claude/claude-work" "$A/claude/claude-home" "$A/codex/codex-work/sessions/2026/11/28"
 cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/instance.sh" "$H/lib/"; cp "$here"/libexec/*.sh "$H/libexec/"
 cp "$here/prompts/supervisor-core.md" "$here/prompts/public-record.md" "$H/prompts/"
 echo "Core rules." > "$H/prompts/tick-core.md"
@@ -59,11 +58,6 @@ cat >/dev/null
 [ -e "${CODEX_HOME:-x}/limit" ] && { rm -f "$CODEX_HOME/limit"; echo "ERROR: You've hit your usage limit. Try again later."; exit 1; }
 exit 0
 EOF
-cat > "$H/fakebin/gemini" <<'EOF'
-#!/usr/bin/env bash
-cat >/dev/null
-echo "dir=${GEMINI_CLI_HOME:-default}" >> "$FAKE_SEEN/gemini.ticks"
-EOF
 cat > "$H/fakebin/fetch" <<'EOF'
 #!/usr/bin/env bash
 echo "${CLAUDE_CONFIG_DIR:-unset} ${USAGE_CACHE:-unset} ${USAGE_CREDENTIALS_FILE:-unset}" >> "$FAKE_SEEN/fetch"
@@ -82,7 +76,6 @@ GH_REPO=example-org/example-repo
 QUEUE_DEPTH_CMD=$H/fakebin/queue
 AGENT_BIN_claude=$H/fakebin/claude
 AGENT_BIN_codex=$H/fakebin/codex
-AGENT_BIN_gemini=$H/fakebin/gemini
 AGENT_FLAGS_claude=
 AGENT_FLAGS_codex=
 AGENT_ACCOUNTS_DIR=$A
@@ -93,14 +86,13 @@ CLAIM_GRACE_S=0
 USAGE_FETCH=$H/no-fetch
 USAGE_FETCH_claude_work=$H/no-fetch
 USAGE_FETCH_claude_home=$H/no-fetch
-USAGE_SOURCE_gemini=none
 ANTHROPIC_API_KEY=sk-ant-default-account
 EOF
     [ $# -gt 0 ] && printf '%s\n' "$@" >> "$H/instance/harness.env"
 }
 write_env
 # shellcheck disable=SC2046 # one name a word
-unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR CLAUDE_CONFIG_DIR CODEX_HOME GEMINI_CLI_HOME \
+unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR CLAUDE_CONFIG_DIR CODEX_HOME \
     AGENT_ACCOUNTS_DIR $(compgen -v USAGE_)
 # The default account's credentials, in the environment the launcher starts from.
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home" FAKE_SEEN="$H/seen" \
@@ -139,7 +131,7 @@ check "accounts off: the supervisor, a lane tick chaining into a bare model's an
 check_with
 check "check passes with every account folder in place" '[ "$rc" -eq 0 ] && grep -q "instance complete" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check "check prints each account's sign-in and method from its own CLI" \
-    'grep -q "^account:       claude@work: signed in (claude.ai), ends 2099-01-01T00:00:00.000Z; cap 1 five_hour=10% weekly=10%$" "$H/check.txt" && grep -q "^account:       codex@work: signed in (chatgpt); cap 1 primary=30%$" "$H/check.txt" && grep -q "^account:       gemini@lab: sign-in unknown (gemini.s CLI has no sign-in check); cap 1$" "$H/check.txt"' \
+    'grep -q "^account:       claude@work: signed in (claude.ai), ends 2099-01-01T00:00:00.000Z; cap 1 five_hour=10% weekly=10%$" "$H/check.txt" && grep -q "^account:       codex@work: signed in (chatgpt); cap 1 primary=30%$" "$H/check.txt"' \
     "$(grep account: "$H/check.txt")"
 check "each account's CLI was asked with its own folder" \
     'grep -qx "$A/claude/claude-work" "$H/seen/claude.auth" && grep -qx "$A/claude/claude-home" "$H/seen/claude.auth" && ! grep -qx default "$H/seen/claude.auth"' \
@@ -195,11 +187,15 @@ check_with "TICK_MODELS=claude:model-a" "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin
 check "with FLEET_DISPATCH=1 the supervisor, which runs here, may name an account, and its folder is checked" \
     'grep -q "^missing: an account folder for claude@gone: " "$H/check.txt" && ! grep -q "claude@gone names an account" "$H/check.txt"' \
     "rc=$rc $(cat "$H/check.txt")"
-check_with "TICK_MODELS=gemini@lab:model-g" "USAGE_SOURCE_gemini="
-check "a gemini account needs its own source or the agent's" \
-    '[ "$rc" -eq 1 ] && grep -q "USAGE_SOURCE_gemini_lab or USAGE_SOURCE_gemini unset: name gemini@lab.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
-check_with "TICK_MODELS=gemini@lab:model-g" "USAGE_SOURCE_gemini=" "USAGE_SOURCE_gemini_lab=none"
-check "an account's own source satisfies check" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
+mkdir -p "$A/agy/agy-lab"
+check_with "TICK_MODELS='claude@work:model-a agy@lab:model-flash'"
+check "check refuses an agy account, saying why, folder or no folder" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: a usage configuration that harness usage reads (.*agy@lab:model-flash.: agy has no accounts: it keeps one sign-in in the OS keyring and its config under ~/.gemini/antigravity-cli, which no variable moves" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='claude@work:model-a agy@lab'"
+check "agy@<name> with no model is refused as an account with no model" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: .*.agy@lab. names an account but no model" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -rf "$A/agy"
 
 # --- ticks ---------------------------------------------------------------------------------------------
 write_env
@@ -257,9 +253,6 @@ check "a sign-out that harness accounts found is still logged by the launcher, o
 rm -f "$A/claude/claude-work/signed-out" "$S/accounts/claude@work.json"
 rm -rf "$S/model-cooldown"
 
-write_env "TICK_MODELS=gemini@lab:model-g"
-launch
-check "a gemini account runs with GEMINI_CLI_HOME" '[ "$(cat "$H/seen/gemini.ticks")" = "dir=$A/gemini/gemini-lab" ]' "$(cat "$H/seen/gemini.ticks" 2>/dev/null)"
 
 # --- usage per account -------------------------------------------------------------------------------
 echo '{}' > "$A/claude/claude-work/.credentials.json"
@@ -288,11 +281,6 @@ out=$(set -a; . "$H/instance/harness.env"; set +a; HARNESS_STATE="$S" "$HARNESS_
 check "USAGE_SOURCE_<agent>_<account> replaces one account's reading" \
     '[ "$out" = "[[\"claude\",\"work\",\"json:$H/work.json\",1],[\"claude\",\"home\",\"claude-cache:$A/claude/claude-home/usage-cache.json\",1],[\"codex\",\"work\",\"codex-sessions:$A/codex/codex-work/sessions\",1]]" ]' "$out"
 
-write_env "USAGE_SOURCE_gemini=json:$H/gemini.json" "TICK_MODELS='gemini@lab:model-g codex@work:model-x'"
-launch
-"$H/bin/tick.sh"; settle
-check "a gemini account never reads the agent's source: it allows nothing, logged once" \
-    '[ "$(grep -c "gemini@lab: an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_lab; none of its ticks start" "$LOG")" = 1 ] && [ ! -e "$H/seen/gemini.ticks" ] && grep -q "gemini@lab=0\[unknown\]" "$LOG"' "$(cat "$LOG")"
 
 # --- the supervisor ----------------------------------------------------------------------------------
 mkdir -p "$A/claude/claude-sup"; rm -f "$H/seen/fetch"
@@ -325,7 +313,7 @@ check "its run is logged under its account" 'grep -q "^\[tick.sh\] exit=0 .*agen
 # --- harness accounts ----------------------------------------------------------------------------------
 out=$(AGENT_ACCOUNTS_DIR="$A" HARNESS_STATE="$S" AGENT_BIN_claude="$H/fakebin/claude" "$HARNESS_BIN" accounts --json)
 check "harness accounts lists every folder with its sign-in, and nothing the CLI printed beyond it" \
-    '[ "$(jq -c "[.accounts[] | [.agent, .account, .sign_in.state]]" <<<"$out")" = "[[\"claude\",\"home\",\"signed_in\"],[\"claude\",\"work\",\"signed_in\"],[\"codex\",\"work\",\"signed_in\"],[\"gemini\",\"lab\",\"unknown\"]]" ] && ! grep -qE "example\.com|Example Org" <<<"$out"' \
+    '[ "$(jq -c "[.accounts[] | [.agent, .account, .sign_in.state]]" <<<"$out")" = "[[\"claude\",\"home\",\"signed_in\"],[\"claude\",\"work\",\"signed_in\"],[\"codex\",\"work\",\"signed_in\"]]" ] && ! grep -qE "example\.com|Example Org" <<<"$out"' \
     "$out"
 out=$(AGENT_ACCOUNTS_DIR="$A" HARNESS_STATE="$S" "$HARNESS_BIN" accounts env claude@work codex@work); rc=$?
 check "harness accounts env prints the env(1) arguments each account's tick runs with" \

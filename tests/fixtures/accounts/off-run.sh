@@ -25,7 +25,7 @@ name=${0##*/}
 cat >/dev/null
 {
     echo "argv: $*"
-    env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|GEMINI_|HARNESS_TICK=|TICK_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort
+    env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|AGY_|HARNESS_TICK=|TICK_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort
     cut -d' ' -f4- "$HARNESS_STATE/locks/slot1.tick"
     "$HARNESS_BIN" ticks | cut -d' ' -f3-
     "$HARNESS_HOME/libexec/usage-ok.sh" | sed "s|$HARNESS_HOME|H|g"
@@ -40,7 +40,7 @@ FAKE
 chmod +x "$H/fakebin/agent"; ln -s agent "$H/fakebin/claude"; ln -s agent "$H/fakebin/codex"
 cat > "$H/fakebin/fetch" <<'FAKE'
 #!/usr/bin/env bash
-env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|GEMINI_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort > "$HARNESS_HOME/seen/fetch"
+env | grep -E '^(AGENT_|USAGE_|CLAUDE_|CODEX_|AGY_)' | sed "s|$HARNESS_HOME|H|g" | LC_ALL=C sort > "$HARNESS_HOME/seen/fetch"
 FAKE
 printf '#!/usr/bin/env bash\ncase "$ISSUE_LABEL" in ai) echo 1 ;; *) echo 0 ;; esac\n' > "$H/fakebin/queue"
 printf '#!/usr/bin/env bash\necho "*/2 * * * * $HARNESS_HOME/bin/tick.sh"\n' > "$H/fakebin/crontab"
@@ -68,7 +68,7 @@ ENV
 # AGENT_TOOLSDIRECTORY) never reaches the output.
 # shellcheck disable=SC2046 # one name a word
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR \
-    $(compgen -v AGENT_) $(compgen -v CLAUDE_) $(compgen -v CODEX_) $(compgen -v GEMINI_) $(compgen -v TICK_) \
+    $(compgen -v AGENT_) $(compgen -v CLAUDE_) $(compgen -v CODEX_) $(compgen -v AGY_) $(compgen -v TICK_) \
     $(compgen -v USAGE_) $(compgen -v ANTHROPIC_) $(compgen -v OPENAI_)
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 20}}\n' "$(date +%s)" > "$H/usage-cache.json"

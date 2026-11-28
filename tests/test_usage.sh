@@ -79,29 +79,27 @@ check "a FIFO as claude's cache is unreadable, never waited on" '[ "$out" = unre
 rm -f "$H/fifo.json"
 rm -f "$H/sessions/2026/11/28/rollout-a.jsonl"
 check "no rollout: codex starts nothing" '[ "$(pool codex:gpt-5.5)" = "0 codex=0" ]' "$(pool codex:gpt-5.5)"
-check "gemini without a source allows nothing" '[ "$(pool gemini:gemini-3-pro)" = "0 gemini=0" ]' "$(pool gemini:gemini-3-pro)"
-export USAGE_SOURCE_gemini=none
-check "gemini with the source none has the full width" '[ "$(pool gemini:gemini-3-pro)" = "8 gemini=8" ]' "$(pool gemini:gemini-3-pro)"
+check "an agent without a default source allows nothing" '[ "$(pool aider:model-x)" = "0 aider=0" ]' "$(pool aider:model-x)"
+check "agy's default source is none: it has the full width" '[ "$(pool agy:model-flash)" = "8 agy=8" ]' "$(pool agy:model-flash)"
 
 cache 75 10; rollout 86 3600 0
 check "the pool is the agents' caps summed" '[ "$(pool "claude:opus codex:gpt-5.5")" = "2 claude=1 codex=1" ]' "$(pool "claude:opus codex:gpt-5.5")"
-check "the pool never passes the width" '[ "$(pool "claude:opus gemini:g")" = "8 claude=1 gemini=8" ]' "$(pool "claude:opus gemini:g")"
+check "the pool never passes the width" '[ "$(pool "claude:opus agy:g")" = "8 claude=1 agy=8" ]' "$(pool "claude:opus agy:g")"
 check "a bare model runs on TICK_AGENT" '[ "$(TICK_AGENT=codex pool gpt-5.5)" = "1 codex=1" ]' "$(TICK_AGENT=codex pool gpt-5.5)"
 
 cat > "$H/fetch" <<EOF
 #!/usr/bin/env bash
-printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 65, "window_minutes": 60}, {"name": "monthly", "used_pct": 10, "window_minutes": 43200}]}\n' "\$(date +%s)" > "$H/gemini.json"
+printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 65, "window_minutes": 60}, {"name": "monthly", "used_pct": 10, "window_minutes": 43200}]}\n' "\$(date +%s)" > "$H/agy.json"
 EOF
 chmod +x "$H/fetch"
-printf '{"timestamp": 1000, "windows": []}\n' > "$H/gemini.json"
-export USAGE_SOURCE_gemini="json:$H/gemini.json" USAGE_FETCH_gemini="$H/fetch"
-check "reading the pool runs no fetch" '[ "$(pool gemini:g)" = "0 gemini=0" ]' "$(pool gemini:g); $(cat "$H/gemini.json")"
-TICK_MODELS=gemini:g "$HARNESS_BIN" usage refresh
-check "a stale normalized file is refreshed by its fetch script" '[ "$(pool gemini:g)" = "4 gemini=4" ]' "$(pool gemini:g); $(cat "$H/gemini.json")"
-printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 1, "window_minutes": 60}]}\n' "$(( $(date +%s) + 3600 ))" > "$H/gemini.json"
-check "a reading dated an hour ahead allows nothing" '[ "$(pool gemini:g)" = "0 gemini=0" ]' "$(pool gemini:g)"
-export USAGE_SOURCE_gemini=none
-unset USAGE_FETCH_gemini
+printf '{"timestamp": 1000, "windows": []}\n' > "$H/agy.json"
+export USAGE_SOURCE_agy="json:$H/agy.json" USAGE_FETCH_agy="$H/fetch"
+check "reading the pool runs no fetch" '[ "$(pool agy:g)" = "0 agy=0" ]' "$(pool agy:g); $(cat "$H/agy.json")"
+TICK_MODELS=agy:g "$HARNESS_BIN" usage refresh
+check "a stale normalized file is refreshed by its fetch script" '[ "$(pool agy:g)" = "4 agy=4" ]' "$(pool agy:g); $(cat "$H/agy.json")"
+printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 1, "window_minutes": 60}]}\n' "$(( $(date +%s) + 3600 ))" > "$H/agy.json"
+check "a reading dated an hour ahead allows nothing" '[ "$(pool agy:g)" = "0 agy=0" ]' "$(pool agy:g)"
+unset USAGE_SOURCE_agy USAGE_FETCH_agy
 
 cache 87 87; ok claude
 check "usage-ok.sh under the stand-down point exits 0" '[ "$rc" -eq 0 ] && [[ "$out" == "claude: five_hour=87% weekly=87% "*": go on" ]]' "rc=$rc $out"
@@ -126,10 +124,10 @@ rollout 89 3600 86400; ok codex
 check "usage-ok.sh stands down on an old codex reading past the stand-down point" '[ "$rc" -eq 1 ]' "rc=$rc $out"
 rollout 40 3600 86400; ok codex
 check "usage-ok.sh goes on with an old codex reading under it" '[ "$rc" -eq 0 ]' "rc=$rc $out"
-(unset USAGE_SOURCE_gemini; ok gemini; [ "$rc" -eq 2 ] && [[ "$out" == *"USAGE_SOURCE_gemini is not set"* ]]); rc_unset=$?
-check "usage-ok.sh in a gemini tick without a source starts nothing" '[ "$rc_unset" -eq 0 ]' "rc=$rc_unset"
-ok gemini
-check "usage-ok.sh in a gemini tick with no windows goes on" '[ "$rc" -eq 0 ] && [[ "$out" == "gemini: no windows "*": go on" ]]' "rc=$rc $out"
+(ok aider; [ "$rc" -eq 2 ] && [[ "$out" == *"USAGE_SOURCE_aider is not set"* ]]); rc_unset=$?
+check "usage-ok.sh in a tick of an agent without a source starts nothing" '[ "$rc_unset" -eq 0 ]' "rc=$rc_unset"
+ok agy
+check "usage-ok.sh in an agy tick, with no windows, goes on" '[ "$rc" -eq 0 ] && [[ "$out" == "agy: no windows "*": go on" ]]' "rc=$rc $out"
 rollout 89 3600 0
 out=$(FLEET_ADAPTER=codex "$H/libexec/usage-ok.sh"); rc=$?
 check "usage-ok.sh under fleetd reads the adapter's agent" '[ "$rc" -eq 1 ] && [[ "$out" == "codex: "* ]]' "rc=$rc $out"
