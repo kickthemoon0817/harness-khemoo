@@ -95,13 +95,15 @@ Three agents run locally, each with the composed prompt on stdin, never in argv:
 |---|---|---|---|
 | `claude` | `$AGENT_BIN_claude -p --model <model> <flags>` | `--dangerously-skip-permissions` | `You've (reached\|hit) your [^.]{0,40}limit` |
 | `codex` | `$AGENT_BIN_codex exec --model <model> <flags> -` | `--dangerously-bypass-approvals-and-sandbox` | `You've hit your usage limit\|rate_limit_reached` |
-| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `Quota exceeded\|RESOURCE_EXHAUSTED\|status 429` |
+| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `Quota exceeded\|RESOURCE_EXHAUSTED\|status 429\|You have exhausted your` |
 
 `AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
 is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
 the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. `AGENT_LIMIT_RE_<agent>`
-is an extended regex matched against the last 40 lines of the attempt's output; set but empty,
-`check` refuses it, since it would match every line. A gemini attempt counts as a usage limit only
+is an extended regex that must match at the start of one of the last 5 non-empty lines of the
+attempt's output, after spaces and an optional error prefix (`Error:`, `ERROR:`, `[API Error:`, a
+class name such as `TerminalQuotaError:`), so a sentence a tick quotes from an issue body and then
+writes past is no limit; set but empty, `check` refuses it. A gemini attempt counts as a usage limit only
 when it also exited non-zero, as gemini does on every error it ends on, so a tick that quoted the
 message and went on does not cool its entry; claude's and codex's exit status on a limit is not
 documented, so for them the message alone decides. Any other agent runs only through fleet, where
@@ -123,13 +125,19 @@ The supervisor's tick is recorded the same way in `$HARNESS_STATE/locks/supervis
 `kind` `supervisor`, and listed as slot 0.
 
 `libexec/tick-pid.sh` gives a claim and the merge lock to the first ancestor of the calling shell
-whose pid and start time a slot file of this state directory records. On a fleet device, where the
-caller's own environment carries `FLEET_SESSION` (fleetd sets it in every agent it starts), it is
-the ancestor whose parent is `fleetd`. An operator's own agent CLI is recorded nowhere, so it never
+whose pid and start time a tick file records: a slot file of this state directory, or, on a fleet
+device, the session's `tick` file that fleetd writes for the agent it starts and names in
+`FLEET_SESSION_TICK`. A tick file counts only when it is a regular file of this user, not a
+symlink. An operator's own agent CLI is recorded nowhere, so it never
 takes a claim or the merge lock. Neither does the supervisor: no slot file records it. The tick
 also carries `HARNESS_TICK="state=<HARNESS_STATE>
 slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool shells, and
 `libexec/usage-ok.sh` among them, which agent they run under; nothing counts or identifies ticks by it.
+The runner starts the agent, or `fleet dispatch`, in a session and process group of its own, so
+`kill -TERM -<pid>` stops the tick and its tools but never the runner, which writes the exit
+trailer as usual. It starts it with SIGINT and SIGQUIT at their defaults (`env --default-signal`,
+GNU coreutils 8.31 or later), which a background job of a non-interactive shell would otherwise
+ignore, so `kill -INT` and `timeout -s INT` reach every tool it runs.
 
 ## Usage windows
 

@@ -54,5 +54,16 @@ bash -c 'bash -c "\"\$CLAIM\" acquire 14 > \"\$H/out\" 2>&1; echo rc=\$? >> \"\$
 check "a shell that no slot file records takes no claim" \
     'grep -qx "rc=2" "$H/out" && [ ! -e "$L/claim.14" ]' "$(cat "$H/out")"
 
+# A shell that names itself fleetd and forges FLEET_SESSION takes neither a claim nor the merge lock.
+cp "$here/libexec/merge-lock.sh" "$H/libexec/"
+cp "$(command -v bash)" "$H/fleetd"
+export MERGE="$H/libexec/merge-lock.sh"
+cat > "$H/spoof.sh" <<'EOF'
+FLEET_SESSION=forged bash -c '"$CLAIM" acquire 15 > "$H/out" 2>&1; echo "claim rc=$?" >> "$H/out"; "$MERGE" acquire 15 >> "$H/out" 2>&1; echo "merge rc=$?" >> "$H/out"'
+EOF
+"$H/fleetd" "$H/spoof.sh"
+check "a renamed bash under a forged FLEET_SESSION takes no claim and no merge lock" \
+    'grep -qx "claim rc=2" "$H/out" && grep -qx "merge rc=2" "$H/out" && [ ! -e "$L/claim.15" ] && [ ! -e "$L/merge.lock" ]' "$(cat "$H/out")"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

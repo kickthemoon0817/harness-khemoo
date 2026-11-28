@@ -81,6 +81,44 @@ async fn the_session_and_adapter_are_set_over_the_env_table() {
     running.shutdown().await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tick_file_records_the_agent_until_it_ends() {
+    let dir = TempDir::new();
+    let root = dir.mkdir("root");
+    // The agent reads the file once fleetd has written it, then says what it should hold.
+    let agent = dir.script(
+        "agent",
+        "for _ in $(seq 100); do [ -s \"$FLEET_SESSION_TICK\" ] && break; sleep 0.05; done\n\
+         stat=$(cat /proc/$$/stat); set -- ${stat##*) }\n\
+         echo \"$FLEET_SESSION_TICK\"\n\
+         echo \"$(stat -c %a \"$FLEET_SESSION_TICK\") $(cat \"$FLEET_SESSION_TICK\")\"\n\
+         echo \"600 $$ ${20}\"\n",
+    );
+    let toml = base_config(&dir) + &adapter("a", &agent, &[], &root, "");
+    let running = start(&toml).await;
+    let (mut conn, _) = connect(&running, Role::Dispatch).await;
+    let id = dispatch(
+        &mut conn,
+        json!({"adapter": "a", "workdir": root, "prompt": "p"}),
+    )
+    .await
+    .unwrap();
+    let (out, _) = wait(&mut conn, &id).await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(lines[0].ends_with(&format!("{id}/tick")), "{out}");
+    assert_eq!(
+        lines[1], lines[2],
+        "the file holds the agent's pid and start time, 0600"
+    );
+    eventually("the tick file to go once the session ended", || {
+        !std::path::Path::new(lines[0]).exists()
+    })
+    .await;
+    running.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_workdir_must_stay_under_a_root() {
     let dir = TempDir::new();

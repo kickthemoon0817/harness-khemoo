@@ -16,7 +16,7 @@ if [ "$cmd" = status ]; then
   pid=""
 elif [ -x "$H/libexec/tick-pid.sh" ]; then
   pid=$("$H/libexec/tick-pid.sh" 2>/dev/null) || {
-    echo "ERROR: no tick (an ancestor a slot file records, or fleetd started) above this shell; call claim.sh from the tick's own shell" >&2
+    echo "ERROR: no tick (an ancestor a tick file records) above this shell; call claim.sh from the tick's own shell" >&2
     exit 2
   }
 else

@@ -8,6 +8,7 @@ pub mod health;
 mod home;
 pub mod lint;
 mod operator;
+mod regular;
 pub mod supervisor;
 pub mod ticks;
 pub mod usage;

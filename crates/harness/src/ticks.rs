@@ -180,7 +180,7 @@ fn scan_in(proc_root: &Path, state: &Path) -> io::Result<Vec<Tick>> {
         {
             continue;
         }
-        let Some(record) = read_limited(&entry.path(), SLOT_FILE_LIMIT)
+        let Some(record) = read_regular(&entry.path(), SLOT_FILE_LIMIT)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .and_then(|text| Record::parse(&text))
@@ -224,6 +224,14 @@ fn start_ticks(proc_root: &Path, pid: u32) -> Option<u64> {
     read_limited(&proc_root.join(pid.to_string()).join("stat"), STAT_LIMIT)
         .ok()
         .and_then(|stat| parse_start(&stat))
+}
+
+fn read_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    crate::regular::open(path)?
+        .take(limit)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {

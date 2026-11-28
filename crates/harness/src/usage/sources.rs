@@ -1,7 +1,6 @@
 //! Where an agent's usage reading comes from, each parsed into the same windows.
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -116,7 +115,8 @@ pub fn read(source: &Source) -> Result<Reading, String> {
 }
 
 fn read_file(path: &Path) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let file =
+        crate::regular::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut bytes = Vec::new();
     file.take(FILE_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -326,7 +326,8 @@ fn newest_first(dir: &Path, keep: fn(&str) -> bool) -> Result<Vec<String>, Strin
 
 /// The windows of the last `rate_limits` in the tail of the rollout at `path`.
 fn rollout_windows(path: &Path) -> Result<Vec<Window>, String> {
-    let mut file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut file =
+        crate::regular::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let len = file
         .metadata()
         .map_err(|error| format!("{}: {error}", path.display()))?

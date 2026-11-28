@@ -402,6 +402,7 @@ async fn the_child_gets_a_cleared_environment_and_sigterm_exits_cleanly() {
         [
             "FLEET_ADAPTER",
             "FLEET_SESSION",
+            "FLEET_SESSION_TICK",
             "FLEET_TEST_ALLOWED",
             "HOME",
             "PATH"

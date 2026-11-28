@@ -107,8 +107,8 @@ tests/run.sh
 
 It builds the `harness` binary (unless `HARNESS_BIN` names one) and runs every `tests/test_*.sh`,
 plus any suites under `instance/tests/`. The shell suites need Linux: bash 4+, `flock`, `setsid` and
-`lslocks` (util-linux), `pgrep` (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git`
-and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
+`lslocks` (util-linux), `pgrep` (procps), GNU `stat`, `date` and `env` (coreutils 8.31 or later),
+a C compiler (`cc`), `bc`, `zstd`, `jq`, `curl`, `git` and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
 reaped. The Rust tests (`cargo test`) cover the lint, the queue count, live ticks, usage windows, the
 dashboard and fleet; they run anywhere and leave out the cases that need
 `/proc` and `lslocks` where those are missing.
