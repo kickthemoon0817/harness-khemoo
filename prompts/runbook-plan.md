@@ -352,9 +352,10 @@ overridden below.
      host cases or writing, bring your container down (`tools/dev/iter.sh down`, under your export line) and
      release the slot with `lease.sh release <issue>`, which drops every slot and the device lease your tick
      holds. Take it again with `lease.sh acquire` for the next run. Never release while your container is up.
-     The lease reclaims a hold whose slot containers have stayed down for `IDLE_HOLD_S` (600 s): the next
-     `acquire` or `status` releases it and prints `RECLAIMED slot=K from <issue>`, so acquire again before
-     any `iter.sh up`.
+     The lease reclaims a hold left idle for `IDLE_HOLD_S` (600 s): while your slot's container is down and
+     nothing under your tick brings a kit up or runs one, another issue's acquire that finds no free slot
+     takes the slot straight to itself and prints `RECLAIMED slot=K from <you> to <it>`. `iter.sh` then
+     refuses your export line; acquire again before any `iter.sh up`, and use the slot or wait it gives you.
    - **Overlap within the issue (operator, 2026-11-28).** Once an arm's build is done, start its timing and
      identity queues in the background, on both cards at once, and run host cases, mutations and packet
      writing beside them. Queue every arm the order names in one go.
