@@ -27,9 +27,10 @@ infrastructure live in an instance directory that you own.
   context. It stops after a short tick, after `MAX_CHAIN` ticks, or when the harness is paused,
   held or out of usage.
 - With `SUPERVISOR=1`, a supervisor tick starts on events (a failed tick, a usage limit, a reset,
-  a loop, an operator's comment) or every half hour. It reads `harness health` and may apply a
-  directive (`harness directive`) that pauses the harness, narrows its width, reorders its models,
-  focuses ticks or stops a looping one, always inside the configuration and the usage caps. With no
+  a loop, an operator's comment) or every half hour. Run with no tools, it reads `harness health`
+  and answers with a directive (`harness directive`) that pauses the harness, narrows its width,
+  reorders its models, focuses ticks or stops a looping one, and a few comments and labels. The
+  harness applies them itself, inside the configuration and the usage caps. With no
   directive, an expired or an invalid one, the harness runs on its own formulas.
 - A claim is held only while its PID lives. A tick that dies leaves an issue that the next tick
   resumes.

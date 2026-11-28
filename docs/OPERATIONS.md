@@ -54,7 +54,8 @@ counts one claimable issue so a tick still runs.
 
 ## The supervisor
 
-With `SUPERVISOR=1` a supervisor tick steers the harness through a directive. Read what it did:
+With `SUPERVISOR=1` a supervisor tick, run with no tools, answers with a directive and a few GitHub
+actions, which the harness applies. Read what it did:
 
 ```bash
 target/release/harness directive show      # the directive in force, or why none is
@@ -78,10 +79,13 @@ that changed:
 Other first lines are `refused: <why>` (the directive in force stays), `clear: <reason>`,
 `ignored, defaults in force: <why>` (a directive that no longer validates, logged once) and
 `stop: pid <n> skipped: <why>` (no longer a live tick, its pid reused, or not leading a process
-group of its own). A stopped tick's log ends with an `exit=143` trailer.
-The allocator log says `directive: quiet (pause|wake) until ...`
-once while a directive keeps the launcher quiet, and `its quiet ended early on <event>` when a wake
-event ended it.
+group of its own). A stopped tick's log ends with an `exit=143` trailer. The supervisor's answer
+adds `answer: no directive` (it left the directive as it was), `answer: none found` (a failed run),
+`github: commented on #N`, `github: labelled #N +<label> -<label>`, `github: parked #N for the
+operator` and `github: refused <action> on #N: <why>`.
+
+The allocator log says `directive: quiet (pause|wake) until ...` once while a directive keeps the
+launcher quiet, and `its quiet ended early on <event>` when a wake event ended it.
 
 To clear a directive, so the configuration's own formulas hold at once:
 `target/release/harness directive clear --reason "<why>"`. To turn the supervisor off, set

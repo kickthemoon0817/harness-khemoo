@@ -195,39 +195,62 @@ stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short 
 
 ## Supervisor
 
-Off unless `SUPERVISOR=1`; off, the launcher, the runners and `usage-ok.sh` behave as if none of it
-existed and a `state/directive.json` is not read. `docs/ARCHITECTURE.md` says when it runs and what
-a directive may do.
+Off unless `SUPERVISOR=1`. While it is off, the launcher, the runners, `claim.sh`, `usage-ok.sh`
+and the dashboard behave as if none of it existed, and a `state/directive.json` is not read.
+`docs/ARCHITECTURE.md` says when it runs, how it is confined and what a directive may do.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
-| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host; its agent needs a local profile |
+| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
+| `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; flags that bypass permissions or the sandbox, add a directory or allow tools are refused |
 | `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
-| `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while it has room |
+| `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while its agent's windows allow it |
 | `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
 | `SUPERVISOR_MAX_DIRECTIVE_S` | 21600 | the latest a directive's `expires_at` may be; a later one is clamped |
-| `SUPERVISOR_STOP_GRACE_S` | 600 | how long a tick named in `stop` has to wind down before TERM |
+| `SUPERVISOR_STOP_GRACE_S` | 1200 | how long a tick named in `stop` has to wind down before TERM: a tick reads its notice when it next runs `usage-ok.sh`, at least every 15 minutes |
 | `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments wake the supervisor; empty, the repository's owner, members and collaborators |
+
+`harness directive`, `harness supervisor` and `harness health` read these keys, the model list and
+widths (`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH`), the budgets and the label keys
+from `harness.env` only: a process of this user that sets one in its environment cannot loosen a
+rail. `HARNESS_STATE`, `GH_REPO` and `WORKTREE_ROOT` come from the environment first, as the
+scripts read them.
+
+The supervisor's agent runs in an empty temporary directory, its environment cut down to `HOME`,
+`PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM` and what its CLI signs in with
+(`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `CODEX_HOME`, `XDG_CONFIG_HOME`)
+when they are set. GitHub's token never reaches it. Its flags by default, checked against each CLI's
+`--help`:
+
+| Agent | Flags | What they guarantee |
+|---|---|---|
+| `claude` | `-p --tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence`, no `--dangerously-skip-permissions` | no built-in tool at all (`--tools ""`), no MCP server, no user, project or local settings and so no hooks or plugins (`--restricted`), no skills, nothing saved |
+| `codex` | `exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled -` | no shell or exec tool, no apps, plugins, browser or web search, no MCP servers from `config.toml`; whatever else it runs is sandboxed read-only and offline |
+| `gemini` | refused | its headless mode keeps file reading and web fetching whatever `--approval-mode` says, so it cannot run without tools |
+
+`tick.sh check` prints the supervisor's command line, or why it cannot run. A
+`SUPERVISOR_FLAGS_claude` must keep `--tools` (there `--tools=` stands for `--tools ""`, since the
+value is split on whitespace) and `--restricted`, and a `SUPERVISOR_FLAGS_codex` must keep `--sandbox read-only` and
+`--disable shell_tool`.
 
 Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
 `$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the
 output of `harness health --json`, all on stdin. The same `{{KEY}}` substitution applies, with
 `FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S` and
-`SUPERVISOR_STOP_GRACE_S` added. `harness health` and `harness directive` read the keys above,
-`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH` and the budgets from the environment, else
-from `harness.env`, since a supervisor tick's environment holds none of the config. The token
-reaches `harness health` as it reaches the queue count, never the supervisor.
+`SUPERVISOR_STOP_GRACE_S` added. The token reaches `harness health` and `harness supervisor answer`
+as it reaches the queue count, never the agent; `hooks/hold`, which health runs, gets no token
+either.
 
 What it keeps, all plain files:
 
 | Path | What |
 |---|---|
 | `state/directive.json` | the directive in force, owner-only, written by `harness directive apply` |
-| `state/logs/directive.log` | every apply (the reason, each changed field, each clamp), refusal, clear, expiry, invalid directive and stop |
-| `state/supervisor/` | `last_start`, `last_end`, `last_exit`, `failures`, `last_reason`, `runs.log`, and the event stamps |
-| `state/logs/supervisor-<UTC>.log` | each run's output and exit trailer; the newest 20 are kept |
-| `state/claims.log` | `<issue> <pid> <UTC>` for every claim `libexec/claim.sh` takes, for the loop signal; cut to its newest 2000 lines past a MiB |
+| `state/logs/directive.log` | every apply (the reason, each changed field, each clamp), refusal, clear, expiry, invalid directive, stop and GitHub action |
+| `state/supervisor/` | `last_start`, `last_end`, `last_exit`, `failures`, `last_reason`, `runs.log`, the event stamps, `woken.json` (the wake events that ended a directive's quiet), `loops.json` (each looping candidate's progress as GitHub gave it), and the marks of notes shown and stops sent, pruned after two days |
+| `state/logs/supervisor-<UTC>.log` | each run's output, its answer and exit trailer; the newest 20 are kept |
+| `state/claims.log` | `<issue> <pid> <UTC>` for every claim `libexec/claim.sh` takes while the supervisor is on, for the loop signal; cut to its newest 2000 lines past a MiB |
 
 ## Fleet
 
