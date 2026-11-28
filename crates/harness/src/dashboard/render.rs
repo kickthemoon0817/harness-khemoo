@@ -577,10 +577,13 @@ fn usage_block(usage: &Value) -> String {
         } else {
             "warning"
         },
+        // The launcher leaves out a lane-only agent while no lane tick is wanted, which this page
+        // cannot tell, so its cap is shown as the bound it is.
         &format!(
-            "pool {} of {}",
+            "pool at most {} of {}, room for {}",
             text_of(&usage["pool_cap"]),
-            text_of(&usage["width"])
+            text_of(&usage["width"]),
+            text_of(&usage["room"])
         ),
     );
     format!(r#"<span class="usage">{rows}</span>{pool}"#)

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -14,8 +14,11 @@ pub const FILE_LIMIT: u64 = 1 << 20;
 /// How much of the newest rollout is read, from its end: its last `rate_limits` lies near it, and a
 /// session's rollout grows past hundreds of megabytes.
 pub const ROLLOUT_TAIL: u64 = 4 << 20;
-/// How many entries the walk of the sessions directory reads before it gives up.
-const WALK_LIMIT: usize = 100_000;
+/// How many entries of one directory of the sessions tree are read: past it the walk gives up
+/// rather than read part of a directory and miss its newest rollout.
+const DIR_LIMIT: usize = 10_000;
+/// A `resets_at` number under this cannot be Unix seconds of this century.
+const EPOCH_SECONDS_MIN: u64 = 1_000_000_000;
 /// How many of the newest rollouts are tried for `rate_limits`: a session that just started has
 /// none until its first response.
 const ROLLOUTS_TRIED: usize = 16;
@@ -32,6 +35,8 @@ pub enum Source {
     CodexSessions(PathBuf),
     /// No window: only the usage-limit cooldown gates the agent.
     None,
+    /// No source named, for an agent that has no default one.
+    Unset,
 }
 
 impl Source {
@@ -68,6 +73,7 @@ impl Source {
             Self::ClaudeCache(path) => format!("claude-cache:{}", path.display()),
             Self::CodexSessions(dir) => format!("codex-sessions:{}", dir.display()),
             Self::None => "none".to_owned(),
+            Self::Unset => "unset".to_owned(),
         }
     }
 }
@@ -105,7 +111,7 @@ pub fn read(source: &Source) -> Result<Reading, String> {
         Source::Json(path) => parse_normalized(&read_file(path)?),
         Source::ClaudeCache(path) => parse_claude_cache(&read_file(path)?),
         Source::CodexSessions(dir) => read_codex_sessions(dir),
-        Source::None => Err("no source".to_owned()),
+        Source::None | Source::Unset => Err("no source".to_owned()),
     }
 }
 
@@ -229,6 +235,16 @@ fn window(
     if window_minutes == 0 {
         return Err(format!("window {name}: window_minutes is 0"));
     }
+    let resets_at = resets_at.filter(|value| !value.is_null());
+    match &resets_at {
+        None | Some(Value::String(_)) => {}
+        Some(value) if value.as_u64().is_some_and(|at| at >= EPOCH_SECONDS_MIN) => {}
+        Some(value) => {
+            return Err(format!(
+                "window {name}: resets_at {value} is not Unix seconds"
+            ));
+        }
+    }
     Ok(Window {
         name,
         used_pct,
@@ -237,27 +253,75 @@ fn window(
     })
 }
 
-/// The newest `rate_limits` in the newest `rollout-*.jsonl` under `dir`, taken when that file was
-/// last written.
+/// The last `rate_limits` of the newest `rollout-*.jsonl` under `dir` that has one, taken when that
+/// file was last written. Codex keeps rollouts under `YYYY/MM/DD/`, named by their start, so the walk
+/// goes newest first by name and stops at the first that reads, after [`ROLLOUTS_TRIED`] at most.
 fn read_codex_sessions(dir: &Path) -> Result<Reading, String> {
-    let rollouts = rollouts(dir)?;
+    let mut tried = 0;
     let mut last_error = format!("{}: no rollout-*.jsonl", dir.display());
-    for (path, modified) in rollouts.into_iter().take(ROLLOUTS_TRIED) {
-        match rollout_windows(&path) {
-            Ok(windows) => {
-                let taken_ms = modified.duration_since(UNIX_EPOCH).map_or(0, |since| {
-                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-                });
-                return Ok(Reading {
-                    taken_ms,
-                    windows,
-                    holds_until_reset: true,
-                });
+    for year in newest_first(dir, is_number)? {
+        for month in newest_first(&dir.join(&year), is_number)? {
+            let month = dir.join(&year).join(month);
+            for day in newest_first(&month, is_number)? {
+                let day = month.join(day);
+                for name in newest_first(&day, is_rollout)? {
+                    let path = day.join(name);
+                    match rollout_windows(&path) {
+                        Ok(windows) => {
+                            let modified = std::fs::metadata(&path)
+                                .and_then(|meta| meta.modified())
+                                .map_err(|error| format!("{}: {error}", path.display()))?;
+                            let taken_ms = modified.duration_since(UNIX_EPOCH).map_or(0, |since| {
+                                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+                            });
+                            return Ok(Reading {
+                                taken_ms,
+                                windows,
+                                holds_until_reset: true,
+                            });
+                        }
+                        Err(error) => last_error = error,
+                    }
+                    tried += 1;
+                    if tried >= ROLLOUTS_TRIED {
+                        return Err(last_error);
+                    }
+                }
             }
-            Err(error) => last_error = error,
         }
     }
     Err(last_error)
+}
+
+fn is_number(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_rollout(name: &str) -> bool {
+    name.starts_with("rollout-")
+        && Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "jsonl")
+}
+
+/// The names in `dir` that `keep` accepts, last first.
+fn newest_first(dir: &Path, keep: fn(&str) -> bool) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut names = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= DIR_LIMIT {
+            return Err(format!("{}: more than {DIR_LIMIT} entries", dir.display()));
+        }
+        if let Some(name) = entry
+            .ok()
+            .and_then(|entry| entry.file_name().into_string().ok())
+            .filter(|name| keep(name))
+        {
+            names.push(name);
+        }
+    }
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(names)
 }
 
 /// The windows of the last `rate_limits` in the tail of the rollout at `path`.
@@ -315,49 +379,16 @@ fn codex_window(name: &str, raw: &Value) -> Result<Window, String> {
         .get("window_minutes")
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("{name} has no window_minutes"))?;
-    let resets_at = raw.get("resets_at").filter(|value| value.is_u64()).cloned();
-    window(name.to_owned(), used, minutes, resets_at)
+    window(
+        name.to_owned(),
+        used,
+        minutes,
+        raw.get("resets_at").cloned(),
+    )
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|part| part == needle)
-}
-
-/// The `rollout-*.jsonl` files at most four directories under `dir` (codex keeps them under
-/// `YYYY/MM/DD/`), most recently written first.
-fn rollouts(dir: &Path) -> Result<Vec<(PathBuf, SystemTime)>, String> {
-    let mut found: Vec<(PathBuf, SystemTime)> = Vec::new();
-    let mut pending = vec![(dir.to_path_buf(), 0)];
-    let mut seen = 0;
-    while let Some((current, depth)) = pending.pop() {
-        let entries = std::fs::read_dir(&current)
-            .map_err(|error| format!("{}: {error}", current.display()))?;
-        for entry in entries.flatten() {
-            seen += 1;
-            if seen > WALK_LIMIT {
-                return Err(format!("{}: more than {WALK_LIMIT} entries", dir.display()));
-            }
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            if kind.is_dir() && depth < 4 {
-                pending.push((path, depth + 1));
-            } else if kind.is_file()
-                && entry.file_name().to_str().is_some_and(|name| {
-                    name.starts_with("rollout-")
-                        && Path::new(name)
-                            .extension()
-                            .is_some_and(|ext| ext == "jsonl")
-                })
-                && let Ok(modified) = entry.metadata().and_then(|meta| meta.modified())
-            {
-                found.push((path, modified));
-            }
-        }
-    }
-    found.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(found)
 }
 
 #[cfg(test)]
@@ -414,7 +445,10 @@ mod tests {
         assert_eq!(reading.windows[1].resets_at, None);
         assert!(!reading.holds_until_reset);
         let empty = parse_normalized(br#"{"timestamp": 1, "windows": []}"#).unwrap();
-        assert!(empty.windows.is_empty());
+        assert!(
+            empty.windows.is_empty(),
+            "weighed as unreadable, not refused here"
+        );
     }
 
     #[test]
@@ -429,6 +463,9 @@ mod tests {
             br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 0}]}"#,
             br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": "1", "window_minutes": 5}]}"#,
             br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 5, "extra": 1}]}"#,
+            br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 5, "resets_at": 1790}]}"#,
+            br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 5, "resets_at": -5}]}"#,
+            br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 5, "resets_at": true}]}"#,
             br#"{"timestamp": 1, "windows": [{"name": "a", "used_pct": 1, "window_minutes": 5}, {"name": "a", "used_pct": 2, "window_minutes": 5}]}"#,
         ] {
             assert!(parse_normalized(bad).is_err(), "{}", String::from_utf8_lossy(bad));
@@ -500,48 +537,93 @@ mod tests {
         assert!(parse_rollout_tail(br#"{"payload":{"rate_limits":null}}"#).is_err());
         let broken = CODEX_LINE.replace(r#""window_minutes":10080,"#, "");
         assert!(parse_rollout_tail(broken.as_bytes()).is_err());
+        // Milliseconds, or a duration, are not the Unix seconds a reset is read as.
+        let millis = CODEX_LINE.replace("1790412153", "1790412153000000000000");
+        assert!(parse_rollout_tail(millis.as_bytes()).is_err());
+        let duration = CODEX_LINE.replace("1790412153", "3600");
+        assert!(parse_rollout_tail(duration.as_bytes()).is_err());
+        // Both windows null: no window, which the weighing reads as no reading.
+        let neither = CODEX_LINE.replace(
+            r#""primary":{"used_percent":48.0,"window_minutes":10080,"resets_at":1790412153}"#,
+            r#""primary":null"#,
+        );
+        assert_eq!(parse_rollout_tail(neither.as_bytes()), Ok(Vec::new()));
     }
 
     #[test]
     fn the_newest_rollout_is_read_from_its_tail() {
         let dir = std::env::temp_dir().join(format!("usage-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let day = dir.join("2026/09/19");
         std::fs::create_dir_all(&day).unwrap();
-        let old = day.join("rollout-old.jsonl");
+        // An earlier day, and an earlier session of the newest day.
+        std::fs::create_dir_all(dir.join("2026/09/18")).unwrap();
+        std::fs::write(
+            dir.join("2026/09/18/rollout-2026-09-18T23-00-00-a.jsonl"),
+            CODEX_LINE.replace("48.0", "7.0") + "\n",
+        )
+        .unwrap();
+        let old = day.join("rollout-2026-09-19T10-00-00-b.jsonl");
         std::fs::write(&old, CODEX_LINE.replace("48.0", "99.0") + "\n").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
         // A huge rollout: the rate_limits line sits after more than the tail's worth of other lines.
         let filler = format!(
             "{{\"type\":\"response\",\"text\":\"{}\"}}\n",
             "x".repeat(1 << 16)
         );
+        let newest = day.join("rollout-2026-09-19T11-00-00-c.jsonl");
         let mut big = filler.repeat(usize::try_from(ROLLOUT_TAIL >> 16).unwrap() + 4);
         big.push_str(CODEX_LINE);
         big.push('\n');
-        std::fs::write(day.join("rollout-new.jsonl"), &big).unwrap();
+        std::fs::write(&newest, &big).unwrap();
         std::fs::write(day.join("notes.jsonl"), CODEX_LINE.replace("48.0", "1.0")).unwrap();
         let reading = read(&Source::CodexSessions(dir.clone())).unwrap();
         assert!(reading.holds_until_reset);
         assert!((reading.windows[0].used_pct - 48.0).abs() < f64::EPSILON);
 
         // A session that just started has no rate_limits yet: the one before it still reads.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let started = day.join("rollout-started.jsonl");
+        let started = day.join("rollout-2026-09-19T12-00-00-d.jsonl");
         std::fs::write(&started, "{\"type\":\"session_meta\"}\n").unwrap();
         let reading = read(&Source::CodexSessions(dir.clone())).unwrap();
         assert!((reading.windows[0].used_pct - 48.0).abs() < f64::EPSILON);
         std::fs::remove_file(&started).unwrap();
 
-        // With the line pushed out of the tail, the older rollout reads, and without it nothing.
+        // With the line pushed out of the tail, the session before reads, then the day before.
         let mut buried = CODEX_LINE.to_owned() + "\n";
         buried.push_str(&filler.repeat(usize::try_from(ROLLOUT_TAIL >> 16).unwrap() + 4));
-        std::fs::write(day.join("rollout-new.jsonl"), &buried).unwrap();
+        std::fs::write(&newest, &buried).unwrap();
         let reading = read(&Source::CodexSessions(dir.clone())).unwrap();
         assert!((reading.windows[0].used_pct - 99.0).abs() < f64::EPSILON);
         std::fs::remove_file(&old).unwrap();
+        let reading = read(&Source::CodexSessions(dir.clone())).unwrap();
+        assert!((reading.windows[0].used_pct - 7.0).abs() < f64::EPSILON);
+        std::fs::remove_dir_all(dir.join("2026/09/18")).unwrap();
         assert!(read(&Source::CodexSessions(dir.clone())).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(read(&Source::CodexSessions(dir)).is_err());
+    }
+
+    #[test]
+    fn the_walk_stops_after_the_newest_rollouts() {
+        let dir = std::env::temp_dir().join(format!("usage-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let day = dir.join("2026/11/28");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-11-28T00-00-00-a.jsonl"),
+            CODEX_LINE.to_owned() + "\n",
+        )
+        .unwrap();
+        // More sessions without a reading than the walk tries: the one under them is never read.
+        for i in 0..ROLLOUTS_TRIED {
+            std::fs::write(
+                day.join(format!("rollout-2026-11-28T01-00-{i:02}-x.jsonl")),
+                "{}\n",
+            )
+            .unwrap();
+        }
+        let result = read(&Source::CodexSessions(dir.clone()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

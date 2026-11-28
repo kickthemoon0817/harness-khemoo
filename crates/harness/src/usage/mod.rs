@@ -30,6 +30,8 @@ pub use sources::{Reading, Source, Window};
 const LONG_WINDOW_MINUTES: u64 = 24 * 60;
 /// A fetch that hangs must not stall the launcher past its next firing.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// A reading dated further ahead than this is not one a clock skew explains.
+const FUTURE_SLACK_MS: u64 = 300_000;
 
 /// How the environment is read: the value of a name, `None` when it is unset or empty.
 pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -61,6 +63,9 @@ enum Sub {
     /// Print the best entry of the model list that is not cooling down and whose agent runs fewer ticks
     /// than its cap; exit 1 when there is none.
     Pick {
+        /// Consider only this agent's entries.
+        #[arg(long)]
+        agent: Option<String>,
         /// Entries already tried by this tick, space-separated.
         #[arg(long, default_value = "")]
         tried: String,
@@ -71,6 +76,9 @@ enum Sub {
         #[arg(long)]
         entry: Option<String>,
     },
+    /// Run the fetch command of each agent of the model list and the lane whose reading is missing
+    /// or older than its refresh age. Nothing else refreshes a reading but `check`.
+    Refresh,
 }
 
 pub fn run(args: &Args) -> ExitCode {
@@ -78,11 +86,21 @@ pub fn run(args: &Args) -> ExitCode {
     let result = match &args.command {
         None => report(&env, args.json),
         Some(Sub::Check { agent }) => check(&env, agent),
+        Some(Sub::Refresh) => refresh(&env),
         Some(Sub::Pick {
+            agent,
             tried,
             landing,
             entry,
-        }) => pick_command(&env, tried, *landing, entry.as_deref()),
+        }) => pick_command(
+            &env,
+            &PickArgs {
+                agent: agent.as_deref(),
+                tried,
+                landing: *landing,
+                entry: entry.as_deref(),
+            },
+        ),
     };
     result.unwrap_or_else(|message| {
         eprintln!("harness usage: {message}");
@@ -173,6 +191,17 @@ pub fn pool_cap(width: u32, caps: impl IntoIterator<Item = u32>) -> u32 {
     caps.into_iter().fold(0_u32, u32::saturating_add).min(width)
 }
 
+/// How many more ticks may start: each agent's `(cap, running)` headroom summed, at most the width.
+/// An agent past its cap, its windows having filled while its ticks ran, takes no other's room.
+pub fn room(width: u32, agents: impl IntoIterator<Item = (u32, u32)>) -> u32 {
+    pool_cap(
+        width,
+        agents
+            .into_iter()
+            .map(|(cap, running)| cap.saturating_sub(running)),
+    )
+}
+
 /// One entry of the model list: an agent and the model it runs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entry {
@@ -254,8 +283,8 @@ pub struct AgentSource {
 
 impl AgentSource {
     /// `USAGE_SOURCE_<agent>` and `USAGE_FETCH_<agent>`. Claude reads its cache, `USAGE_CACHE`, and
-    /// refreshes it with `USAGE_FETCH`; codex reads its session rollouts; any other agent has no
-    /// windows unless a source is set.
+    /// refreshes it with `USAGE_FETCH`; codex reads its session rollouts; any other agent must name
+    /// its source, `none` included, and without one it allows nothing.
     pub fn from_env(env: Lookup, agent: &str) -> Result<Self, String> {
         let home = || env("HOME").map(PathBuf::from);
         let need_home = || home().ok_or_else(|| "HOME is not set".to_owned());
@@ -278,7 +307,7 @@ impl AgentSource {
                 Some(dir) => PathBuf::from(dir).join("sessions"),
                 None => need_home()?.join(".codex/sessions"),
             }),
-            (None, _) => Source::None,
+            (None, _) => Source::Unset,
         };
         let fetch = match (env(&format!("USAGE_FETCH_{agent}")), agent) {
             (Some(path), _) => Some(PathBuf::from(path)),
@@ -328,6 +357,8 @@ pub struct AgentUsage {
     pub taken_ms: Option<u64>,
     pub windows: Vec<WindowCap>,
     pub cap: u32,
+    /// Its live ticks, which [`pool`] counts; 0 elsewhere.
+    pub running: u32,
 }
 
 /// The steps of window `name`: `USAGE_STEPS_<agent>_<name>`, else by its length. The agent is part
@@ -365,6 +396,7 @@ pub fn assess(
         taken_ms: None,
         windows: Vec::new(),
         cap: settings.width,
+        running: 0,
     };
     if source.source == Source::None {
         return Ok(usage);
@@ -378,6 +410,18 @@ pub fn assess(
         }
     };
     usage.taken_ms = Some(reading.taken_ms);
+    // A source that names no window says nothing about how full the agent is.
+    if reading.windows.is_empty() {
+        usage.reading = Freshness::Unreadable("the reading names no window".to_owned());
+        return Ok(usage);
+    }
+    if reading.taken_ms > now_ms.saturating_add(FUTURE_SLACK_MS) {
+        usage.reading = Freshness::Unreadable(format!(
+            "dated {} s ahead of this host's clock",
+            (reading.taken_ms - now_ms) / 1000
+        ));
+        return Ok(usage);
+    }
     let age_s = now_ms.saturating_sub(reading.taken_ms) / 1000;
     let fresh = age_s <= settings.max_age_s;
     let holding = !fresh
@@ -481,6 +525,9 @@ pub fn agent_usage(
     let source = AgentSource::from_env(env, agent)?;
     let reading = match source.source {
         Source::None => Err(String::new()),
+        Source::Unset => Err(format!(
+            "USAGE_SOURCE_{agent} is not set: name its source, or none"
+        )),
         _ if refresh => read_refreshed(settings, &source),
         _ => sources::read(&source.source),
     };
@@ -498,28 +545,41 @@ fn agents_of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<String> {
     agents
 }
 
-/// Every agent of the model list and the lane, with its windows, and the pool's cap.
+/// Every agent of the model list and the lane, with its windows, its live ticks and the ticks its
+/// caps allow.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pool {
     pub width: u32,
+    /// The agents' caps summed, at most the width: how many ticks may run at once.
     pub pool_cap: u32,
+    /// How many more may start now: each agent's cap less its live ticks, summed, at most the
+    /// width. Another agent's ticks past its own cap take none of it.
+    pub room: u32,
     pub agents: Vec<AgentUsage>,
     /// The agents each of whose entries cools down on its usage limit.
     pub cooling: Vec<String>,
 }
 
-/// The pool as the settings in `env` read now; `refresh` runs each stale agent's fetch command first.
-/// An agent each of whose entries cools down adds nothing to the pool's cap: no runner could pick it.
-pub fn pool(env: Lookup, refresh: bool) -> Result<Pool, String> {
+/// The pool as the settings in `env` read now, without refreshing any reading. An agent each of
+/// whose entries cools down adds nothing to the pool: no runner could pick it.
+pub fn pool(env: Lookup) -> Result<Pool, String> {
     let settings = Settings::from_env(env)?;
     let (entries, lane) = model_entries(env)?;
     let entries: Vec<Entry> = entries.into_iter().chain(lane).collect();
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     let state = state_dir(env);
+    let running = match &state {
+        Some(state) => running_by_agent(state)?,
+        None => HashMap::new(),
+    };
     let agents = agents_of(&entries)
         .iter()
-        .map(|agent| agent_usage(env, &settings, agent, refresh))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|agent| {
+            let mut usage = agent_usage(env, &settings, agent, false)?;
+            usage.running = running.get(agent).copied().unwrap_or(0);
+            Ok(usage)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let cooling: Vec<String> = agents
         .iter()
         .map(|usage| usage.agent.clone())
@@ -532,18 +592,32 @@ pub fn pool(env: Lookup, refresh: bool) -> Result<Pool, String> {
             })
         })
         .collect();
+    let can_run = || {
+        agents
+            .iter()
+            .filter(|usage| !cooling.contains(&usage.agent))
+    };
     Ok(Pool {
         width: settings.width,
-        pool_cap: pool_cap(
+        pool_cap: pool_cap(settings.width, can_run().map(|usage| usage.cap)),
+        room: room(
             settings.width,
-            agents
-                .iter()
-                .filter(|usage| !cooling.contains(&usage.agent))
-                .map(|usage| usage.cap),
+            can_run().map(|usage| (usage.cap, usage.running)),
         ),
         agents,
         cooling,
     })
+}
+
+/// How many live ticks of each agent the state directory records.
+fn running_by_agent(state: &Path) -> Result<HashMap<String, u32>, String> {
+    let mut running: HashMap<String, u32> = HashMap::new();
+    for tick in crate::ticks::scan(&state.to_string_lossy())
+        .map_err(|error| format!("cannot count the running ticks: {error}"))?
+    {
+        *running.entry(tick.agent).or_default() += 1;
+    }
+    Ok(running)
 }
 
 /// `HARNESS_STATE`, else the checkout's `state/`.
@@ -553,8 +627,20 @@ fn state_dir(env: Lookup) -> Option<PathBuf> {
         .or_else(|| harness_home().map(|home| home.join("state")))
 }
 
+fn refresh(env: Lookup) -> Result<ExitCode, String> {
+    let settings = Settings::from_env(env)?;
+    let (entries, lane) = model_entries(env)?;
+    for agent in agents_of(entries.iter().chain(lane.iter())) {
+        let source = AgentSource::from_env(env, &agent)?;
+        if !matches!(source.source, Source::None | Source::Unset) {
+            let _ = read_refreshed(&settings, &source);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
-    let report = pool(env, true)?;
+    let report = pool(env)?;
     if json {
         println!(
             "{}",
@@ -576,8 +662,8 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
             ""
         };
         println!(
-            "{}: cap {} of {}{cooling}, {}{state}",
-            agent.agent, agent.cap, report.width, agent.source
+            "{}: cap {} of {}, {} running{cooling}, {}{state}",
+            agent.agent, agent.cap, report.width, agent.running, agent.source
         );
         for window in &agent.windows {
             let [half, one, none] = window.steps.0;
@@ -587,7 +673,10 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
             );
         }
     }
-    println!("pool: {} of {}", report.pool_cap, report.width);
+    println!(
+        "pool: {} of {}, room for {} more",
+        report.pool_cap, report.width, report.room
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -697,34 +786,34 @@ fn cooling(state: &Path, entry: &Entry, cooldown: Duration) -> bool {
         .is_ok_and(|at| at.elapsed().unwrap_or_default() < cooldown)
 }
 
-fn pick_command(
-    env: Lookup,
-    tried: &str,
+struct PickArgs<'a> {
+    agent: Option<&'a str>,
+    tried: &'a str,
     landing: bool,
-    only: Option<&str>,
-) -> Result<ExitCode, String> {
+    entry: Option<&'a str>,
+}
+
+fn pick_command(env: Lookup, args: &PickArgs) -> Result<ExitCode, String> {
     let settings = Settings::from_env(env)?;
     let (entries, _) = model_entries(env)?;
     let default_agent = env("TICK_AGENT").unwrap_or_else(|| "claude".to_owned());
-    let entries = match only {
+    let mut entries = match args.entry {
         Some(text) => vec![Entry::parse(text, &default_agent)?],
         None => entries,
     };
+    if let Some(agent) = args.agent {
+        entries.retain(|entry| entry.agent == agent);
+    }
     let tried =
-        Entry::list(tried, &default_agent).map_err(|message| format!("--tried: {message}"))?;
+        Entry::list(args.tried, &default_agent).map_err(|message| format!("--tried: {message}"))?;
     let state = state_dir(env).ok_or("no state directory: set HARNESS_STATE")?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
-    let mut running: HashMap<String, u32> = HashMap::new();
-    for tick in crate::ticks::scan(&state.to_string_lossy())
-        .map_err(|error| format!("cannot count the running ticks: {error}"))?
-    {
-        *running.entry(tick.agent).or_default() += 1;
-    }
+    let running = running_by_agent(&state)?;
     let mut caps = BTreeMap::new();
     for agent in agents_of(&entries) {
         caps.insert(
             agent.clone(),
-            agent_usage(env, &settings, &agent, true)?.cap,
+            agent_usage(env, &settings, &agent, false)?.cap,
         );
     }
     let candidates: Vec<Candidate> = entries
@@ -736,7 +825,7 @@ fn pick_command(
             entry,
         })
         .collect();
-    Ok(match pick(&candidates, &tried, landing) {
+    Ok(match pick(&candidates, &tried, args.landing) {
         Some(entry) => {
             println!("{entry}");
             ExitCode::SUCCESS
@@ -901,7 +990,7 @@ mod tests {
         // Steps set past the ceiling still stop at it.
         let past = [("USAGE_STEPS_SHORT", "95 96 97")];
         assert_eq!(cap_of(&past, &[("five_hour", 92.0, 300)]), 0);
-        assert_eq!(cap_of(&[], &[]), 8, "no windows: nothing limits the agent");
+        assert_eq!(cap_of(&[], &[]), 0, "a reading of no window is no reading");
     }
 
     #[test]
@@ -946,6 +1035,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(usage.cap, 8);
+    }
+
+    #[test]
+    fn a_reading_dated_ahead_or_of_no_window_allows_nothing() {
+        let s = settings(&[]);
+        let env = env_of(&[]);
+        let ahead = assess(
+            &env,
+            &s,
+            &json_source("claude"),
+            Ok(reading(&[("a", 1.0, 60)], NOW_MS + 301_000)),
+            NOW_MS,
+        )
+        .unwrap();
+        assert_eq!(ahead.cap, 0);
+        assert!(matches!(ahead.reading, Freshness::Unreadable(_)));
+        let skewed = assess(
+            &env,
+            &s,
+            &json_source("claude"),
+            Ok(reading(&[("a", 1.0, 60)], NOW_MS + 299_000)),
+            NOW_MS,
+        )
+        .unwrap();
+        assert_eq!((skewed.cap, &skewed.reading), (8, &Freshness::Fresh));
+        let empty = assess(
+            &env,
+            &s,
+            &json_source("claude"),
+            Ok(reading(&[], NOW_MS)),
+            NOW_MS,
+        )
+        .unwrap();
+        assert_eq!(empty.cap, 0);
+        assert_eq!(verdict(&s, &empty), Verdict::Unknown);
+    }
+
+    #[test]
+    fn an_agent_without_a_source_allows_nothing() {
+        let s = settings(&[]);
+        let usage = agent_usage(&env_of(&[]), &s, "gemini", false).unwrap();
+        assert_eq!(usage.cap, 0);
+        assert_eq!(
+            usage.reading,
+            Freshness::Unreadable(
+                "USAGE_SOURCE_gemini is not set: name its source, or none".to_owned()
+            )
+        );
+        let none = agent_usage(
+            &env_of(&[("USAGE_SOURCE_gemini", "none")]),
+            &s,
+            "gemini",
+            false,
+        )
+        .unwrap();
+        assert_eq!(none.cap, 8);
     }
 
     #[test]
@@ -1057,6 +1202,15 @@ mod tests {
     }
 
     #[test]
+    fn one_agent_past_its_cap_leaves_another_its_room() {
+        // claude at cap 0 with four ticks still running; codex at cap 4 with none.
+        assert_eq!(room(8, [(0, 4), (4, 0)]), 4);
+        assert_eq!(room(8, [(2, 1), (4, 3)]), 2);
+        assert_eq!(room(3, [(4, 0), (4, 0)]), 3);
+        assert_eq!(room(8, []), 0);
+    }
+
+    #[test]
     fn entries_name_an_agent_or_take_the_default() {
         assert_eq!(
             Entry::list("claude:opus codex:gpt-5.5 gemini-3-pro", "claude").unwrap(),
@@ -1114,7 +1268,7 @@ mod tests {
             Source::CodexSessions("/home/dev-a/.codex/sessions".into())
         );
         assert_eq!(of("codex").fetch, None);
-        assert_eq!(of("gemini").source, Source::None);
+        assert_eq!(of("gemini").source, Source::Unset);
         let set = env_of(&[
             ("HOME", "/home/dev-a"),
             ("USAGE_CACHE", "/c.json"),
@@ -1199,11 +1353,11 @@ mod tests {
             ("HARNESS_STATE", &state),
             ("MAX_SLOTS", "4"),
         ]);
-        let both = pool(&env, false).unwrap();
+        let both = pool(&env).unwrap();
         std::fs::write(dir.join("state/model-cooldown/codex:b"), "").unwrap();
-        let one_cooling = pool(&env, false).unwrap();
+        let one_cooling = pool(&env).unwrap();
         std::fs::write(dir.join("state/model-cooldown/codex:c"), "").unwrap();
-        let all_cooling = pool(&env, false).unwrap();
+        let all_cooling = pool(&env).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!((both.pool_cap, both.cooling.len()), (2, 0));
         assert_eq!(one_cooling.pool_cap, 2, "codex:c can still run");

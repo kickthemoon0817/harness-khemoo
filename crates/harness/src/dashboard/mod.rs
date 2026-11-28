@@ -365,7 +365,6 @@ impl App {
                 .collect())
         };
         let state_setting = path_setting("HARNESS_STATE");
-        // The state directory as a tick's marker names it, unresolved, and as it resolves.
         let state_as_named = if state_setting.is_empty() {
             args.harness_home
                 .clone()
@@ -375,11 +374,6 @@ impl App {
             expand_user(&state_setting, lookup)
         };
         let harness_state = resolve(&state_as_named);
-        let mut tick_states = vec![harness_state.display().to_string()];
-        let named = state_as_named.display().to_string();
-        if !tick_states.contains(&named) {
-            tick_states.push(named);
-        }
         // The model list and usage keys, expanded as a path key is, for `harness usage`'s reading.
         let mut usage_settings: Vec<(String, String)> = values
             .iter()
@@ -451,7 +445,6 @@ impl App {
             .map_or_else(|| harness_state.join("dashboard"), |dir| resolve(&dir));
         let mut config = Config::new(harness_home, data_dir);
         config.harness_state = Some(harness_state);
-        config.tick_states = tick_states;
         if let Some((_, seconds)) = usage_settings
             .iter()
             .find(|(key, _)| key == "MODEL_COOLDOWN_S")

@@ -702,7 +702,7 @@ impl Collector {
     /// never refreshed here: a fetch command is the launcher's to run.
     fn usage_view(&self, now: f64) -> Value {
         let lookup = |key: &str| self.usage_setting(key);
-        let pool = match crate::usage::pool(&lookup, false) {
+        let pool = match crate::usage::pool(&lookup) {
             Ok(pool) => pool,
             Err(error) => {
                 return json!({"available": false, "error": self.describe(&error), "agents": [], "cooling": []});

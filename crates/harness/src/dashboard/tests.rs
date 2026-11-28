@@ -222,8 +222,8 @@ impl FixtureHarness {
         )
     }
 
-    /// A fake tick as the runner starts one: `HARNESS_TICK` naming this state directory, its
-    /// slot, agent, model and kind, with the slot lock open.
+    /// A fake tick as the runner starts one: recorded in its slot's `locks/slot<n>.tick`, with the
+    /// slot lock open and `HARNESS_TICK` describing it to its own tool shells.
     #[cfg(target_os = "linux")]
     pub fn start_marked_tick(
         &mut self,
@@ -276,6 +276,11 @@ impl FixtureHarness {
             .expect("bash starts");
         let pid = i64::from(child.id());
         self.ticks.push(child);
+        std::fs::write(
+            self.state.join(format!("locks/slot{slot}.tick")),
+            format!("{pid} {} {agent} {model} {kind}\n", start_ticks(pid)),
+        )
+        .ok();
         std::fs::write(
             self.state.join(format!("locks/claim.{issue}")),
             format!("{issue} {pid} 2026-11-26T01:30:00Z\n"),
@@ -1070,9 +1075,8 @@ fn finds_a_live_tick_with_slot_log_issue_and_tool_call() {
     let pid = harness.start_fake_tick(2464, 3, "sleep 30");
     let scanner = ProcessScanner::new(&harness.state);
     let processes = scanner.scan_processes().expect("/proc reads");
-    let states = [harness.state.display().to_string()];
     let candidates = scanner
-        .find_ticks(&processes, &states, super::collector::wall_clock())
+        .find_ticks(&processes, super::collector::wall_clock())
         .expect("/proc reads");
     assert_eq!(
         candidates
@@ -1140,16 +1144,23 @@ fn ignores_claude_p_outside_the_harness() {
         .expect("bash starts");
     std::thread::sleep(Duration::from_millis(200));
     let scanner = ProcessScanner::new(&harness.state);
-    let states = [harness.state.display().to_string()];
     let ticks = scanner
         .find_ticks(
             &scanner.scan_processes().expect("/proc reads"),
-            &states,
             super::collector::wall_clock(),
         )
         .expect("/proc reads");
     kill_group(&mut process);
     assert!(ticks.is_empty());
+}
+
+/// Field 22 of `/proc/<pid>/stat`, as the runner records it in a slot file.
+#[cfg(target_os = "linux")]
+fn start_ticks(pid: i64) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19)?.parse().ok())
+        .unwrap_or_default()
 }
 
 /// Whether lslocks runs and sees the locks of this namespace: some containers show none.
@@ -2974,6 +2985,7 @@ fn every_agents_windows_are_weighed_into_the_pool() {
             "claude:claude-opus-5-5 codex:gpt-5.5 gemini:gemini-2.5-pro".to_owned(),
         ),
         ("MAX_SLOTS".to_owned(), "6".to_owned()),
+        ("USAGE_SOURCE_gemini".to_owned(), "none".to_owned()),
         (
             "USAGE_SOURCE_codex".to_owned(),
             format!(
@@ -3025,7 +3037,7 @@ fn every_agents_windows_are_weighed_into_the_pool() {
         "codex primary",
         "82 % &middot; cap 3",
         "unmetered",
-        "pool 6 of 6",
+        "pool at most 6 of 6, room for 6",
         "codex gpt-5.5",
     ] {
         assert!(rendered.contains(text), "{text}");
@@ -3056,19 +3068,9 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
     let lane = harness.start_marked_tick(2490, 2, "sleep 30", "codex", "gpt-5.5", "lane");
     let landing =
         harness.start_marked_tick(2201, 3, "sleep 30", "gemini", "gemini-2.5-pro", "landing");
-    // Not ticks: a marker naming another state directory, though it holds one of this one's
-    // locks, and a marker of this one holding no lock.
-    let elsewhere = Command::new("bash")
-        .args(["-c", "exec 9>\"$1\"; sleep 30", "_"])
-        .arg(harness.state.join("locks/slot4.lock"))
-        .env(
-            "HARNESS_TICK",
-            "state=/elsewhere/state slot=4 agent=claude model=m kind=work",
-        )
-        .process_group(0)
-        .spawn()
-        .expect("bash starts");
-    let unlocked = Command::new("sleep")
+    // Not ticks: a process carrying this state directory's marker that no slot file records, and
+    // one whose slot file records a start time it does not have, as a reused pid would.
+    let unrecorded = Command::new("sleep")
         .arg("30")
         .env(
             "HARNESS_TICK",
@@ -3080,9 +3082,23 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
         .process_group(0)
         .spawn()
         .expect("sleep starts");
-    let decoys = [i64::from(elsewhere.id()), i64::from(unlocked.id())];
-    harness.helpers.push(elsewhere);
-    harness.helpers.push(unlocked);
+    let reused = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("sleep starts");
+    std::fs::write(
+        harness.state.join("locks/slot4.tick"),
+        format!(
+            "{} {} claude m work\n",
+            reused.id(),
+            start_ticks(i64::from(reused.id())) + 1
+        ),
+    )
+    .expect("the slot file writes");
+    let decoys = [i64::from(unrecorded.id()), i64::from(reused.id())];
+    harness.helpers.push(unrecorded);
+    harness.helpers.push(reused);
     std::thread::sleep(Duration::from_millis(200));
     let collector = harness.collector();
     collector.refresh_github_in_place();
