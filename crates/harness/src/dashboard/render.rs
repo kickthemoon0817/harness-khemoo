@@ -278,6 +278,7 @@ pub fn sections(snapshot: &Value, access_token: &str) -> Vec<(String, String)> {
         ("landings".to_owned(), landings_panel(snapshot)),
         ("stalls".to_owned(), stalls_panel(snapshot)),
         ("allocator".to_owned(), allocator_panel(snapshot)),
+        ("supervisor".to_owned(), supervisor_panel(snapshot)),
         ("flow".to_owned(), flow_section(snapshot)),
         ("sources".to_owned(), sources_footer(snapshot, &query)),
     ]);
@@ -338,7 +339,7 @@ pub fn document(
             r#"<section class="grid{split}">{ticks}{leases}"#,
             "</section>{fleet_devices}{fleet_sessions}{queue}",
             r#"<section class="grid thirds">{landings}{stalls}{allocator}</section>"#,
-            "{flow}{sources}</main></body></html>"
+            "{supervisor}{flow}{sources}</main></body></html>"
         ),
         refresh = refresh_s,
         query = query,
@@ -359,6 +360,7 @@ pub fn document(
         landings = slot("landings"),
         stalls = slot("stalls"),
         allocator = slot("allocator"),
+        supervisor = slot("supervisor"),
         flow = slot("flow"),
         sources = slot("sources"),
     )
@@ -1744,6 +1746,102 @@ fn stalls_panel(snapshot: &Value) -> String {
     format!(
         r#"<article class="panel"><h2>Stalls <span class="sub">state/stalls.log, newest first</span></h2><div class="scroll"><table><colgroup><col style="width:60px"><col style="width:120px"><col></colgroup>{rows}</table></div></article>"#
     )
+}
+
+/// The supervisor: whether it is on and when it is next due, the directive in force with its
+/// stops, its last runs and the directive log's tail. Left off while the supervisor is off and
+/// has left nothing behind.
+fn supervisor_panel(snapshot: &Value) -> String {
+    let view = &snapshot["supervisor"];
+    let directive = &view["directive"];
+    let status = s(&directive["status"]);
+    let runs = list(&view["runs"]);
+    if !truthy(&view["enabled"]) && (status.is_empty() || status == "none") && runs.is_empty() {
+        return String::new();
+    }
+    let state = if truthy(&view["enabled"]) {
+        format!(
+            "on, next due between {} and {}",
+            e(&view["next_due"]["earliest"]),
+            e(&view["next_due"]["latest"])
+        )
+    } else {
+        "off".to_owned()
+    };
+    let level = match status {
+        "active" => "good",
+        "invalid" => "critical",
+        "expired" => "idle",
+        _ => "info",
+    };
+    let body = &directive["directive"];
+    let mut fields: Vec<String> = ["width", "models", "wake_at", "focus", "avoid"]
+        .iter()
+        .filter(|key| !body[**key].is_null())
+        .map(|key| format!("{key}={}", escape(&text_of_list(&body[*key]))))
+        .collect();
+    if !body["pause"].is_null() {
+        fields.push(format!(
+            "pause until {}: {}",
+            e(&body["pause"]["until"]),
+            e(&body["pause"]["reason"])
+        ));
+    }
+    let detail = match status {
+        "invalid" => e(&directive["error"]),
+        "none" | "" => "none: the configuration's own formulas hold".to_owned(),
+        _ => format!(
+            "<b>{}</b> until {} {}",
+            e(&body["reason"]),
+            e(&body["expires_at"]),
+            fields.join(" ")
+        ),
+    };
+    let stops: String = list(&directive["stops"])
+        .iter()
+        .map(|stop| {
+            format!(
+                r#"<tr><td class="sub">{}</td><td>pid {}</td><td>{} {}</td></tr>"#,
+                e(&stop["due_at"]),
+                t(&stop["pid"]),
+                if truthy(&stop["sent"]) {
+                    "sent"
+                } else {
+                    "pending"
+                },
+                e(&stop["reason"])
+            )
+        })
+        .collect();
+    let lines = |key: &str| -> String {
+        list(&view[key])
+            .iter()
+            .map(|line| format!(r#"<tr><td><div class="clamp">{}</div></td></tr>"#, e(line)))
+            .collect()
+    };
+    format!(
+        concat!(
+            r#"<article class="panel"><h2>Supervisor <span class="sub">{state}</span></h2>"#,
+            r#"<p>{pill} {detail}</p><div class="scroll"><table>{stops}</table>"#,
+            r#"<h3>Last runs <span class="sub">{failures} failed in a row</span></h3><table>{runs}</table>"#,
+            r#"<h3>Directive log <span class="sub">state/logs/directive.log, newest first</span></h3><table>{log}</table></div></article>"#
+        ),
+        state = state,
+        pill = pill(level, if status.is_empty() { "none" } else { status }),
+        detail = detail,
+        stops = stops,
+        failures = t(&view["failures"]),
+        runs = lines("runs"),
+        log = lines("directive_log"),
+    )
+}
+
+/// A list's items joined by spaces, any other value as text.
+fn text_of_list(value: &Value) -> String {
+    match value.as_array() {
+        Some(items) => items.iter().map(text_of).collect::<Vec<_>>().join(" "),
+        None => text_of(value),
+    }
 }
 
 /// The allocator's last decisions.

@@ -103,8 +103,8 @@ pub const USAGE_KEYS: [&str; 5] = [
     "TICK_WIDTH",
     "MODEL_COOLDOWN_S",
 ];
-/// Every key with one of these prefixes is a usage or agent setting.
-pub const USAGE_PREFIXES: [&str; 2] = ["USAGE_", "AGENT_"];
+/// Every key with one of these prefixes is a usage, agent or supervisor setting.
+pub const USAGE_PREFIXES: [&str; 3] = ["USAGE_", "AGENT_", "SUPERVISOR"];
 
 /// True for a key the dashboard reads from harness.env.
 pub fn wanted_key(key: &str) -> bool {
