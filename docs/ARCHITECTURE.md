@@ -98,7 +98,8 @@ It never starts sooner than `SUPERVISOR_MIN_INTERVAL_S` after its last start, wa
 doubled for each failed run in a row, and starts only while its entry is not cooling down and every
 window of its agent is under the point where a running tick stands down. It needs no room under the
 agent's cap: it is one short run outside the slots, and it is counted toward its agent as soon as it
-starts. At most one runs, under `state/locks/supervisor.lock`, recorded in
+starts. That exception covers the cap only: the stand-down point, a fresh reading and the cooldown
+still hold, and the agent runs at most one tick past its cap, for one budget. At most one runs, under `state/locks/supervisor.lock`, recorded in
 `state/locks/supervisor.tick`, within `SUPERVISOR_BUDGET_MIN`.
 
 **Confinement.** The supervisor's agent runs with no tools:
@@ -119,7 +120,10 @@ answer` applies it:
 - a `label` action adds or removes only `FIRST_LABEL` and `LOW_LABEL`; `OPERATOR_LABEL` goes on only
   through `park`, with a question, and never comes off by the supervisor's hand: it is the human's hold;
   the lane, long-budget, sign-off, ready, claim and queue labels are never the supervisor's;
-- every body masked, linted as a tick's comment is, and headed as the supervisor's.
+- every body masked, linted as a tick's comment is, and headed as the supervisor's, and none with a
+  mention, a link, an image, HTML, an address or a closing keyword;
+- at most `SUPERVISOR_MAX_PARKS_PER_DAY` parks a day;
+- nothing at all when the answer's directive is refused.
 
 A directive narrows or reorders what the configuration allows, never widens it:
 
@@ -131,7 +135,7 @@ A directive narrows or reorders what the configuration allows, never widens it:
 | `models` | the entries to try, in this order | a subset or reordering of the configured list; any other entry is refused |
 | `focus`, `avoid` | a sentence on each tick's lane line | changes what a tick prefers, never what it may claim |
 | `notes` | one line to the tick working an issue, through `libexec/usage-ok.sh`, as `SUPERVISOR (advisory) on #N: …` | shown once per tick; refused if it names an operator or starts as the harness's own notice |
-| `stop` | TERM to the tick's own process group after `SUPERVISOR_STOP_GRACE_S`; its runner writes the trailer (`exit=143`) and chains as usual; its issue is avoided while the directive lasts | only a live tick of this installation whose start time still matches and that leads its own group; any other is refused and logged |
+| `stop` | TERM to the tick's own process group `SUPERVISOR_STOP_GRACE_S` after a directive first named it, which naming it again does not put off; its runner writes the trailer (`exit=143`) and chains as usual; its issue is avoided while the directive lasts | only a live tick of this installation whose start time still matches and that leads its own group; any other is refused and logged |
 
 The usage ceiling and caps, claims, the merge lock, the token's handling, the lint and the human's
 pause stay in the script, and the human's pause (`state/paused`, the cron line, `hooks/hold`)

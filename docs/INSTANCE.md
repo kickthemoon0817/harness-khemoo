@@ -205,7 +205,8 @@ and the dashboard behave as if none of it existed, and a `state/directive.json` 
 |---|---|---|
 | `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
 | `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
-| `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; flags that bypass permissions or the sandbox, add a directory or allow tools are refused |
+| `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; held to an allowlist (below) |
+| `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log; a park past it is refused |
 | `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
 | `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while its agent's windows allow it |
 | `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
@@ -231,16 +232,30 @@ when they are set. GitHub's token never reaches it. Its flags by default, checke
 | `codex` | `exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled -` | no shell or exec tool, no apps, plugins, browser or web search, no MCP servers from `config.toml`; whatever else it runs is sandboxed read-only and offline |
 | `gemini` | refused | its headless mode keeps file reading and web fetching whatever `--approval-mode` says, so it cannot run without tools |
 
-`tick.sh check` prints the supervisor's command line, or why it cannot run. A
-`SUPERVISOR_FLAGS_claude` must keep `--tools` (there `--tools=` stands for `--tools ""`, since the
-value is split on whitespace) and `--restricted`, and a `SUPERVISOR_FLAGS_codex` must keep `--sandbox read-only` and
-`--disable shell_tool`.
+`SUPERVISOR_FLAGS_<agent>` is held to an allowlist, not weighed: every flag in it must be one of
+the defaults above, given once, and the confining ones must all be there. For claude that is
+`--tools` with an empty value (written `--tools=`, since the value is split on whitespace),
+`--restricted` and `--strict-mcp-config`; `--disable-slash-commands` and
+`--no-session-persistence` may be left out. For codex it is `--sandbox read-only` and every
+`--disable` of the defaults; `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config` and
+`-c web_search=disabled` may be left out, and no other `-c` is taken. So an override can only drop
+an optional flag: anything else, such as tools named to `--tools`, `--mcp-config`, `--settings`,
+`--permission-mode`, `--enable`, `--full-auto` or another sandbox, is refused, and the supervisor
+does not run, which the allocator log says once. `tick.sh check` prints the supervisor's command
+line, or why it cannot run.
+
+The supervisor's comments and parked questions are held to more than the lint: a body with an
+@-mention, a URL or a markdown link, an image, HTML or an autolink, an email address, or a closing
+keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
+`owner/repo#N`) is refused. Each would reach past the issue: notify someone, send readers or their
+browsers elsewhere, hide text, or close an issue when a PR merges. A refused action is logged and
+the rest go on; a refused directive refuses every action of its answer.
 
 Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
 `$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the
 output of `harness health --json`, all on stdin. The same `{{KEY}}` substitution applies, with
-`FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S` and
-`SUPERVISOR_STOP_GRACE_S` added. The token reaches `harness health` and `harness supervisor answer`
+`FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S`,
+`SUPERVISOR_STOP_GRACE_S` and `SUPERVISOR_MAX_PARKS_PER_DAY` added. The token reaches `harness health` and `harness supervisor answer`
 as it reaches the queue count, never the agent; `hooks/hold`, which health runs, gets no token
 either.
 

@@ -81,6 +81,8 @@ Other first lines are `refused: <why>` (the directive in force stays), `clear: <
 `stop: pid <n> skipped: <why>` (no longer a live tick, its pid reused, or not leading a process
 group of its own). A stopped tick's log ends with an `exit=143` trailer. The supervisor's answer
 adds `answer: no directive` (it left the directive as it was), `answer: none found` (a failed run),
+`answer refused: <why>` (an unknown key or a wrong type; nothing applied), `answer refused: its
+directive was refused; no GitHub action taken`,
 `github: commented on #N`, `github: labelled #N +<label> -<label>`, `github: parked #N for the
 operator` and `github: refused <action> on #N: <why>`.
 
