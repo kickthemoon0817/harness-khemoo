@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Exercises bin/tick.sh against an instance overlay in a scratch harness home: the instance's
 # required files, its hooks, the composed prompt, the queue count, dispatch through fleet and
-# `tick.sh check`. A fake claude records its prompt and environment; a fake fleet follows the CLI
-# contract in docs/FLEET.md; a fake queue command answers per label.
+# `tick.sh check`, and ticks across agents. A fake claude records its prompt and environment, fake
+# codex and gemini record their argv, stdin and marker; a fake fleet follows the CLI contract in
+# docs/FLEET.md; a fake queue command answers per label.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -10,26 +11,71 @@ trap 'rm -rf "$H"' EXIT
 I="$H/instance"
 mkdir -p "$H/bin" "$H/prompts" "$I/prompts" "$I/hooks" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin"
 mkdir -p "$H/lib"
-cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"
+cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/instance.sh" "$H/lib/"
 cp "$here/tests/fixtures/instance/prompts/tick.md" "$I/prompts/tick.md"
 cat > "$H/prompts/tick-core.md" <<'EOF'
 Core rules for {{GH_REPO}}: budget {{TICK_BUDGET_MIN}} min, lane `{{LANE_LABEL}}`, {{UNKNOWN}} stays.
 EOF
 cat > "$H/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' "$2" > "$FAKE_PROMPT"
+cat > "$FAKE_PROMPT"
 printf '%s\n' "${FROM_HOOK:-unset} ${FROM_EXPORTS:-unset}" > "$FAKE_ENV"
 printf '%s\n' "rules=${PUBLIC_RECORD_RULES:-unset} pr=${PUBLIC_RECORD_PR_SECTIONS:-unset}" \
     "issue=${PUBLIC_RECORD_ISSUE_SECTIONS:-unset} repo=${GH_REPO:-unset} wip=${WIP_LABEL:-unset}" \
     "low=${LOW_LABEL:-unset} token=${GH_TOKEN:-unset}" > "$FAKE_LINT_ENV"
 printf '%s\n' "${HARNESS_BIN:-unset}" > "$FAKE_LINT_ENV.bin"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
+printf '%s\n' "$*" >> "$FAKE_AGENTS/claude.argv"
+[ -e "$FAKE_AGENTS/claude.limit" ] && echo "You've hit your session limit · resets 5pm"
+# An issue body quoting the sentence, and the tick going on after it.
+[ -e "$FAKE_AGENTS/claude.echo" ] && printf '%s\n' "Read the issue:" "You've hit your session limit · resets 5pm" \
+    "is what the user saw." step-1 step-2 step-3 step-4 step-5
+exit 0
 EOF
+# codex and gemini: each records its argv, its stdin and its marker, and prints its own CLI's
+# usage-limit message while <agent>.limit exists.
+for agent in codex gemini; do
+    cat > "$H/fakebin/$agent" <<'EOF'
+#!/usr/bin/env bash
+name=${0##*/}
+printf '%s\n' "$*" >> "$FAKE_AGENTS/$name.argv"
+cat > "$FAKE_AGENTS/$name.stdin"
+printf '%s\n' "${HARNESS_TICK:-unset}" > "$FAKE_AGENTS/$name.marker"
+printf '%s\n' "token=${GH_TOKEN:-unset}" > "$FAKE_AGENTS/$name.env"
+# What a tool the agent runs inherits: grep reads its own.
+grep '^SigIgn:' /proc/self/status | cut -f2 > "$FAKE_AGENTS/$name.sigign"
+# pid, pgid and session of this agent, then the pgid of the runner that started it.
+group() { local stat; stat=$(cat "/proc/$1/stat"); set -- ${stat##*) }; echo "$3 $4"; }
+echo "$$ $(group $$) $(group $PPID | cut -d' ' -f1)" > "$FAKE_AGENTS/$name.group"
+# A tick that is stopped, with a tool of its own.
+[ -e "$FAKE_AGENTS/$name.hang" ] && { sleep 30 & wait; }
+# Ends another entry's cooldown, so the next chained tick may pick it.
+[ -e "$FAKE_AGENTS/$name.uncool" ] && rm -f "$(cat "$FAKE_AGENTS/$name.uncool")"
+limit() { case $name in codex) echo "ERROR: You've hit your usage limit. Try again later." ;; gemini) echo "Error: RESOURCE_EXHAUSTED: Quota exceeded" ;; esac; }
+[ -e "$FAKE_AGENTS/$name.limit" ] && { limit; exit 1; }
+# gemini-cli's two shapes of a quota error: a critical error and its stack, and a bracketed API error.
+if [ -e "$FAKE_AGENTS/$name.stack" ]; then
+    echo "An unexpected critical error occurred:TerminalQuotaError: You have exhausted your daily quota on this model."
+    for i in 1 2 3 4 5 6 7 8 9 10; do echo "    at frame$i (file:///usr/lib/gemini/dist/chunk-$i.js:1:$i)"; done
+    exit 1
+fi
+if [ -e "$FAKE_AGENTS/$name.api" ]; then
+    echo "[API Error: Resource has been exhausted (e.g. check quota). (Status: RESOURCE_EXHAUSTED)]"
+    printf '%s\n' "Tip: switch models with /model." "" "Session ended."
+    exit 1
+fi
+# The message without the failure: a tick that quoted it and went on.
+[ -e "$FAKE_AGENTS/$name.quoted" ] && limit
+# A tool child that outlives the tick.
+[ -e "$FAKE_AGENTS/$name.orphan" ] && { nohup sleep 30 >/dev/null 2>&1 & echo $! > "$FAKE_AGENTS/$name.orphan"; }
+echo "$name ran"
+EOF
+done
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
 [ -e "$FAKE_QUEUE_FAILS" ] && { echo "queue service unreachable" >&2; exit 1; }
 printf '%s\n' "argv=$(tr '\0' ' ' < /proc/$$/cmdline)" "token=${GH_TOKEN:-unset}" > "$FAKE_QUEUE_SEEN"
-case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) echo 1 ;; esac
+case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) cat "$FAKE_WORK" 2>/dev/null || echo 1 ;; esac
 EOF
 # docs/FLEET.md's CLI: status exits 1 when any device failed, its document complete; dispatch reads
 # the prompt from stdin, refuses an empty one, and with --wait writes the output and exits with the
@@ -56,6 +102,8 @@ dispatch)
     prompt=$(cat)
     [ -n "$prompt" ] || { echo "fleet: empty prompt" >&2; exit 125; }
     printf '%s' "$prompt" > "$FAKE_FLEET_STDIN"
+    # A wait that is stopped, with a helper of its own.
+    [ -e "$FAKE_FLEET_HANG" ] && { sleep 30 & wait; }
     [ "$model" = "$(cat "$FAKE_FLEET_LIMIT" 2>/dev/null)" ] && { echo "You've hit your usage limit · resets 5pm"; exit 1; }
     echo "agent output on $model"
     exit "$(cat "$FAKE_FLEET_RC" 2>/dev/null || echo 0)" ;;
@@ -82,11 +130,13 @@ TARGET_REPO=$H/target
 WORKTREE_ROOT=$H/worktrees
 GH_REPO='o/r&x|y\\z'
 QUEUE_DEPTH_CMD=$H/fakebin/queue
-CLAUDE_BIN=$H/fakebin/claude
-CLAUDE_FLAGS=
+AGENT_BIN_claude=$H/fakebin/claude
+AGENT_FLAGS_claude=
 MAX_SLOTS=1
 USAGE_CACHE=$H/usage-cache.json
 USAGE_FETCH=$H/no-fetch
+USAGE_SOURCE_codex=json:$H/codex-usage.json
+USAGE_SOURCE_gemini=none
 CLAIM_GRACE_S=0
 FROM_EXPORTS=exported
 TICK_EXPORTS="FROM_EXPORTS"
@@ -97,19 +147,31 @@ export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.
     FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" FAKE_LINT_ENV="$H/lint-env.txt" \
     PATH="$H/fakebin:$PATH" FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron" \
     FAKE_FLEET_STATUS="$here/tests/fixtures/fleet/status.json" FAKE_FLEET_DOWN="$H/fleet-down" FAKE_FLEET_ARGV="$H/fleet-argv.txt" \
-    FAKE_FLEET_STDIN="$H/fleet-stdin.txt" FAKE_FLEET_LIMIT="$H/fleet-limit" FAKE_FLEET_RC="$H/fleet-rc"
+    FAKE_FLEET_STDIN="$H/fleet-stdin.txt" FAKE_FLEET_LIMIT="$H/fleet-limit" FAKE_FLEET_RC="$H/fleet-rc" \
+    FAKE_AGENTS="$H/agents" FAKE_WORK="$H/work.txt" FAKE_FLEET_HANG="$H/fleet-hang" HOME="$H/home"
+unset HARNESS_TICK FLEET_SESSION HARNESS_STATE
+mkdir -p "$H/agents"
 LOG="$H/state/logs/allocator.log"
-printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
+usage() {  # $1 = claude's 5-hour percent; codex's one window stays at 10
+    printf '{"timestamp": %s000, "data": {"fiveHourPercent": %s, "weeklyPercent": 10}}\n' "$(date +%s)" "$1" > "$H/usage-cache.json"
+    printf '{"timestamp": %s000, "windows": [{"name": "five_hour", "used_pct": 10, "window_minutes": 300}]}\n' "$(date +%s)" > "$H/codex-usage.json"
+}
+usage 10
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 # Waits until no tick.sh of this scratch home runs: the launcher's detached runners and the forks
 # that become them both carry its path. Gives up after 20 s, so a stuck runner fails its check.
 settle() {
-    local n=0
-    while pgrep -f "$H/bin/tick.sh" >/dev/null && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+    local n=0 quiet=0
+    # Three empty polls in a row: on Ubuntu 26.04 a poll right after the launcher exits has missed
+    # the runner it had just started.
+    while [ "$quiet" -lt 3 ] && [ "$n" -lt 400 ]; do
+        if pgrep -f "$H/bin/tick.sh" >/dev/null; then quiet=0; else quiet=$((quiet + 1)); fi
+        sleep 0.05; n=$((n + 1))
+    done
 }
 launch() {  # run the launcher once and wait for the runner it may start
-    rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log; : > "$LOG"
+    rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log "$FAKE_AGENTS"/*.argv; : > "$LOG"
     rm -f "$H/state/locks/heartbeat.stamp"
     "$H/bin/tick.sh"
     settle
@@ -150,8 +212,20 @@ check_with "WORKTREE_ROOT=$H/not-yet/trees"
 check "a WORKTREE_ROOT that can be created passes" '[ "$rc" -eq 0 ] && [ ! -e "$H/not-yet" ]' "rc=$rc $(cat "$H/check.txt")"
 check_with "QUEUE_DEPTH_CMD=\"$H/plain-file --flag\""
 check "check fails when QUEUE_DEPTH_CMD is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable QUEUE_DEPTH_CMD ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
-check_with "CLAUDE_BIN=no-such-claude"
-check "check fails when CLAUDE_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable CLAUDE_BIN (no-such-claude)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "AGENT_BIN_claude=no-such-claude"
+check "check fails when an agent's binary does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable AGENT_BIN_claude (no-such-claude)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='fake-model codex:model-x'" "AGENT_BIN_codex=no-such-codex"
+check "check names every agent of the model list it cannot run" '[ "$rc" -eq 1 ] && grep -q "missing: an executable AGENT_BIN_codex (no-such-codex)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='fake-model Codex:x'"
+check "check fails on a model list harness usage refuses" '[ "$rc" -eq 1 ] && grep -q "missing: a usage configuration that harness usage reads (.*TICK_MODELS" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='fake-model codex:model-x gemini:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" "AGENT_BIN_gemini=$H/fakebin/gemini"
+check "check prints each agent's command line, with the prompt on stdin, and its usage" \
+    '[ "$rc" -eq 0 ] && grep -qxF "agent codex: $H/fakebin/codex exec --model <model> --dangerously-bypass-approvals-and-sandbox - < prompt" "$H/check.txt" && grep -qxF "agent gemini: $H/fakebin/gemini --model <model> --yolo < prompt" "$H/check.txt" && grep -qxF "agent claude: $H/fakebin/claude -p --model <model> < prompt" "$H/check.txt" && grep -qx "usage:         pool: 1 of 1, room for 1 more" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+check_with "CLAUDE_FLAGS=" "WEEK_HALF_AT=64" "TICK_AGENT_EXES=claude:-p"
+check "check names each key it does not read, and the key to set instead" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: .*CLAUDE_FLAGS is not read; set AGENT_FLAGS_claude instead" "$H/check.txt" && grep -q "WEEK_HALF_AT is not read; set USAGE_STEPS_LONG instead" "$H/check.txt" && grep -q "TICK_AGENT_EXES is not read; remove it" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
 check_with "HARNESS_BIN=$H/plain-file"
 check "check fails when HARNESS_BIN is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable HARNESS_BIN ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "GH_REPO="
@@ -251,6 +325,15 @@ launch
 check "with no lane issue, the tick leaves lane issues alone" \
     'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on fake-model: never claim an issue labelled \`ai:lane\`"' "$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
 write_env
+# A lane whose agent's windows allow no tick leaves its issues to the work ticks, and says so.
+write_env "LANE_MODEL=claude:lane-model" "LANE_LABEL=ai:lane" "TICK_MODELS=codex:model-x" "AGENT_BIN_codex=$H/fakebin/codex"
+echo 1 > "$FAKE_LANE"; usage 80
+launch
+check "a lane that cannot run opens its issues to the work ticks" \
+    'head -1 "$FAKE_AGENTS/codex.stdin" | grep -qx "This tick runs on model-x. lane-model cannot run now, on its usage limit or windows, so an issue labelled \`ai:lane\` may be claimed too." && grep -q "claude:lane-model cannot run" "$LOG" && grep -q "^[^ ]* codex=1\[five_hour:10%\] pool=1 room=1 " "$LOG"' \
+    "log=$(cat "$LOG") stdin=$(head -1 "$FAKE_AGENTS/codex.stdin" 2>/dev/null)"
+usage 10; echo 0 > "$FAKE_LANE"
+write_env
 
 # hooks/hold: exit 0 holds and logs its reason once; exit 1 or a hang holds nothing.
 printf '#!/usr/bin/env bash\necho "service down since noon"\necho second line\nexit 0\n' > "$I/hooks/hold"; chmod +x "$I/hooks/hold"
@@ -291,12 +374,15 @@ fleet_env "TICK_MODELS='model-a model-b'"; echo model-a > "$FAKE_FLEET_LIMIT"
 launch
 tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
 check "a usage limit in the dispatched output cools the model and the tick re-runs on the next" \
-    '[ -e "$H/state/model-cooldown/model-a" ] && grep -q "model-a hit its usage limit" "$LOG" && [ "$(grep -o -- "--model [^ ]*" "$FAKE_FLEET_ARGV" | tr "\n" " ")" = "--model model-a --model model-b " ] && grep -q "^\[tick.sh\] exit=0 .*model=model-b$" "$tick_log"' \
+    '[ -e "$H/state/model-cooldown/claude:model-a" ] && grep -q "claude:model-a hit its usage limit" "$LOG" && [ "$(grep -o -- "--model [^ ]*" "$FAKE_FLEET_ARGV" | tr "\n" " ")" = "--model model-a --model model-b " ] && grep -q "^\[tick.sh\] exit=0 .*model=model-b$" "$tick_log"' \
     "argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null) log=$(cat "$LOG")"
 rm -rf "$FAKE_FLEET_LIMIT" "$H/state/model-cooldown"
 fleet_env "TICK_AGENT=codex" "FLEET_DEVICE=dev-a"
 launch
 check "TICK_AGENT and FLEET_DEVICE reach the dispatch" 'grep -q -- "^dispatch --device dev-a --adapter codex " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
+fleet_env "TICK_MODELS='gemini:model-g'"
+launch
+check "through fleet, an entry's agent is the adapter" 'grep -q -- "^dispatch --device auto --adapter gemini .*--model model-g " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
 fleet_env
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check reports fleet's devices and passes with one that can take a tick" \
@@ -313,14 +399,253 @@ check "check fails when FLEET_DEVICE names a device that cannot be reached" '[ "
 fleet_env "FLEET_BIN=no-such-fleet"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check fails when FLEET_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable FLEET_BIN (no-such-fleet)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
-write_env "TICK_AGENT=codex"
+fleet_env "TICK_MODELS='fake-model gemini:model-g'"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
-check "check fails when TICK_AGENT is not claude without fleet" \
-    '[ "$rc" -eq 1 ] && grep -q "TICK_AGENT=codex needs FLEET_DISPATCH=1" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check "check names each agent no fleet device offers" \
+    '[ "$rc" -eq 1 ] && grep -qx "fleet device:  dev-a (tls) reachable, claude 1/2 running, no gemini adapter" "$H/check.txt" && grep -qx "missing: a fleet device that can take a gemini tick" "$H/check.txt" && ! grep -q "take a claude tick" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+write_env "TICK_AGENT=aider"
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check fails when an agent without a local profile runs without fleet" \
+    '[ "$rc" -eq 1 ] && grep -q "agent aider needs FLEET_DISPATCH=1" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 rm -f "$H/state/locks/instance-incomplete.stamp"
 launch
-check "the launcher refuses TICK_AGENT=codex without fleet and logs why" \
-    '[ ! -e "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ] && grep -q "instance incomplete: .*TICK_AGENT=codex needs FLEET_DISPATCH=1" "$LOG"' "log=$(cat "$LOG")"
+check "the launcher refuses an agent without a local profile and logs why" \
+    '[ ! -e "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ] && grep -q "instance incomplete: .*agent aider needs FLEET_DISPATCH=1" "$LOG"' "log=$(cat "$LOG")"
+write_env
+
+# Ticks across agents: one priority list, each agent with its own CLI, limit message and windows.
+agents_env() {
+    write_env "TICK_MODELS='claude:model-c codex:model-x gemini:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" \
+        "AGENT_BIN_gemini=$H/fakebin/gemini" "MODEL_COOLDOWN_S=600" "$@"
+}
+agents_env
+launch
+check "the first entry runs on its agent with the prompt on stdin" \
+    '[ "$(cat "$FAKE_AGENTS/claude.argv")" = "-p --model model-c" ] && head -1 "$FAKE_PROMPT" | grep -qx "This tick runs on model-c." && [ ! -e "$FAKE_AGENTS/codex.argv" ]' \
+    "$(cat "$FAKE_AGENTS/claude.argv" 2>/dev/null); $(head -1 "$FAKE_PROMPT" 2>/dev/null)"
+touch "$FAKE_AGENTS/claude.limit" "$FAKE_AGENTS/codex.limit"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "a limit message from each agent cools that entry and the tick moves on to the next agent" \
+    '[ -e "$H/state/model-cooldown/claude:model-c" ] && [ -e "$H/state/model-cooldown/codex:model-x" ] && [ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "codex:model-x hit its usage limit" "$LOG" && grep -q "^\[tick.sh\] exit=0 .*agent=gemini model=model-g$" "$tick_log"' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+check "codex and gemini get their argv, with the prompt on stdin and never in argv" \
+    '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && [ "$(cat "$FAKE_AGENTS/gemini.argv")" = "--model model-g --yolo" ] && head -1 "$FAKE_AGENTS/gemini.stdin" | grep -qx "This tick runs on model-g." && grep -q "^Core rules for" "$FAKE_AGENTS/codex.stdin" && ! grep -q "Core rules\|This tick" "$FAKE_AGENTS"/*.argv' \
+    "$(head -c 300 "$FAKE_AGENTS"/*.argv)"
+check "a tick and every tool it runs take SIGINT and SIGQUIT" \
+    '[ $(( 16#$(cat "$FAKE_AGENTS/gemini.sigign") & 6 )) -eq 0 ] && [ $(( 16#$(cat "$FAKE_AGENTS/codex.sigign") & 6 )) -eq 0 ]' \
+    "gemini=$(cat "$FAKE_AGENTS/gemini.sigign" 2>/dev/null) codex=$(cat "$FAKE_AGENTS/codex.sigign" 2>/dev/null)"
+read -r g_pid g_pgid g_sid g_runner < "$FAKE_AGENTS/gemini.group"
+check "a tick leads a process group and session of its own, apart from its runner's" \
+    '[ "$g_pgid" = "$g_pid" ] && [ "$g_sid" = "$g_pid" ] && [ "$g_runner" != "$g_pid" ]' "$(cat "$FAKE_AGENTS/gemini.group")"
+check "every agent's tick carries its marker and never GH_TOKEN" \
+    '[ "$(cat "$FAKE_AGENTS/gemini.marker")" = "state=$H/state slot=1 agent=gemini model=model-g kind=work" ] && grep -qx "token=unset" "$FAKE_AGENTS/codex.env" && grep -qx "token=unset" "$FAKE_AGENTS/gemini.env"' \
+    "$(cat "$FAKE_AGENTS/gemini.marker" 2>/dev/null)"
+launch
+check "while both cool down the next tick starts on gemini at once" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && [ -s "$FAKE_AGENTS/gemini.argv" ]' "log=$(cat "$LOG")"
+rm -rf "$H/state/model-cooldown" "$FAKE_AGENTS"/*.limit
+usage 80
+launch
+check "an agent whose windows allow no tick is passed over for the next agent" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && grep -q "claude=0\[five_hour:80%,weekly:10%\] codex=1\[five_hour:10%\] gemini=1\[\] pool=1 room=1 " "$LOG"' \
+    "log=$(cat "$LOG")"
+usage 10
+agents_env "AGENT_FLAGS_codex='--skip-git-repo-check -m other --model=x --model y -mz *'" "TICK_MODELS=codex:model-x"
+launch
+check "AGENT_FLAGS_<agent> replaces the agent's flags, never globbed, every model flag dropped" \
+    '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --skip-git-repo-check * -" ]' "$(cat "$FAKE_AGENTS/codex.argv" 2>/dev/null)"
+agents_env "AGENT_LIMIT_RE_gemini='custom quota'" "TICK_MODELS='gemini:model-g codex:model-x'"
+touch "$FAKE_AGENTS/gemini.limit"
+launch
+check "AGENT_LIMIT_RE_<agent> replaces the agent's limit message" \
+    '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+rm -rf "$H/state/model-cooldown" "$FAKE_AGENTS"/*.limit
+agents_env "TICK_MODELS='gemini:model-g codex:model-x'"
+touch "$FAKE_AGENTS/gemini.quoted"
+launch
+check "a gemini limit message from a tick that exited 0 is no usage limit" \
+    '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$H/state/logs/"tick-*.log && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+rm -f "$FAKE_AGENTS/gemini.quoted"
+for shape in stack api; do
+    rm -rf "$H/state/model-cooldown"
+    agents_env "TICK_MODELS='gemini:model-g codex:model-x'"
+    touch "$FAKE_AGENTS/gemini.$shape"
+    launch
+    check "gemini's quota error as a $shape cools its entry and the tick moves on" \
+        '[ -e "$H/state/model-cooldown/gemini:model-g" ] && [ -s "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+    rm -f "$FAKE_AGENTS/gemini.$shape"
+done
+rm -rf "$H/state/model-cooldown"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'"
+touch "$FAKE_AGENTS/claude.echo"
+launch
+check "a limit sentence quoted mid-output, with more output after it, cools nothing" \
+    '[ ! -e "$H/state/model-cooldown/claude:model-c" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -q "session limit" "$H/state/logs/"tick-*.log' "log=$(cat "$LOG")"
+rm -f "$FAKE_AGENTS/claude.echo"
+agents_env "TICK_MODELS=codex:model-x"
+touch "$FAKE_AGENTS/codex.orphan"
+launch
+orphan=$(cat "$FAKE_AGENTS/codex.orphan")
+check "a tool child that outlives its tick is no tick" \
+    'kill -0 "$orphan" 2>/dev/null && [ -z "$("$HARNESS_BIN" ticks --state "$H/state")" ] && [ ! -e "$H/state/locks/slot1.tick" ]' \
+    "orphan=$orphan ticks=$("$HARNESS_BIN" ticks --state "$H/state")"
+kill "$orphan" 2>/dev/null; rm -f "$FAKE_AGENTS/codex.orphan"
+
+# Live ticks: processes holding a slot and recorded in its slot file, as the runner records a tick.
+holders=()
+trap 'for p in "${holders[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$H"' EXIT
+live() {  # $1 slot, $2 agent, $3 kind: holds the slot and records the holder as its tick
+    local stat; local -a f
+    flock -o "$H/state/locks/slot$1.lock" sleep 60 >/dev/null 2>&1 & holders+=($!)
+    until ! flock -n "$H/state/locks/slot$1.lock" true; do sleep 0.05; done
+    stat=$(cat "/proc/$!/stat"); read -ra f <<<"${stat##*) }"
+    printf '%s %s %s %s m %s\n' "$!" "${f[19]}" "$(cat /proc/sys/kernel/random/boot_id)" "$2" "$3" > "$H/state/locks/slot$1.tick"
+}
+release() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); rm -f "$H"/state/locks/slot*.tick; }
+# claude at its cap 2 (65 %, half of 4) with two live ticks: the next tick runs on codex.
+usage 65
+agents_env "MAX_SLOTS=4" "TICK_MODELS='claude:model-c codex:model-x'"
+live 1 claude work; live 2 claude work
+launch
+check "an agent whose live ticks fill its cap is passed over for the next agent" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ -s "$FAKE_AGENTS/codex.argv" ] && grep -q "claude=2\[five_hour:65%,weekly:10%\] codex=4\[five_hour:10%\] pool=4 room=4 busy=2 claimable=1 -> spawning 1" "$LOG"' \
+    "log=$(cat "$LOG")"
+release
+# claude past its cap (0) with four ticks still running takes nothing of codex's room.
+usage 80
+agents_env "MAX_SLOTS=6" "TICK_MODELS='claude:model-c codex:model-x'"
+for slot in 1 2 3 4; do live "$slot" claude work; done
+launch
+check "one agent's ticks past its cap leave another agent its room" \
+    '[ -s "$FAKE_AGENTS/codex.argv" ] && grep -q "claude=0\[five_hour:80%,weekly:10%\] codex=6\[five_hour:10%\] pool=6 room=6 busy=4 claimable=1 -> spawning 1" "$LOG"' \
+    "log=$(cat "$LOG")"
+release
+# An agent each of whose entries cools down adds nothing, though its ticks still run: claude at 75 %
+# has room for one, and codex's two live ticks take none of it.
+usage 75
+agents_env "MAX_SLOTS=4" "TICK_MODELS='claude:model-c codex:model-x'"
+mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/codex:model-x"
+live 1 codex work; live 2 codex work
+launch
+check "a cooling agent's live ticks hold slots but no room" \
+    '[ -s "$FAKE_AGENTS/claude.argv" ] && grep -q "claude=1\[five_hour:75%,weekly:10%\] codex=4\[five_hour:10%\] pool=1 room=1 busy=2 " "$LOG"' "log=$(cat "$LOG")"
+release; rm -rf "$H/state/model-cooldown"
+# The lane's own agent at its cap with a lane tick running: no lane tick, and the pool leaves it out.
+usage 10
+printf '{"timestamp": %s000, "windows": [{"name": "five_hour", "used_pct": 75, "window_minutes": 300}]}\n' "$(date +%s)" > "$H/codex-usage.json"
+agents_env "MAX_SLOTS=4" "TICK_MODELS=claude:model-c" "LANE_MODEL=codex:lane-x" "LANE_LABEL=ai:lane"
+echo 1 > "$FAKE_LANE"
+live 1 codex lane
+launch
+check "a lane-only agent at its cap runs no lane tick and sizes no pool" \
+    '[ ! -e "$FAKE_AGENTS/codex.argv" ] && head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on model-c: never claim" && grep -q "^[^ ]* claude=4\[five_hour:10%,weekly:10%\] pool=4 room=4 busy=1 " "$LOG"' \
+    "log=$(cat "$LOG") prompt=$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
+release; echo 0 > "$FAKE_LANE"; usage 10
+# A tick young enough to be still choosing its issue stands for one of the queued ones.
+agents_env "MAX_SLOTS=2" "CLAIM_GRACE_S=360" "TICK_MODELS=claude:model-c"
+live 1 claude work
+launch
+check "a young live tick stands for a queued issue, so none is left to start for" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && ! grep -q spawning "$LOG"' "log=$(cat "$LOG")"
+release
+agents_env "MAX_SLOTS=3" "CLAIM_GRACE_S=360" "TICK_MODELS=claude:model-c" "LANE_MODEL=claude:lane-model" "LANE_LABEL=ai:lane"
+echo 2 > "$FAKE_WORK"; echo 1 > "$FAKE_LANE"
+live 1 claude lane
+launch
+check "a young lane tick stands for the lane's queued issue, so the next tick leaves the lane alone" \
+    'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on model-c: never claim an issue labelled" && grep -q "spawning 1$" "$LOG"' \
+    "log=$(cat "$LOG") prompt=$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
+release
+agents_env "MAX_SLOTS=3" "TICK_MODELS=claude:model-c" "LANE_MODEL=claude:lane-model" "LANE_LABEL=ai:lane"
+echo 1 > "$FAKE_WORK"
+live 1 claude lane
+launch
+check "an old lane tick has claimed, so the lane's queued issue gets a lane tick" \
+    'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on lane-model, the model lane"' "prompt=$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
+release; rm -f "$FAKE_WORK"; echo 0 > "$FAKE_LANE"
+# Chaining: a short tick chains when CHAIN_MIN_TICK_S is 0. The codex tick ends claude's cooldown,
+# so the chained tick runs on claude, the better entry: the next tick may be another agent's.
+mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/claude:model-c"
+echo "$H/state/model-cooldown/claude:model-c" > "$FAKE_AGENTS/codex.uncool"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2"
+launch
+check "a chained tick may run on another agent" \
+    '[ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 1 ] && [ "$(wc -l < "$FAKE_AGENTS/claude.argv")" -eq 1 ] && grep -q "slot1 chains tick 2" "$LOG"' \
+    "log=$(cat "$LOG")"
+# claude at 75 % has room for one tick, which a live claude tick in the other slot takes, so the
+# chained tick, picking past claude at its cap once codex ends its cooldown, runs on codex again.
+usage 75; touch "$H/state/model-cooldown/claude:model-c"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2"
+live 2 claude work
+launch
+check "a chained tick's pick respects the cap of the agent it picks" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 2 ] && grep -q "slot1 chains tick 2" "$LOG"' \
+    "log=$(cat "$LOG") claude=$(cat "$FAKE_AGENTS/claude.argv" 2>/dev/null)"
+release; rm -f "$FAKE_AGENTS"/codex.uncool
+rm -rf "$H/state/model-cooldown"; usage 10
+# A stale reading allows nothing, and the launcher says so rather than stopping silently.
+printf '{"timestamp": 1000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' > "$H/usage-cache.json"
+rm -f "$H/state/locks/usage-unknown.stamp"
+agents_env "TICK_MODELS=claude:model-c"
+launch
+check "a stale reading starts nothing and is logged" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && grep -q "no fresh usage reading for claude; none of its ticks start" "$LOG"' "log=$(cat "$LOG")"
+usage 10
+agents_env "TICK_MODELS='claude:model-c codex:model-x'"
+mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/claude:model-c" "$H/state/model-cooldown/codex:model-x"
+launch
+check "with every entry cooling down the launcher stops early and quietly" '[ ! -s "$LOG" ] && [ ! -e "$FAKE_AGENTS/claude.argv" ]' "log=$(cat "$LOG")"
+rm -rf "$H/state/model-cooldown"
+# What check refuses about agents and their usage.
+check_with "TICK_MODELS='fake-model gemini:model-g'" "AGENT_BIN_gemini=$H/fakebin/gemini" "USAGE_SOURCE_gemini="
+check "an agent without a default source must name one" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: .*USAGE_SOURCE_gemini unset: name gemini.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+mkdir -p "$H/oldenv"
+printf '#!/bin/sh\ncase "$1" in --default-signal*) echo "env: unrecognized option" >&2; exit 125 ;; esac\nexec /usr/bin/env "$@"\n' > "$H/oldenv/env"
+chmod +x "$H/oldenv/env"
+check_with "HARNESS_PATH=$H/oldenv:$H/fakebin:$PATH"
+check "an env without --default-signal is named as missing" \
+    '[ "$rc" -eq 1 ] && grep -q "missing: an env that takes --default-signal (GNU coreutils 8.31 or later)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -f "$H/state/locks/instance-incomplete.stamp"
+launch
+check "the launcher logs that env as an incomplete instance and starts nothing" \
+    'grep -q "instance incomplete: an env that takes --default-signal" "$LOG" && [ ! -e "$FAKE_PROMPT" ]' "log=$(cat "$LOG")"
+write_env
+check_with "AGENT_LIMIT_RE_claude="
+check "an empty limit pattern is refused" '[ "$rc" -eq 1 ] && grep -q "missing: .*AGENT_LIMIT_RE_claude is empty" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+write_env
+CLAUDE_FLAGS=--from-the-environment "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "an old key in the environment, not in harness.env, is not this config's" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
+write_env
+
+# Stopping a tick: TERM to its process group ends the agent and its tool, never the runner, which
+# writes the trailer. $1 names the check; the tick is the one slot 1 records.
+stop_tick() {
+    local n=0 pid runner
+    rm -f "$H/state/logs/"tick-*.log; : > "$LOG"
+    "$H/bin/tick.sh"
+    until [ -s "$H/state/locks/slot1.tick" ] || [ "$n" -ge 200 ]; do sleep 0.05; n=$((n + 1)); done
+    read -r pid _ < "$H/state/locks/slot1.tick"
+    runner=$(pgrep -f "$H/bin/tick.sh runner" | head -1)
+    sleep 0.3
+    kill -TERM -- "-$pid"
+    sleep 0.5
+    tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+    check "$1" \
+        '[ -n "$runner" ] && [ "$runner" != "$pid" ] && grep -q "^\[tick.sh\] exit=143 " "$tick_log"' \
+        "pid=$pid runner=$runner log=$(cat "$tick_log" 2>/dev/null)"
+    settle
+}
+agents_env "TICK_MODELS=codex:model-x"
+touch "$FAKE_AGENTS/codex.hang"
+stop_tick "TERM to a local tick's group stops it, and its runner writes the trailer"
+rm -f "$FAKE_AGENTS/codex.hang"
+fleet_env
+touch "$FAKE_FLEET_HANG"
+stop_tick "TERM to a fleet dispatch's group stops the wait, and its runner writes the trailer"
+rm -f "$FAKE_FLEET_HANG"
 write_env
 
 # HARNESS_INSTANCE_DIR moves the whole instance.

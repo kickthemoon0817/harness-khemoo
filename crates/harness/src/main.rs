@@ -17,6 +17,10 @@ enum Command {
     Claimable(harness::claimable::Args),
     /// Serve the status dashboard on 127.0.0.1.
     Dashboard(harness::dashboard::Args),
+    /// List the live ticks of this harness state directory.
+    Ticks(harness::ticks::Args),
+    /// Print the usage windows of each agent, and the ticks they allow.
+    Usage(harness::usage::Args),
 }
 
 fn main() -> ExitCode {
@@ -24,5 +28,7 @@ fn main() -> ExitCode {
         Command::Lint(args) => harness::lint::run(&args),
         Command::Claimable(args) => harness::claimable::run(&args),
         Command::Dashboard(args) => harness::dashboard::run(&args),
+        Command::Ticks(args) => harness::ticks::run(&args),
+        Command::Usage(args) => harness::usage::run(&args),
     }
 }

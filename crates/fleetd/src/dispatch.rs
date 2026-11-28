@@ -33,6 +33,9 @@ const TRUNCATED: &[u8] = b"[fleetd: log truncated]\n";
 const RESTARTED: &str = "fleetd restarted while the session ran";
 const SESSION_FILE: &str = "session.json";
 const LOG_FILE: &str = "output.log";
+/// `pid starttime` of the running agent, so the harness can tell the process this session started
+/// from one that only claims to be it.
+const TICK_FILE: &str = "tick";
 /// A session record is a few KiB; anything larger is not one fleetd wrote.
 const MAX_SESSION_FILE: u64 = 1024 * 1024;
 const GROUP_POLL: Duration = Duration::from_millis(100);
@@ -241,7 +244,19 @@ impl Sessions {
             labels: spec.labels,
         };
         let progress = Arc::new(watch::channel(0).0);
-        let spawned = create_log(&dir).and_then(|log| Ok((log, spawn(launch, &argv, &workdir)?)));
+        let spawned = create_log(&dir).and_then(|log| {
+            Ok((
+                log,
+                spawn(
+                    launch,
+                    &argv,
+                    &workdir,
+                    &id,
+                    &adapter.name,
+                    &dir.join(TICK_FILE),
+                )?,
+            ))
+        });
         let (log, (mut child, pgid)) = match spawned {
             Ok(ok) => ok,
             Err(e) => {
@@ -259,6 +274,7 @@ impl Sessions {
             }
         };
         apply_rlimits(pgid, launch.rlimit_nofile);
+        write_tick(&dir, pgid);
         if let Some(mut stdin) = child.stdin.take() {
             let prompt = spec.prompt;
             // Its own task, so an agent that never reads stdin cannot hold up the reply.
@@ -423,6 +439,7 @@ impl Sessions {
         let this = Arc::clone(self);
         let _ = tokio::task::spawn_blocking(move || {
             if let Some((dir, session)) = record {
+                let _ = std::fs::remove_file(dir.join(TICK_FILE));
                 write_record(&dir, &session);
             }
             this.prune(now);
@@ -467,7 +484,14 @@ fn running_of(table: &HashMap<SessionId, Entry>, adapter: &AdapterName) -> u32 {
 
 /// Starts the agent in its own process group, with a cleared environment, in the
 /// canonical workdir, with stdin, stdout and stderr piped.
-fn spawn(launch: &Launch, argv: &[OsString], workdir: &Path) -> io::Result<(Child, Pid)> {
+fn spawn(
+    launch: &Launch,
+    argv: &[OsString],
+    workdir: &Path,
+    id: &SessionId,
+    adapter: &AdapterName,
+    tick: &Path,
+) -> io::Result<(Child, Pid)> {
     let mut cmd = Command::new(&launch.exe);
     cmd.args(argv)
         .current_dir(workdir)
@@ -485,6 +509,12 @@ fn spawn(launch: &Launch, argv: &[OsString], workdir: &Path) -> io::Result<(Chil
         }
     }
     cmd.envs(&launch.env);
+    // Set last, so no env table can forge them: the harness finds the process a session started
+    // through the tick file (libexec/tick-pid.sh) and the agent its usage windows are read for
+    // (libexec/usage-ok.sh).
+    cmd.env("FLEET_SESSION", id.as_str())
+        .env("FLEET_SESSION_TICK", tick)
+        .env("FLEET_ADAPTER", adapter.as_str());
     let mut child = cmd.spawn()?;
     let pgid = child
         .id()
@@ -591,6 +621,50 @@ fn create_log(dir: &Path) -> io::Result<tokio::fs::File> {
         .mode(0o600)
         .open(dir.join(LOG_FILE))?;
     Ok(tokio::fs::File::from_std(file))
+}
+
+/// Writes the session's tick file: the agent's pid, its start time, field 22 of
+/// `/proc/<pid>/stat`, which a reused pid does not share, and the boot it counts from. Written whole, by rename, and readable by
+/// fleetd's user only. Without `/proc` there is no start time to record, and no file.
+fn write_tick(dir: &Path, pid: Pid) {
+    let (Some(start), Some(boot_id)) = (start_ticks(pid), boot_id()) else {
+        return;
+    };
+    let result = (|| {
+        let tmp = dir.join("tick.tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        writeln!(file, "{} {start} {boot_id}", pid.as_raw_nonzero())?;
+        std::fs::rename(&tmp, dir.join(TICK_FILE))
+    })();
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "could not write the session's tick file");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn start_ticks(pid: Pid) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_ticks(_pid: Pid) -> Option<u64> {
+    None
+}
+
+/// This boot's id: start times count from boot, so a file a crash left behind must not match a
+/// process of the next one.
+fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
 }
 
 fn read_record(dir: &Path) -> io::Result<Session> {

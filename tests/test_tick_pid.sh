@@ -1,50 +1,96 @@
 #!/usr/bin/env bash
-# Exercises libexec/tick-pid.sh: the nearest ancestor matching an `exe` or `exe:arg` entry of
-# TICK_AGENT_EXES is the tick. Agent names here are made up where they can be, so an agent that runs
-# the suite is never mistaken for one; the default's cases use claude and only check that the fake
-# process was or was not chosen, since a real `claude -p` may sit further up.
+# Exercises libexec/tick-pid.sh: the tick is the first ancestor whose pid and start time a tick file
+# records: a slot file of this state directory, or the session file FLEET_SESSION_TICK names. The suite
+# may itself run under a tick, so a case where none of its own processes is the tick only checks
+# that none of them was chosen.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
-export H TP="$here/libexec/tick-pid.sh" OUT="$H/out"
-cp "$(command -v bash)" "$H/agent-b"
+mkdir -p "$H/state/locks" "$H/other/locks"
+export H TP="$here/libexec/tick-pid.sh" OUT="$H/out" HARNESS_STATE="$H/state"
+unset HARNESS_TICK FLEET_SESSION FLEET_SESSION_TICK
+cc -o "$H/nodump" "$here/tests/fixtures/nodump.c" || { echo "FAIL cc cannot build the non-dumpable stand-in"; exit 1; }
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
-# Each shell runs a second command so it forks tick-pid.sh instead of exec'ing into it.
-run_as() {  # $1 = argv[0] for the shell, $2 = its script; the shell's pid goes to $H/pid
-    (exec -a "$1" bash -c 'echo $$ > "$0"; '"$2"'; true' "$H/pid")
+# What a shell runs to record itself as slot 1's tick in state directory $RECORD_IN, as the runner
+# records the agent it starts; RECORD_SKEW shifts the start time, as a reused pid's would differ.
+export RECORD='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s codex m work\n" $$ $(( ${f[19]} + ${RECORD_SKEW:-0} )) ${RECORD_BOOT:-$(cat /proc/sys/kernel/random/boot_id)} > "$RECORD_IN/locks/slot1.tick"'
+# The agent shell records itself, writes its pid to $H/pid and runs tick-pid.sh under a tool shell
+# of its own; every shell runs a second command, so none execs into the next.
+agent() {  # $1 = the state directory the agent is recorded in
+    rm -f "$H"/state/locks/slot*.tick "$H"/other/locks/slot*.tick
+    RECORD_IN=$1 bash -c 'eval "$RECORD"; echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
 }
 
-TICK_AGENT_EXES=agent-a run_as /opt/bin/agent-a '"$TP" > "$OUT"'
-check "an ancestor whose argv[0] is a listed agent is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+agent "$H/state"
+check "the recorded ancestor is the tick, not the tool shell under it" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES=agent-a run_as bash 'bash -c "echo agent-a -p; \"\$TP\" > \"\$OUT\" 2>&1; echo rc=\$? >> \"\$OUT\""' >/dev/null
-check "a shell whose command text names the agent is not the tick" 'grep -q "^ERROR: no ancestor in TICK_AGENT_EXES" "$OUT" && grep -qx "rc=1" "$OUT"' "$(cat "$OUT")"
+agent "$H/other"
+check "a slot file of another state directory records no tick here" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES="codex agent-a" run_as agent-a '(exec -a codex bash -c "echo \$\$ > \"$H/inner\"; \"\$TP\" > \"\$OUT\"; true")'
-check "the nearest listed ancestor wins" '[ "$(cat "$OUT")" = "$(cat "$H/inner")" ]' "out=$(cat "$OUT") inner=$(cat "$H/inner")"
+RECORD_SKEW=-1 agent "$H/state"
+check "a slot file whose start time differs, as a reused pid's does, records no tick" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-(exec -a renamed "$H/agent-b" -c 'echo $$ > "$0"; TICK_AGENT_EXES=agent-b "$TP" > "$OUT"; true' "$H/pid")
-check "an ancestor whose executable is a listed agent is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+RECORD_BOOT=00000000-0000-0000-0000-000000000000 agent "$H/state"
+check "a slot file from another boot records no tick" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES=agent-a:-p run_as agent-a '"$TP" > "$OUT" 2>&1'
-check "an entry with an argument refuses another first argument" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+rm -f "$H"/state/locks/slot*.tick
+bash -c 'echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
+check "without a slot file no shell here is the tick" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ] && ! grep -qx "$(cat "$H/pid")" "$OUT"' "out=$(cat "$OUT")"
 
-# bash's argv[1] here is -c, as an interactive `claude` has no -p.
-(unset TICK_AGENT_EXES; run_as claude '"$TP" > "$OUT" 2>&1')
-check "by default an interactive claude is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# A tool runner that clears its environment changes nothing: no environment is read.
+RECORD_IN=$H/state bash -c 'eval "$RECORD"; echo $$ > "$H/pid"; env -i TP="$TP" OUT="$OUT" HARNESS_STATE="$HARNESS_STATE" bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
+check "a tool shell with a cleared environment still finds its tick" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-# bash -p only skips the startup files here; it makes argv[1] -p.
-(unset TICK_AGENT_EXES; exec -a claude bash -p -c 'echo $$ > "$0"; "$TP" > "$OUT"; true' "$H/pid")
-check "by default claude -p is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# A non-dumpable agent: its environ and fd cannot be read, its stat can. Its tool shell waits for the
+# runner to record it, as a tool call comes after the agent started.
+rm -f "$H"/state/locks/slot*.tick
+"$H/nodump" 'until [ -s "$H/state/locks/slot1.tick" ]; do sleep 0.05; done; cat /proc/$PPID/environ >/dev/null 2>&1 && echo readable > "$H/environ"; "$TP" > "$OUT" 2>&1' 1 &
+nd=$!
+sleep 0.2
+RECORD_IN=$H/state bash -c 'stat=$(cat /proc/'"$nd"'/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s codex m work\n" '"$nd"' ${f[19]} $(cat /proc/sys/kernel/random/boot_id) > "$RECORD_IN/locks/slot1.tick"'
+wait "$nd"
+check "a non-dumpable agent, whose environment no one may read, is the tick" \
+    '[ "$(cat "$OUT")" = "$nd" ] && [ ! -e "$H/environ" ]' "out=$(cat "$OUT") pid=$nd environ=$(cat "$H/environ" 2>/dev/null)"
 
-# bash runs the script file named exec, so the process reads as `codex exec`.
-printf '%s\n' 'echo $$ > "$H/pid"; "$TP" > "$OUT" 2>&1; true' > "$H/exec"
-(unset TICK_AGENT_EXES; cd "$H" && exec -a codex bash exec)
-check "by default codex exec is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
-(export TICK_AGENT_EXES="claude:-p codex:exec"; cd "$H" && exec -a codex bash exec)
-check "codex exec is the tick once codex:exec is listed" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# A tool child that outlives the tick is reparented away from it: it is no part of any tick.
+rm -f "$OUT"
+RECORD_IN=$H/state bash -c 'eval "$RECORD"; echo $$ > "$H/pid"; nohup bash -c "sleep 0.5; \"\$TP\" > \"\$OUT\" 2>&1; echo rc=\$? >> \"\$OUT\"" >/dev/null 2>&1 & true'
+for _ in $(seq 100); do grep -q "^rc=" "$OUT" 2>/dev/null && break; sleep 0.05; done
+check "a nohup'd tool child that outlives its tick finds no tick" \
+    '! grep -qx "$(cat "$H/pid")" "$OUT" && grep -q "^rc=" "$OUT"' "out=$(cat "$OUT" 2>/dev/null) pid=$(cat "$H/pid")"
+
+# A symlinked slot file is not the runner's, whatever it points at.
+RECORD_IN=$H/other bash -c 'eval "$RECORD"; ln -s "$H/other/locks/slot1.tick" "$H/state/locks/slot2.tick"; echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
+check "a symlinked slot file records no tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+rm -f "$H"/state/locks/slot*.tick "$H"/other/locks/slot*.tick
+
+# On a fleet device fleetd records the agent it starts in the file FLEET_SESSION_TICK names.
+export SESSION_TICK="$H/session/tick"
+mkdir -p "$H/session"
+export STAMP='stat=$(cat /proc/$$/stat); read -ra f <<<"${stat##*) }"; printf "%s %s %s\n" $$ ${f[19]} $(cat /proc/sys/kernel/random/boot_id) > "$SESSION_TICK"'
+bash -c 'eval "$STAMP"; echo $$ > "$H/pid"; FLEET_SESSION=d-1-abc FLEET_SESSION_TICK="$SESSION_TICK" bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
+check "the agent fleetd's session file records is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+mv "$SESSION_TICK" "$H/session/real"; ln -s "$H/session/real" "$SESSION_TICK"
+bash -c 'echo $$ > "$H/pid"; FLEET_SESSION=d-1-abc FLEET_SESSION_TICK="$SESSION_TICK" bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true'
+check "a symlinked session file records no tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+rm -f "$H/session/"*
+# A shell that names itself fleetd and sets FLEET_SESSION is no tick without fleetd's record.
+cp "$(command -v bash)" "$H/fleetd"
+cat > "$H/spoof.sh" <<'EOF'
+FLEET_SESSION=forged bash -c 'echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; echo rc=\$? >> \"\$OUT\""; true'
+true
+EOF
+"$H/fleetd" "$H/spoof.sh"
+check "a renamed bash under a forged FLEET_SESSION finds no tick" \
+    'grep -qx "rc=1" "$OUT" && ! grep -qx "$(cat "$H/pid")" "$OUT"' "$(cat "$OUT") pid=$(cat "$H/pid")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

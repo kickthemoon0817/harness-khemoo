@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
-use super::collector::{Collector, Meta, Source, USAGE_THRESHOLDS, describe_io, lock};
-use super::files::{read_tail, read_text, read_text_or_empty};
+use super::collector::{Collector, Meta, Source, lock};
+use super::files::{read_tail, read_text_or_empty};
 use super::flow::FlowInputs;
 use super::models::{
     AllocatorLine, HostHealthRow, LeaseSlot, LeaseStatus, MachineProbe, TickProcess,
@@ -219,7 +219,7 @@ impl Collector {
             now,
         });
         self.flow_tracker.update_in_place(&mut flow, now);
-        let live_standard_ticks = ticks.iter().filter(|tick| tick.lane != "landing").count();
+        let live_standard_ticks = ticks.iter().filter(|tick| tick.kind != "landing").count();
         let last_allowed = last_allocator.and_then(|line| {
             super::text::optional_int(line.fields.get("allowed").map_or("", String::as_str))
         });
@@ -228,7 +228,7 @@ impl Collector {
                 i64::try_from(live_standard_ticks).unwrap_or(i64::MAX) < allowed
             })
             && !paused.paused
-            && usage["allowed_band"] != "none";
+            && usage["pool_cap"].as_u64().is_some_and(|cap| cap > 0);
 
         let tick_views: Vec<Value> = ticks
             .iter()
@@ -295,7 +295,7 @@ impl Collector {
                 "waiting_count": waiting_count,
                 "waiting_count_from_failing_read": github_failing,
                 "queue_label": self.config.labels.queue,
-                "lane_model": self.config.lane_model,
+                "lane_model": self.setting_or_empty("LANE_MODEL"),
                 "labels": to_value(&self.config.labels),
             },
             "usage": usage,
@@ -698,71 +698,27 @@ impl Collector {
         })
     }
 
-    /// The usage cache placed against the allocator's cut points: percentages, reset times, age,
-    /// staleness and each window's band (full, half, one, none).
+    /// Each agent's usage windows and caps and the pool's cap, as `harness usage` weighs them,
+    /// never refreshed here: a fetch command is the launcher's to run.
     fn usage_view(&self, now: f64) -> Value {
-        let thresholds = USAGE_THRESHOLDS;
-        let path = &self.config.usage_cache;
-        let reading = read_text(path)
-            .map_err(|error| describe_io(&error, path))
-            .and_then(|text| parsers::parse_usage_cache(&text));
-        let reading = match reading {
-            Ok(reading) => reading,
+        let lookup = |key: &str| self.usage_setting(key);
+        let pool = match crate::usage::pool(&lookup) {
+            Ok(pool) => pool,
             Err(error) => {
-                return json!({"available": false, "error": error, "thresholds": to_value(&thresholds), "stale": true});
+                return json!({"available": false, "error": self.describe(&error), "agents": [], "cooling": []});
             }
         };
-        let age_s = age(reading.taken_at_epoch, now);
-        #[allow(clippy::cast_precision_loss)]
-        let stale = age_s.is_none_or(|age| age as f64 > self.config.usage_max_age_s);
-        #[allow(clippy::cast_precision_loss)]
-        let band = |percent: Option<f64>, half: i64, one: i64, none: i64| {
-            percent.map(|percent| {
-                if percent >= thresholds.ceiling_pct as f64 || percent >= none as f64 {
-                    "none"
-                } else if percent >= one as f64 {
-                    "one"
-                } else if percent >= half as f64 {
-                    "half"
-                } else {
-                    "full"
-                }
-            })
-        };
-        let five = band(
-            reading.five_hour_pct,
-            thresholds.five_half_at,
-            thresholds.five_one_at,
-            thresholds.five_none_at,
-        );
-        let week = band(
-            reading.weekly_pct,
-            thresholds.week_half_at,
-            thresholds.week_one_at,
-            thresholds.week_none_at,
-        );
-        let order = ["full", "half", "one", "none"];
-        let rank = |band: &str| order.iter().position(|known| *known == band).unwrap_or(0);
-        let allowed = if stale {
-            None
-        } else {
-            [five, week]
-                .into_iter()
-                .flatten()
-                .max_by_key(|band| rank(band))
-        };
-        let mut view = to_value(&reading);
-        for (key, value) in [
-            ("available", json!(true)),
-            ("error", Value::Null),
-            ("age_s", json!(age_s)),
-            ("stale", json!(stale)),
-            ("five_hour_band", json!(five)),
-            ("weekly_band", json!(week)),
-            ("allowed_band", json!(allowed.unwrap_or("none"))),
-            ("thresholds", to_value(&thresholds)),
-        ] {
-            view[key] = value;
+        let mut view = to_value(&pool);
+        view["available"] = json!(true);
+        view["error"] = Value::Null;
+        if let Some(agents) = view["agents"].as_array_mut() {
+            for agent in agents {
+                #[allow(clippy::cast_precision_loss)]
+                let taken = agent["taken_ms"].as_u64().map(|ms| ms as f64 / 1000.0);
+                agent["age_s"] = json!(age(taken, now));
+                let name = agent["agent"].as_str().unwrap_or_default().to_owned();
+                agent["cooling"] = json!(pool.cooling.contains(&name));
+            }
         }
         view
     }

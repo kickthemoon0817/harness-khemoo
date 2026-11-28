@@ -1,10 +1,11 @@
-# Autonomous GitHub issue harness for Claude Code
+# Autonomous GitHub issue harness for coding-agent CLIs
 
-The harness works a GitHub issue queue on its own. A tick claims one labelled issue, fixes it
-in its own worktree, verifies the fix, and opens a pull request that carries the evidence. It
-either lands the PR or leaves it for review. Cron fires a bash launcher every couple of minutes.
-The launcher sizes the pool from your Claude usage and the queue depth, and each tick is one
-`claude -p` run. Nothing runs as a daemon and there is no database: all durable state lives in
+The harness works a GitHub issue queue on its own, with Claude Code, Codex or Gemini CLI. A tick
+claims one labelled issue, fixes it in its own worktree, verifies the fix, and opens a pull request
+that carries the evidence. It either lands the PR or leaves it for review. Cron fires a bash
+launcher every couple of minutes. The launcher sizes the pool from each agent's usage windows and
+the queue depth, and each tick is one non-interactive agent run, on the best model of one priority
+list across agents. Nothing runs as a daemon and there is no database: all durable state lives in
 the issues and PRs. The core knows nothing about your project. Your build, tests, rules and
 infrastructure live in an instance directory that you own.
 
@@ -12,11 +13,12 @@ infrastructure live in an instance directory that you own.
 
 - Cron runs `bin/tick.sh`. It exits at once when every slot is held or the instance holds it,
   so most firings cost nothing.
-- The launcher spawns runners up to the width both usage windows allow (5-hour and weekly),
-  but never more than there are claimable issues. A runner takes a free slot (an `flock`ed
-  file) or exits quietly.
+- The launcher spawns runners up to the width the agents' usage windows allow (for Claude, its
+  5-hour and weekly windows), but never more than there are claimable issues. A runner takes a
+  free slot (an `flock`ed file) or exits quietly.
 - The runner composes the prompt (a lane line, `prompts/tick-core.md`, then the instance's
-  `prompts/tick.md`) and runs `claude -p` on the best model that is not cooling down.
+  `prompts/tick.md`) and pipes it to the agent CLI of the best `TICK_MODELS` entry
+  (`agent:model`) that is not cooling down and whose agent has room under its windows.
 - The tick claims an issue (`libexec/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
   worktree under `WORKTREE_ROOT`, lints every body with `"$HARNESS_BIN" lint` before posting
   it, and ends with a summary. It stays inside its budget and the usage ceiling (`libexec/usage-ok.sh`).
@@ -44,8 +46,9 @@ gh label create ai:wip --description "Claimed by a running tick"
 crontab -e   # */2 * * * * /home/you/harness/bin/tick.sh
 ```
 
-Label an issue `ai` and the next firing picks it up. The harness starts nothing until it has a
-fresh usage reading (`USAGE_CACHE`, see `instance/harness.env`). Pause it with
+Label an issue `ai` and the next firing picks it up. An agent starts nothing until it has a
+fresh usage reading: Claude's usage cache, Codex's session rollouts, or the source
+`USAGE_SOURCE_<agent>` names (see `instance/harness.env`). Pause it with
 `touch state/paused` or by commenting out the cron line. Ticks already running finish their claim.
 
 Optional cron lines: `*/30 * * * * ~/harness/bin/pr-sweep.sh` closes PRs whose issue closed
@@ -57,9 +60,9 @@ elsewhere, and `0 * * * * ~/harness/bin/worktree-gc.sh --apply` removes worktree
 |---|---|
 | `bin/` (core) | what cron and operators run: `tick.sh`, `pr-sweep.sh`, `worktree-gc.sh`, `dashboard.sh` |
 | `libexec/` (core) | what the launcher and ticks call: claims, the merge lock, the usage check, the lint, the dashboard server |
-| `lib/` (core) | shell sourced by the scripts: loading the instance, the usage windows |
+| `lib/` (core) | shell sourced by the scripts: loading the instance |
 | `prompts/` (core) | the rules every tick follows |
-| `crates/` (core) | the Rust workspace: `fleet`, `fleetd` and their protocol ([`docs/FLEET.md`](docs/FLEET.md)) |
+| `crates/` (core) | the Rust workspace: `harness` (the lint, the queue count, live ticks, usage windows, the dashboard), and `fleet`, `fleetd` and their protocol ([`docs/FLEET.md`](docs/FLEET.md)) |
 | `instance/harness.env` | required: paths, labels, pool sizing, models, the dashboard's optional sources |
 | `instance/prompts/tick.md` | required: the installation's mission, appended to the core prompt |
 | `instance/prompts/` | optional: `runbook.md`, `glossary.md`, `public-record.md`, which the tick reads |
@@ -85,8 +88,8 @@ the instance's devices, run queues and build locks when `harness.env` configures
 
 [Fleet](docs/FLEET.md) watches devices and the agent sessions on them, and runs agents there. It is
 optional. With `FLEET_DISPATCH=1` in `harness.env`, each tick runs through `fleet dispatch` on the
-device `FLEET_DEVICE` names (`auto` picks one) and with the agent `TICK_AGENT` (default `claude`),
-instead of a local `claude -p`. With `FLEET_STATUS_CMD="fleet status --json"`, the dashboard shows a
+device `FLEET_DEVICE` names (`auto` picks one), with each entry's agent as the adapter, instead of
+a local agent CLI. With `FLEET_STATUS_CMD="fleet status --json"`, the dashboard shows a
 Devices and an Agent sessions panel. Unset, the harness runs on one host as above.
 `templates/instance/fleet.toml.example` and `fleetd.toml.example` are starting points;
 [`docs/INSTANCE.md`](docs/INSTANCE.md#fleet) gives the keys.
@@ -99,10 +102,11 @@ tests/run.sh
 
 It builds the `harness` binary (unless `HARNESS_BIN` names one) and runs every `tests/test_*.sh`,
 plus any suites under `instance/tests/`. The shell suites need Linux: bash 4+, `flock`, `setsid` and
-`lslocks` (util-linux), `pgrep` (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git`
-and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
-reaped. The Rust tests (`cargo test`) cover the lint, the queue count, the dashboard and fleet; they
-run anywhere and leave out the cases that need `/proc` and `lslocks` where those are missing.
+`lslocks` (util-linux), `pgrep` (procps), GNU `stat`, `date` and `env` (coreutils 8.31 or later),
+a C compiler (`cc`), `bc`, `zstd`, `jq`, `curl`, `git` and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
+reaped. The Rust tests (`cargo test`) cover the lint, the queue count, live ticks, usage windows, the
+dashboard and fleet; they run anywhere and leave out the cases that need
+`/proc` and `lslocks` where those are missing.
 
 ## Safety posture
 

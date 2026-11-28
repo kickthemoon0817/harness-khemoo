@@ -151,7 +151,7 @@ pub fn core_rules(
     )?);
     rules.push(Rule::core(
         "harness-file",
-        r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage-ok|pr-sweep|worktree-gc|public-record-lint|dashboard)\.(?:sh|py)\b|\blib/(?:instance|usage)\.sh\b|\bstate/(?:locks|logs|paused)\b|\bharness (?:lint|claimable)\b",
+        r"\b(?:claim|claimable|merge-lock|tick-pid|tick|usage-ok|pr-sweep|worktree-gc|public-record-lint|dashboard)\.(?:sh|py)\b|\blib/instance\.sh\b|\bstate/(?:locks|logs|paused)\b|\bharness (?:lint|claimable)\b",
         "a harness file: name the repository command that does the same",
         true,
         false,

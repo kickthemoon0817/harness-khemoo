@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Runs a tick through the real fleet and fleetd: bin/tick.sh in runner mode with FLEET_DISPATCH=1
 # dispatches to a fleetd on a unix socket, whose agent adapter is a script that records its stdin and
-# hits a usage limit on the first model. Then the dashboard reads the same fleet's status. Needs cargo
+# what the harness sees of it, and hits a usage limit on the first model. Then the dashboard reads the
+# same fleet's status. Needs cargo
 # to build the workspace; without it the suite is skipped, except in CI, where that is a failure.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# A suite run inside a tick must not hand its marker to fleetd or the runner.
+unset HARNESS_TICK FLEET_SESSION
 if ! command -v cargo >/dev/null 2>&1; then
     if [ -n "${CI:-}" ]; then echo "FAIL cargo is not installed, and CI must run this suite"; exit 1; fi
     echo "SKIP test_fleet_e2e.sh: cargo is not installed, so fleet and fleetd cannot be built"
@@ -21,13 +24,16 @@ cleanup() { [ -n "$daemon" ] && kill "$daemon" 2>/dev/null; rm -rf "$H"; }
 trap cleanup EXIT
 mkdir -p "$H/bin" "$H/prompts" "$H/instance/prompts" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin"
 mkdir -p "$H/lib"
-cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"
+cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/instance.sh" "$H/lib/"
 echo "Core rules." > "$H/prompts/tick-core.md"
 cp "$here/tests/fixtures/instance/prompts/tick.md" "$H/instance/prompts/tick.md"
 git -C "$H/target" init -q
 cat > "$H/agent.sh" <<'EOF'
 printf '=== %s\n' "$1" >> "$AGENT_RECORD"
 cat >> "$AGENT_RECORD"
+# The tick a claim made here would belong to, and the ticks the hub counts while this one runs.
+printf 'self=%s tick=%s\n' "$$" "$("$TICK_PID" 2>&1)" >> "$AGENT_SEEN"
+"$HARNESS_BIN" ticks --state "$HUB_STATE" >> "$AGENT_SEEN" 2>&1
 if [ "$1" = model-a ]; then
     echo "You've hit your usage limit · resets 5pm"
     exit 1
@@ -56,6 +62,10 @@ max_concurrent = 2
 
 [adapters.fake.env]
 AGENT_RECORD = "$H/agent-stdin.txt"
+AGENT_SEEN = "$H/agent-seen.txt"
+TICK_PID = "$here/libexec/tick-pid.sh"
+HARNESS_BIN = "$HARNESS_BIN"
+HUB_STATE = "$H/state"
 EOF
 cat > "$H/instance/fleet.toml" <<EOF
 [devices.dev-a]
@@ -66,8 +76,8 @@ cat > "$H/instance/harness.env" <<EOF
 TARGET_REPO=$H/target
 WORKTREE_ROOT=$H/worktrees
 GH_REPO=example-org/example-repo
-CLAUDE_FLAGS=
 TICK_AGENT=fake
+USAGE_SOURCE_fake=none
 TICK_MODELS="model-a model-b"
 FLEET_DISPATCH=1
 FLEET_BIN=$FLEET
@@ -85,7 +95,7 @@ check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL
 
 check "fleetd is up" '[ -S "$H/fleetd/fleetd.sock" ]' "$(cat "$H/fleetd.log")"
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH"
-unset HARNESS_INSTANCE_DIR HARNESS_ENV FLEET_CONFIG
+unset HARNESS_INSTANCE_DIR HARNESS_ENV FLEET_CONFIG HARNESS_STATE
 "$H/bin/tick.sh" runner 1 0
 log=$(ls "$H"/state/logs/tick-*-slot1.log 2>/dev/null | head -1)
 record="$H/agent-stdin.txt"
@@ -97,8 +107,16 @@ check "the tick log has the agent's output and fleet's exit status" \
     'grep -q "agent tick on model-b done" "$log" && grep -q "^fleet: dev-a: session d-" "$log" && grep -q "exit=1 .*model=model-a" "$log" && grep -q "exit=0 .*model=model-b" "$log"' \
     "$(cat "$log" 2>/dev/null)"
 check "a usage-limit line cools the model down" \
-    '[ -f "$H/state/model-cooldown/model-a" ] && [ ! -f "$H/state/model-cooldown/model-b" ] && grep -q "model-a hit its usage limit" "$H/state/logs/allocator.log"' \
+    '[ -f "$H/state/model-cooldown/fake:model-a" ] && [ ! -f "$H/state/model-cooldown/fake:model-b" ] && grep -q "fake:model-a hit its usage limit" "$H/state/logs/allocator.log"' \
     "$(ls "$H/state/model-cooldown" 2>/dev/null); $(cat "$H/state/logs/allocator.log" 2>/dev/null)"
+
+seen="$H/agent-seen.txt"
+check "on the device, the dispatched agent is the tick a claim belongs to" \
+    '[ "$(grep -Ec "^self=([0-9]+) tick=\1$" "$seen")" -eq 2 ]' \
+    "$(cat "$seen" 2>/dev/null)"
+check "on the hub, harness ticks counts the waiting fleet dispatch as the tick, on each model" \
+    'grep -Eq "^[0-9]+ [0-9]+ 1 fake model-a work$" "$seen" && grep -Eq "^[0-9]+ [0-9]+ 1 fake model-b work$" "$seen"' \
+    "$(cat "$seen" 2>/dev/null)"
 
 snapshot=$("$HARNESS_BIN" dashboard --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
     --remote-interval 0 --claimable-interval 0 --once 2>"$H/dashboard.err")

@@ -101,17 +101,24 @@ pub struct AllocatorLine {
     pub kind: String,
     pub slot: Option<String>,
     pub fields: BTreeMap<String, String>,
+    /// Each agent's cap and windows the line names, `claude=2[five_hour:10%,weekly:68%]`.
+    pub usage: Vec<AgentUsageLine>,
     pub text: String,
 }
 
-/// The usage windows from `~/.claude/usage-cache.json`.
-#[derive(Clone, Debug, Serialize)]
-pub struct UsageReading {
-    pub five_hour_pct: Option<f64>,
-    pub weekly_pct: Option<f64>,
-    pub five_hour_resets_at: Option<String>,
-    pub weekly_resets_at: Option<String>,
-    pub taken_at_epoch: Option<f64>,
+/// One agent's part of an allocator line: its cap and windows, none when it read `unknown`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AgentUsageLine {
+    pub agent: String,
+    pub cap: i64,
+    pub windows: Option<Vec<UsageWindowLine>>,
+}
+
+/// One window of an allocator line.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageWindowLine {
+    pub name: String,
+    pub used_pct: f64,
 }
 
 /// One `state/locks/claim.<issue>` file: `<issue> <pid> <since>`.
@@ -131,13 +138,15 @@ pub struct ProcessInfo {
     pub argv: Vec<String>,
 }
 
-/// A live `claude -p` tick and the issue it works.
+/// A live tick, of any agent, and the issue it works.
 #[derive(Clone, Debug, Serialize)]
 pub struct TickProcess {
     pub pid: i64,
+    pub agent: String,
     pub model: String,
     pub model_label: String,
-    pub lane: String,
+    /// `work`, `lane` or `landing`, as the tick's marker names it.
+    pub kind: String,
     pub age_s: i64,
     pub slot: Option<i64>,
     pub log: Option<String>,

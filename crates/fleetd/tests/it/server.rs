@@ -397,7 +397,18 @@ async fn the_child_gets_a_cleared_environment_and_sigterm_exits_cleanly() {
     // The shell adds a few of its own.
     let shell: BTreeSet<&str> = ["PWD", "SHLVL", "_", "OLDPWD"].into();
     let names: BTreeSet<&str> = out.lines().filter(|n| !shell.contains(n)).collect();
-    assert_eq!(names, ["FLEET_TEST_ALLOWED", "HOME", "PATH"].into());
+    assert_eq!(
+        names,
+        [
+            "FLEET_ADAPTER",
+            "FLEET_SESSION",
+            "FLEET_SESSION_TICK",
+            "FLEET_TEST_ALLOWED",
+            "HOME",
+            "PATH"
+        ]
+        .into()
+    );
 
     let pid = rustix::process::Pid::from_child(&daemon);
     rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();

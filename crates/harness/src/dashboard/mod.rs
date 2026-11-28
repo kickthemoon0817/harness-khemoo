@@ -4,7 +4,7 @@
 //! auto-refreshing page (`/`) and as JSON (`/api/state`).
 //!
 //! The config file is `$HARNESS_ENV`, else `$HARNESS_INSTANCE_DIR/harness.env` (default `<harness
-//! home>/instance`). From it the dashboard reads only [`ENV_KEYS`]; `GH_TOKEN` reaches `gh` through
+//! home>/instance`). From it the dashboard reads only the keys [`wanted_key`] names; `GH_TOKEN` reaches `gh` through
 //! its environment and is never shown. A panel whose key is unset is left off the page.
 //! `HARNESS_STATE`, `USAGE_CACHE` and `WORKTREE_ROOT` in the environment win over the file's. An empty
 //! `GH_REPO` is derived from `TARGET_REPO`'s origin by lib/instance.sh, as the scripts derive it.
@@ -62,7 +62,7 @@ const LABEL_KEYS: [(&str, &str); 8] = [
     ("LOW_LABEL", "low"),
 ];
 
-/// The only keys read from harness.env.
+/// The keys read from harness.env besides [`USAGE_KEYS`] and [`USAGE_PREFIXES`].
 pub const ENV_KEYS: [&str; 29] = [
     "GH_TOKEN",
     "GH_REPO",
@@ -95,6 +95,24 @@ pub const ENV_KEYS: [&str; 29] = [
     "LOW_LABEL",
 ];
 
+/// The model list and pool keys the usage windows are weighed with, as `harness usage` reads them.
+pub const USAGE_KEYS: [&str; 5] = [
+    "TICK_MODELS",
+    "TICK_AGENT",
+    "MAX_SLOTS",
+    "TICK_WIDTH",
+    "MODEL_COOLDOWN_S",
+];
+/// Every key with one of these prefixes is a usage or agent setting.
+pub const USAGE_PREFIXES: [&str; 2] = ["USAGE_", "AGENT_"];
+
+/// True for a key the dashboard reads from harness.env.
+pub fn wanted_key(key: &str) -> bool {
+    ENV_KEYS.contains(&key)
+        || USAGE_KEYS.contains(&key)
+        || USAGE_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
 const URL_FILE_NAME: &str = "dashboard.url";
 
 /// A repeated option takes its last value: bin/dashboard.sh passes its own `--port` before the
@@ -120,7 +138,7 @@ pub struct Args {
     /// Label of every issue the queue panels list.
     #[arg(long, default_value = "ai")]
     all_label: String,
-    /// Usage reading (default: `$USAGE_CACHE`, else `USAGE_CACHE` from harness.env, else ~/.claude/usage-cache.json).
+    /// Claude's usage cache (default: `$USAGE_CACHE`, else `USAGE_CACHE` from harness.env, else ~/.claude/usage-cache.json).
     #[arg(long)]
     usage_cache: Option<PathBuf>,
     /// gh executable.
@@ -317,7 +335,7 @@ impl App {
         let harness_home = resolve(&harness_home);
         let instance = instance_dir(&harness_home, lookup);
         let values: HashMap<String, String> =
-            env::read_keys(&env_path(&harness_home, lookup), &ENV_KEYS);
+            env::read_keys(&env_path(&harness_home, lookup), wanted_key);
         let value = |key: &str| values.get(key).map_or("", String::as_str);
         let mut command_placeholders = vec![
             ("HARNESS_HOME", harness_home.display().to_string()),
@@ -347,11 +365,27 @@ impl App {
                 .collect())
         };
         let state_setting = path_setting("HARNESS_STATE");
-        let harness_state = if state_setting.is_empty() {
-            resolve(&harness_home.join("state"))
+        let state_as_named = if state_setting.is_empty() {
+            args.harness_home
+                .clone()
+                .unwrap_or_else(|| harness_home.clone())
+                .join("state")
         } else {
-            resolve(&expand_user(&state_setting, lookup))
+            expand_user(&state_setting, lookup)
         };
+        let harness_state = resolve(&state_as_named);
+        // The model list and usage keys, expanded as a path key is, for `harness usage`'s reading.
+        let mut usage_settings: Vec<(String, String)> = values
+            .iter()
+            .filter(|(key, _)| {
+                USAGE_KEYS.contains(&key.as_str())
+                    || key == &"LANE_MODEL"
+                    || USAGE_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+            })
+            .filter(|(key, _)| key.as_str() != "USAGE_CACHE")
+            .map(|(key, raw)| (key.clone(), env::expand(raw, &path_placeholders)))
+            .collect();
+        usage_settings.sort();
         let github_token = value("GH_TOKEN").to_owned();
         let repo = args
             .repo
@@ -411,6 +445,16 @@ impl App {
             .map_or_else(|| harness_state.join("dashboard"), |dir| resolve(&dir));
         let mut config = Config::new(harness_home, data_dir);
         config.harness_state = Some(harness_state);
+        if let Some((_, seconds)) = usage_settings
+            .iter()
+            .find(|(key, _)| key == "MODEL_COOLDOWN_S")
+        {
+            config.model_cooldown_s = seconds
+                .trim()
+                .parse()
+                .map_err(|_| format!("MODEL_COOLDOWN_S: '{seconds}' is not a number"))?;
+        }
+        config.usage_settings = usage_settings;
         config.repo = repo;
         config.harness_bin = bin;
         config.title = if value("DASHBOARD_TITLE").is_empty() {

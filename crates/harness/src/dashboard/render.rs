@@ -10,8 +10,7 @@ use std::fmt::Write as _;
 
 use serde_json::Value;
 
-use super::collector::wall_clock;
-use super::parsers::model_label;
+use super::collector::{entry_label, wall_clock};
 use super::snapshot::SOURCE_ORDER;
 use super::text::{clip, float_g, float_repr, optional_int, parse_iso, sha256_hex, utc};
 
@@ -407,7 +406,7 @@ fn header(snapshot: &Value) -> String {
     };
     let models: Vec<String> = list(&harness["tick_models"])
         .iter()
-        .map(|model| model_label(s(model)))
+        .map(|entry| entry_label(s(entry)))
         .collect();
     let cooling: String = list(&harness["cooling_models"])
         .iter()
@@ -426,7 +425,7 @@ fn header(snapshot: &Value) -> String {
     let lane = if truthy(&harness["lane_model"]) && !lane_label.is_empty() {
         format!(
             r#"<span class="flag sub">lane: {} for {}</span>"#,
-            escape(&model_label(s(&harness["lane_model"]))),
+            escape(&entry_label(s(&harness["lane_model"]))),
             escape(lane_label)
         )
     } else {
@@ -466,7 +465,38 @@ fn header(snapshot: &Value) -> String {
     )
 }
 
-/// The two usage windows as meters marked where the allocator cuts the pool.
+/// A window's reset: Unix seconds or an ISO time, as the source gives it.
+fn reset_text(resets: &Value) -> String {
+    match resets {
+        #[allow(clippy::cast_precision_loss)]
+        Value::Number(seconds) => seconds.as_u64().map_or_else(
+            || "-".to_owned(),
+            |seconds| clock_epoch(seconds as f64, false),
+        ),
+        Value::String(_) => clock(resets, false),
+        _ => "-".to_owned(),
+    }
+}
+
+/// How fresh an agent's reading is, as a pill.
+fn freshness_pill(agent: &Value) -> String {
+    let reading = &agent["reading"];
+    let age = duration(&agent["age_s"]);
+    match s(&reading["state"]) {
+        "fresh" => format!(r#"<span class="sub">read {age} ago</span>"#),
+        "holding" => pill("info", &format!("holding, read {age} ago")),
+        "stale" => pill("warning", &format!("stale {age}")),
+        "unmetered" => pill("idle", "unmetered"),
+        "unreadable" => pill(
+            "critical",
+            &format!("unreadable: {}", s(&reading["detail"])),
+        ),
+        other => pill("idle", other),
+    }
+}
+
+/// Each agent's usage windows as meters marked at their steps, the ticks each allows, and the
+/// pool's cap.
 fn usage_block(usage: &Value) -> String {
     if !truthy(&usage["available"]) {
         return format!(
@@ -474,78 +504,89 @@ fn usage_block(usage: &Value) -> String {
             e(&usage["error"])
         );
     }
-    let thresholds = &usage["thresholds"];
     let mut rows = String::new();
-    for (label, percent_key, band_key, resets_key, prefix) in [
-        (
-            "5-hour",
-            "five_hour_pct",
-            "five_hour_band",
-            "five_hour_resets_at",
-            "five",
-        ),
-        (
-            "weekly",
-            "weekly_pct",
-            "weekly_band",
-            "weekly_resets_at",
-            "week",
-        ),
-    ] {
-        let cuts: Vec<&Value> = ["half_at", "one_at", "none_at"]
-            .iter()
-            .map(|suffix| &thresholds[format!("{prefix}_{suffix}")])
-            .collect();
-        let ticks: String = cuts
-            .iter()
-            .copied()
-            .chain(std::iter::once(&thresholds["ceiling_pct"]))
-            .filter_map(Value::as_f64)
-            .map(|cut| format!(r#"<span class="tick" style="left:{cut:.0}%"></span>"#))
-            .collect();
-        let band = &usage[band_key];
-        let severity = match band.as_str() {
-            Some("half") => "warning",
-            Some("one") => "serious",
-            Some("none") => "critical",
-            None if band.is_null() => "none",
-            _ => "",
-        };
-        let fill_width = usage[percent_key].as_f64().unwrap_or(0.0).min(100.0);
-        let fill = format!(r#"<b class="{severity}" style="width:{fill_width:.0}%"></b>"#);
-        let cut_text: Vec<String> = cuts.iter().map(|cut| t(cut)).collect();
-        let resets = &usage[resets_key];
-        let resets_text = if truthy(resets) {
-            format!(" &middot; resets {}", clock(resets, false))
+    for agent in list(&usage["agents"]) {
+        let name = e(&agent["agent"]);
+        let cooling = if truthy(&agent["cooling"]) {
+            format!(" {}", pill("warning", "every entry cooling"))
         } else {
             String::new()
         };
-        write!(
-            rows,
-            concat!(
-                r#"<span class="sub">{label}</span><span class="meter" title="cuts the pool at {cuts} %; ceiling {ceiling} %">{fill}{ticks}</span>"#,
-                r#"<span class="num">{percent} &middot; {band} width{resets}</span>"#
-            ),
-            label = label,
-            cuts = cut_text.join(", "),
-            ceiling = t(&thresholds["ceiling_pct"]),
-            fill = fill,
-            ticks = ticks,
-            percent = percent(&usage[percent_key]),
-            band = escape(band.as_str().unwrap_or("?")),
-            resets = resets_text,
-        )
-        .ok();
+        let windows = list(&agent["windows"]);
+        if windows.is_empty() {
+            write!(
+                rows,
+                r#"<span class="sub">{name}</span><span class="meter"><b class="none"></b></span><span class="num">cap {} &middot; {}{cooling}</span>"#,
+                t(&agent["cap"]),
+                freshness_pill(agent)
+            )
+            .ok();
+            continue;
+        }
+        for (index, window) in windows.iter().enumerate() {
+            let steps: Vec<f64> = list(&window["steps"])
+                .iter()
+                .filter_map(Value::as_f64)
+                .collect();
+            let used = window["used_pct"].as_f64().unwrap_or(0.0);
+            let severity = match steps.as_slice() {
+                [_, _, none] if used >= *none => "critical",
+                [_, one, _] if used >= *one => "serious",
+                [half, _, _] if used >= *half => "warning",
+                _ => "",
+            };
+            let ticks: String = steps
+                .iter()
+                .map(|step| format!(r#"<span class="tick" style="left:{step:.0}%"></span>"#))
+                .collect();
+            let step_text: Vec<String> = list(&window["steps"]).iter().map(t).collect();
+            let resets = if window["resets_at"].is_null() {
+                String::new()
+            } else {
+                format!(" &middot; resets {}", reset_text(&window["resets_at"]))
+            };
+            let tail = if index == 0 {
+                format!(" &middot; {}{cooling}", freshness_pill(agent))
+            } else {
+                String::new()
+            };
+            write!(
+                rows,
+                concat!(
+                    r#"<span class="sub">{name} {window}</span><span class="meter" title="steps {steps} %">"#,
+                    r#"<b class="{severity}" style="width:{width:.0}%"></b>{ticks}</span>"#,
+                    r#"<span class="num">{percent} &middot; cap {cap}{resets}{tail}</span>"#
+                ),
+                name = name,
+                window = e(&window["name"]),
+                steps = step_text.join(", "),
+                severity = severity,
+                width = used.clamp(0.0, 100.0),
+                ticks = ticks,
+                percent = percent(&window["used_pct"]),
+                cap = t(&window["cap"]),
+                resets = resets,
+                tail = tail,
+            )
+            .ok();
+        }
     }
-    let stale = if truthy(&usage["stale"]) {
-        pill("warning", &format!("stale {}", duration(&usage["age_s"])))
-    } else {
-        format!(
-            r#"<span class="sub">read {} ago</span>"#,
-            duration(&usage["age_s"])
-        )
-    };
-    format!(r#"<span class="usage">{rows}</span>{stale}"#)
+    let pool = pill(
+        if usage["pool_cap"].as_u64().is_some_and(|cap| cap > 0) {
+            "info"
+        } else {
+            "warning"
+        },
+        // The launcher leaves out a lane-only agent while no lane tick is wanted, which this page
+        // cannot tell, so its cap is shown as the bound it is.
+        &format!(
+            "pool at most {} of {}, room for {}",
+            text_of(&usage["pool_cap"]),
+            text_of(&usage["width"]),
+            text_of(&usage["room"])
+        ),
+    );
+    format!(r#"<span class="usage">{rows}</span>{pool}"#)
 }
 
 fn meter_row(
@@ -1040,16 +1081,21 @@ fn ticks_panel(snapshot: &Value) -> String {
         } else {
             r#"<span class="err">issue unknown</span>"#.to_owned()
         };
-        let lane = s(&tick["lane"]);
-        let lane_level = match lane {
-            "model" => "serious",
+        let kind = s(&tick["kind"]);
+        let kind_level = match kind {
+            "lane" => "serious",
             "landing" => "info",
             _ => "good",
         };
-        let model_label = tick["model_label"].as_str().unwrap_or("?");
         let model_text = format!(
-            "{model_label}{}",
-            if lane == "landing" { " landing" } else { "" }
+            "{} {}{}",
+            s(&tick["agent"]),
+            tick["model_label"].as_str().unwrap_or("?"),
+            if kind == "work" {
+                String::new()
+            } else {
+                format!(" {kind}")
+            }
         );
         let doing = s(&tick["doing"]);
         let doing_cell = if doing.is_empty() {
@@ -1090,7 +1136,7 @@ fn ticks_panel(snapshot: &Value) -> String {
         write!(
             rows,
             r#"<tr><td>{issue_cell}</td><td>{}</td><td>{slot}</td><td>{}</td>{leases}<td>{doing_cell}</td><td class="sub">{} <span class="chip">{source}</span></td></tr>"#,
-            pill(lane_level, &model_text),
+            pill(kind_level, &model_text),
             duration(&tick["age_s"]),
             t(&tick["pid"])
         )
@@ -1708,21 +1754,34 @@ fn allocator_panel(snapshot: &Value) -> String {
     let mut rows = String::new();
     for line in list(&snapshot["health"]["allocator"]).iter().rev() {
         let fields = &line["fields"];
-        let mut summary: Vec<String> = [
-            "five",
-            "week",
-            "pct",
-            "allowed",
-            "busy",
-            "claimable",
-            "young",
-            "ready",
-            "spawning",
-        ]
-        .iter()
-        .filter(|key| !fields[**key].is_null())
-        .map(|key| format!("{key}={}", e(&fields[*key])))
-        .collect();
+        let mut summary: Vec<String> = list(&line["usage"])
+            .iter()
+            .map(|agent| {
+                let windows = match agent["windows"].as_array() {
+                    Some(windows) => windows
+                        .iter()
+                        .map(|window| format!("{}:{}%", e(&window["name"]), t(&window["used_pct"])))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    None => "unknown".to_owned(),
+                };
+                format!("{}={}[{windows}]", e(&agent["agent"]), t(&agent["cap"]))
+            })
+            .collect();
+        summary.extend(
+            [
+                "usage",
+                "allowed",
+                "busy",
+                "claimable",
+                "young",
+                "ready",
+                "spawning",
+            ]
+            .iter()
+            .filter(|key| !fields[**key].is_null())
+            .map(|key| format!("{key}={}", e(&fields[*key]))),
+        );
         if truthy(&line["claimable_unverified"]) {
             summary.push(pill("warning", "claimable unverified"));
         }

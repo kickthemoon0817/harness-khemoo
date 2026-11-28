@@ -264,7 +264,7 @@ impl FlowBuilder {
                 .collect();
             let tick = tick_by_issue.get(&number).copied();
             if let Some(tick) = tick {
-                chips.insert(0, tick.model_label.clone());
+                chips.insert(0, tick_name(tick));
             }
             #[allow(clippy::cast_precision_loss)]
             let mut card = FlowCard {
@@ -443,18 +443,18 @@ impl FlowBuilder {
                 card.label = format!("waiting for the {tag} compile lane");
                 card.detail = format!("{position} in line for {tag}");
             }
-        } else if let Some(tick) = tick.filter(|tick| tick.lane == "landing" || has(&labels.ready))
+        } else if let Some(tick) = tick.filter(|tick| tick.kind == "landing" || has(&labels.ready))
         {
             card.column = "landing";
             card.label = "landing".to_owned();
-            card.detail = format!("{} tick, {}", tick.model_label, minutes_text(tick.age_s));
+            card.detail = format!("{} tick, {}", tick_name(tick), minutes_text(tick.age_s));
         } else if tick.is_some() || reason.starts_with("claimed by live pid") {
             card.column = "claimed";
             card.label = "claimed".to_owned();
             card.detail = match tick {
                 Some(tick) => {
                     let mut detail =
-                        format!("{} tick, {}", tick.model_label, minutes_text(tick.age_s));
+                        format!("{} tick, {}", tick_name(tick), minutes_text(tick.age_s));
                     if let Some(doing) = tick.doing.as_deref().filter(|doing| !doing.is_empty()) {
                         detail.push_str(": ");
                         detail.push_str(doing);
@@ -653,6 +653,11 @@ impl FlowBuilder {
     }
 }
 
+/// A tick as a card names it: its agent and its model.
+fn tick_name(tick: &TickProcess) -> String {
+    format!("{} {}", tick.agent, tick.model_label)
+}
+
 fn queue_host(queue: &RunQueue) -> &str {
     queue
         .job_host
@@ -714,7 +719,7 @@ mod tests {
 
     fn tick(
         pid: i64,
-        lane: &str,
+        kind: &str,
         age_s: i64,
         slot: i64,
         issue: i64,
@@ -722,9 +727,10 @@ mod tests {
     ) -> TickProcess {
         TickProcess {
             pid,
+            agent: "claude".to_owned(),
             model: "claude-opus-5-5".to_owned(),
             model_label: "Opus 5.5".to_owned(),
-            lane: lane.to_owned(),
+            kind: kind.to_owned(),
             age_s,
             slot: Some(slot),
             log: None,
@@ -800,7 +806,7 @@ mod tests {
         Fixture {
             groups,
             ticks: vec![
-                tick(11, "standard", 600, 1, 2464, Some("sleep 30")),
+                tick(11, "work", 600, 1, 2464, Some("sleep 30")),
                 tick(12, "landing", 120, 2, 2201, None),
             ],
             queues: vec![

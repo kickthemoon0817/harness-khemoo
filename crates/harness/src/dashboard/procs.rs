@@ -1,18 +1,14 @@
-//! Finds the harness's live `claude -p` ticks in /proc and the issue each one works.
+//! Finds the harness's live ticks and the issue each one works.
 //!
-//! A tick is a process whose argv[0] base name is claude, claude-code or node and argv[1] is
-//! `-p`, the local ticks the launcher runs and the tick-pid helper's default agent executables,
-//! and whose stdout is a `state/logs/tick-*.log` of this harness home, as the launcher's runner
-//! redirects it; a `claude -p` of another harness home or outside any harness is left out. Its
-//! issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then
-//! from a lease it holds, then from a cached GitHub claim-comment lookup the caller supplies.
+//! A tick is what [`crate::ticks::scan`] finds: the process a slot file of this state directory
+//! records while it lives, a local agent CLI or `fleet dispatch` alike. The record names its slot,
+//! agent, model and kind. Its issue comes,
+//! cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then from a lease it
+//! holds, then from a cached GitHub claim-comment lookup the caller supplies.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-
-use regex::Regex;
 
 use super::files::read_text_limited;
 use super::models::{ClaimRecord, LeaseSlot, ProcessInfo, TickProcess};
@@ -20,19 +16,17 @@ use super::parsers::{model_label, tool_command};
 use super::redact::{summarize, summarize_argv};
 use super::text::{basename, clip};
 
-const CLAUDE_BINARIES: [&str; 3] = ["claude", "claude-code", "node"];
-const LANDING_MARK: &str = "This tick is the merge slot's landing tick";
 const TOOL_COMMAND_MAX_CHARS: usize = 160;
 const PROC_FILE_BYTES: u64 = 1024 * 1024;
-static SLOT_LOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"/locks/slot([0-9]{1,9})\.lock$").expect("a constant pattern compiles")
-});
 
 /// A harness tick before its issue is known: the process and what its descriptors say.
 #[derive(Clone, Debug)]
 pub struct TickCandidate {
     pub process: ProcessInfo,
     pub slot: Option<i64>,
+    pub agent: String,
+    pub model: String,
+    pub kind: String,
     pub log: Option<String>,
 }
 
@@ -106,46 +100,48 @@ impl ProcessScanner {
         Ok(processes)
     }
 
-    /// The harness ticks in the process table, oldest first, with their slot lock and log when
-    /// their descriptors name them.
-    pub fn find_ticks(&self, processes: &ProcessTable) -> Vec<TickCandidate> {
+    /// The live ticks of this state directory, oldest first, with the process table's view of
+    /// each and its log when its stdout is a tick log of this state directory.
+    pub fn find_ticks(&self, processes: &ProcessTable, now: f64) -> io::Result<Vec<TickCandidate>> {
         let logs_prefix = format!("{}/logs/tick-", self.state_dir.display());
-        let state_prefix = self.state_dir.display().to_string();
-        let mut candidates = Vec::new();
-        for process in processes.values() {
-            if process.argv.len() < 2
-                || process.argv[1] != "-p"
-                || !CLAUDE_BINARIES.contains(&basename(&process.argv[0]))
-            {
-                continue;
-            }
-            let targets = self.descriptor_targets(process.pid);
-            let Some(stdout_target) = targets
-                .get(&1)
-                .filter(|target| target.starts_with(&logs_prefix))
-            else {
-                continue;
-            };
-            // The highest-numbered descriptor on a slot lock names the slot.
-            let mut slot = None;
-            for target in targets.values() {
-                if let Some(found) = SLOT_LOCK.captures(target)
-                    && target.starts_with(&state_prefix)
-                {
-                    slot = found.get(1).and_then(|number| number.as_str().parse().ok());
-                }
-            }
-            candidates.push(TickCandidate {
-                process: process.clone(),
-                slot,
-                log: Some(basename(stdout_target).to_owned()),
-            });
-        }
-        candidates.sort_by(|a, b| a.process.start_epoch.total_cmp(&b.process.start_epoch));
-        candidates
+        let mut candidates: Vec<TickCandidate> =
+            crate::ticks::scan(&self.state_dir.to_string_lossy())?
+                .into_iter()
+                .map(|tick| {
+                    let pid = i64::from(tick.pid);
+                    #[allow(clippy::cast_precision_loss)]
+                    let process = processes.get(&pid).cloned().unwrap_or_else(|| ProcessInfo {
+                        pid,
+                        ppid: 0,
+                        start_epoch: now - tick.age_s as f64,
+                        argv: Vec::new(),
+                    });
+                    // A non-dumpable agent keeps its descriptors private: it shows without its log.
+                    let log = self
+                        .descriptor_targets(pid)
+                        .get(&1)
+                        .filter(|target| target.starts_with(&logs_prefix))
+                        .map(|target| basename(target).to_owned());
+                    TickCandidate {
+                        process,
+                        slot: Some(i64::from(tick.slot)),
+                        agent: tick.agent,
+                        model: tick.model,
+                        kind: tick.kind.as_str().to_owned(),
+                        log,
+                    }
+                })
+                .collect();
+        candidates.sort_by(|a, b| {
+            a.process
+                .start_epoch
+                .total_cmp(&b.process.start_epoch)
+                .then(a.process.pid.cmp(&b.process.pid))
+        });
+        Ok(candidates)
     }
 
-    /// Names each tick's model, lane, age, issue and current tool call, oldest first.
+    /// Names each tick's agent, model, kind, age, issue and current tool call, oldest first.
     pub fn describe_ticks(
         candidates: &[TickCandidate],
         processes: &ProcessTable,
@@ -170,35 +166,16 @@ impl ProcessScanner {
         candidates
             .iter()
             .map(|candidate| {
-                let argv = &candidate.process.argv;
-                let mut model = String::new();
-                for pair in argv.windows(2) {
-                    if pair[0] == "--model" {
-                        model.clone_from(&pair[1]);
-                    }
-                }
-                let prompt = argv.get(2).map_or("", String::as_str);
-                let lane = if prompt.starts_with(LANDING_MARK) {
-                    "landing"
-                } else if prompt
-                    .split('\n')
-                    .next()
-                    .unwrap_or_default()
-                    .contains(", the model lane:")
-                {
-                    "model"
-                } else {
-                    "standard"
-                };
                 let issue = issue_by_pid.get(&candidate.process.pid);
                 let (doing, doing_age_s, tool_shells) =
                     current_tool_call(candidate.process.pid, &children_by_parent, now);
                 #[allow(clippy::cast_possible_truncation)]
                 TickProcess {
                     pid: candidate.process.pid,
-                    model_label: model_label(&model),
-                    model,
-                    lane: lane.to_owned(),
+                    model_label: model_label(&candidate.model),
+                    model: candidate.model.clone(),
+                    agent: candidate.agent.clone(),
+                    kind: candidate.kind.clone(),
                     age_s: (now - candidate.process.start_epoch).max(0.0) as i64,
                     slot: candidate.slot,
                     log: candidate.log.clone(),
