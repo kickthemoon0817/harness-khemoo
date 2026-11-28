@@ -42,7 +42,6 @@ harness_load
 : "${SUPERVISOR_STOP_GRACE_S:=1200}"
 : "${SUPERVISOR_MAX_PARKS_PER_DAY:=2}"
 supervisor=""; [ "${SUPERVISOR:-}" = 1 ] && supervisor=1
-# The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
 : "${FLEET_BIN:=fleet}"
 fleet=""; [ "${FLEET_DISPATCH:-}" = 1 ] && fleet=1
@@ -148,13 +147,11 @@ entry_of() {  # $1 = a list entry; prints it as agent:model
 : "${LANE_LABEL:=}"
 lane_entry=""; [ -n "$LANE_MODEL" ] && lane_entry=$(entry_of "$LANE_MODEL")
 lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
-# True while entry $1 cools down on its usage limit.
 entry_cooling() {
     local stamp="$MODEL_COOL/$1"
     [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
 }
 
-# The agents the model list and the lane name, one a line, each once.
 list_agents() {
     local w
     for w in $(model_list) $(lane_on && printf '%s' "$lane_entry"); do
@@ -201,7 +198,6 @@ harness_supervisor() {
     )
 }
 
-# The supervisor's entry: SUPERVISOR_MODEL, else the configured list's last.
 supervisor_entry() {
     local m=${SUPERVISOR_MODEL:-}
     [ -n "$m" ] || m=$(configured_models | awk '{print $NF}')
@@ -316,7 +312,6 @@ directive_read() {
         esac
     done <<<"$out"
 }
-# The directive's focus and avoid, as sentences for the lane line.
 directive_lane() {
     local n f="" a=""
     for n in $d_focus; do f+="${f:+, }#$n"; done
@@ -560,8 +555,6 @@ queue_depth() {  # $1 = the label to count
     queue_n=$out
 }
 
-# True while no lane tick can start: the lane's entry cools down on its usage limit, or its agent's
-# windows allow none.
 lane_closed() {
     entry_cooling "$lane_entry" && return 0
     ! pick_model "" --entry "$lane_entry" --landing >/dev/null
@@ -721,7 +714,6 @@ fleet_check() {
            | "@missing \(.)")'
 }
 
-# ----------------------------------------------------------------- check mode
 if [ "${1:-}" = check ]; then
     echo "harness home:  $HARNESS_HOME"
     echo "instance:      $HARNESS_INSTANCE_DIR"
@@ -793,7 +785,6 @@ if [ "${1:-}" = check ]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------- runner mode
 # bash parses this whole block when a runner starts, so a running runner keeps
 # chaining ticks on the code it started with. After changing the block, stop the
 # runner shells (`kill` the `tick.sh runner` process, never its tick). A tick
@@ -818,7 +809,7 @@ if [ "${1:-}" = "runner" ]; then
         eval "exec $fd>&-"
         s=$(( s + 1 ))
     done
-    # No free slot: another runner won the race. Exit quietly.
+    # No free slot: another runner won the race.
     [ -z "$slot" ] && exit 0
     slot_file="$LOCKS/slot$slot.tick"
     usage_refresh
@@ -936,7 +927,6 @@ if [ "${1:-}" = "runner" ]; then
     exit 0
 fi
 
-# ------------------------------------------------------------ supervisor mode
 # One supervisor tick, outside the slots. The agent runs with no tools (supervisor_argv), in an
 # empty directory, with an environment that holds only what its CLI needs to sign in: it can only
 # answer. Its prompt and the health snapshot come on stdin; its answer, one JSON document at the
@@ -1035,7 +1025,7 @@ if [ -n "$supervisor" ]; then
     [ -n "$d_width" ] && [ "$width" -gt "$d_width" ] && width=$d_width
 fi
 
-# 1. Cheapest gate: if every slot is held there is nothing to decide.
+# Cheapest gate: if every slot is held there is nothing to decide.
 busy=0; free=0; s=1
 while [ "$s" -le "$MAX_SLOTS" ]; do
     exec {fd}>"$LOCKS/slot$s.lock"

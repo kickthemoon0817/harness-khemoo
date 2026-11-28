@@ -177,7 +177,6 @@ launch() {  # run the launcher once and wait for the runner it may start
     settle
 }
 
-# A missing instance prompt starts nothing and says so, once.
 write_env; mv "$I/prompts/tick.md" "$H/tick.md.away"
 launch
 check "a missing tick.md starts nothing" '[ ! -e "$FAKE_PROMPT" ]' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
@@ -199,7 +198,6 @@ write_env
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check exits 0 on a complete instance" '[ "$rc" -eq 0 ] && grep -q "instance complete" "$H/check.txt" && grep -q "model lane:    off" "$H/check.txt" && grep -q "paused:        no" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 
-# check names each way an instance is unusable, one line each.
 check_with() {  # extra harness.env lines; leaves the output in $H/check.txt and the status in rc
     write_env "$@"; "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 }
@@ -261,7 +259,6 @@ rm -f "$H/state/paused"; touch "$FAKE_NO_CRON"; check_with
 check "check reports a missing cron line as paused" 'grep -q "paused:        yes, no active crontab line" "$H/check.txt"' "$(cat "$H/check.txt")"
 rm -f "$FAKE_NO_CRON"
 
-# The template's placeholder paths and empty GH_REPO cannot pass.
 T="$H/template-instance"; cp -r "$here/templates/instance" "$T"; mv "$T/harness.env.example" "$T/harness.env"
 HARNESS_INSTANCE_DIR="$T" "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "the template's placeholders fail check" \
@@ -269,7 +266,6 @@ check "the template's placeholders fail check" \
     "rc=$rc $(cat "$H/check.txt")"
 write_env
 
-# The prompt: lane line, blank line, core rules, then the installation's own, with keys substituted.
 cat > "$I/hooks/env.sh" <<'EOF'
 export FROM_HOOK=sourced
 EOF
@@ -283,7 +279,6 @@ check "the installation section comes last" \
     '[ "$(sed -n 5p "$FAKE_PROMPT")" = "## This installation" ] && tail -1 "$FAKE_PROMPT" | grep -qF "Fake installation rules for o/r&x|y\\z: work only issues labelled \`ai\`."' "$(cat "$FAKE_PROMPT")"
 check "hooks/env.sh exports and TICK_EXPORTS reach the tick" '[ "$(cat "$FAKE_ENV")" = "sourced exported" ]' "$(cat "$FAKE_ENV" 2>/dev/null)"
 
-# The lint's settings, GH_REPO and the labels reach every tick; GH_TOKEN never does.
 write_env "PUBLIC_RECORD_RULES=$H/rules.json" "PUBLIC_RECORD_PR_SECTIONS='Summary,Why'" \
     "PUBLIC_RECORD_ISSUE_SECTIONS=Summary" "WIP_LABEL=bot:wip" "LOW_LABEL=bot:low" "GH_TOKEN=secret-token"
 GH_TOKEN=env-token launch
@@ -296,7 +291,6 @@ check "the queue count gets the config's GH_TOKEN in its environment, never in i
     "$(cat "$FAKE_QUEUE_SEEN" 2>/dev/null)"
 write_env
 
-# A failed queue count is an error in the log, and still counts one issue so a tick runs.
 touch "$FAKE_QUEUE_FAILS"
 launch
 check "a failed queue count is logged as an error and a tick still runs" \
@@ -315,7 +309,6 @@ check "a failing env.sh is logged and the tick still runs" \
     'grep -q "hooks/env.sh failed (exit 1)" "$LOG" && [ "$(cat "$FAKE_ENV")" = "unset exported" ]' "log=$(cat "$LOG") env=$(cat "$FAKE_ENV" 2>/dev/null)"
 rm -f "$I/hooks/env.sh"
 
-# The model lane: off when empty, on with both keys set and a lane issue claimable.
 write_env "LANE_MODEL=lane-model" "LANE_LABEL=ai:lane"; echo 1 > "$FAKE_LANE"
 launch
 check "a claimable lane issue runs on the lane model" \
@@ -325,7 +318,6 @@ launch
 check "with no lane issue, the tick leaves lane issues alone" \
     'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on fake-model: never claim an issue labelled \`ai:lane\`"' "$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
 write_env
-# A lane whose agent's windows allow no tick leaves its issues to the work ticks, and says so.
 write_env "LANE_MODEL=claude:lane-model" "LANE_LABEL=ai:lane" "TICK_MODELS=codex:model-x" "AGENT_BIN_codex=$H/fakebin/codex"
 echo 1 > "$FAKE_LANE"; usage 80
 launch
@@ -335,7 +327,6 @@ check "a lane that cannot run opens its issues to the work ticks" \
 usage 10; echo 0 > "$FAKE_LANE"
 write_env
 
-# hooks/hold: exit 0 holds and logs its reason once; exit 1 or a hang holds nothing.
 printf '#!/usr/bin/env bash\necho "service down since noon"\necho second line\nexit 0\n' > "$I/hooks/hold"; chmod +x "$I/hooks/hold"
 launch
 "$H/bin/tick.sh"; settle
@@ -352,7 +343,6 @@ start=$(date +%s); launch; took=$(( $(date +%s) - start ))
 check "a hold hook that hangs past HOLD_TIMEOUT_S holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG" && [ "$took" -lt 10 ]' "took=${took}s log=$(cat "$LOG")"
 rm -f "$I/hooks/hold"
 
-# Through fleet: the runner dispatches with the prompt on stdin and reads the output as a local run's.
 check "the default path runs claude, not fleet" '[ -s "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ]' "prompt=$(cat "$FAKE_PROMPT" 2>/dev/null)"
 fleet_env() { write_env "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet" "LONG_TICK_BUDGET_MIN=90" "$@"; }
 fleet_env
@@ -414,7 +404,6 @@ check "the launcher refuses an agent without a local profile and logs why" \
     '[ ! -e "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ] && grep -q "instance incomplete: .*agent aider needs FLEET_DISPATCH=1" "$LOG"' "log=$(cat "$LOG")"
 write_env
 
-# Ticks across agents: one priority list, each agent with its own CLI, limit message and windows.
 agents_env() {
     write_env "TICK_MODELS='claude:model-c codex:model-x gemini:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" \
         "AGENT_BIN_gemini=$H/fakebin/gemini" "MODEL_COOLDOWN_S=600" "$@"
@@ -493,7 +482,6 @@ check "a tool child that outlives its tick is no tick" \
     "orphan=$orphan ticks=$("$HARNESS_BIN" ticks --state "$H/state")"
 kill "$orphan" 2>/dev/null; rm -f "$FAKE_AGENTS/codex.orphan"
 
-# Live ticks: processes holding a slot and recorded in its slot file, as the runner records a tick.
 holders=()
 trap 'for p in "${holders[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$H"' EXIT
 live() {  # $1 slot, $2 agent, $3 kind: holds the slot and records the holder as its tick
@@ -543,7 +531,6 @@ check "a lane-only agent at its cap runs no lane tick and sizes no pool" \
     '[ ! -e "$FAKE_AGENTS/codex.argv" ] && head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on model-c: never claim" && grep -q "^[^ ]* claude=4\[five_hour:10%,weekly:10%\] pool=4 room=4 busy=1 " "$LOG"' \
     "log=$(cat "$LOG") prompt=$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
 release; echo 0 > "$FAKE_LANE"; usage 10
-# A tick young enough to be still choosing its issue stands for one of the queued ones.
 agents_env "MAX_SLOTS=2" "CLAIM_GRACE_S=360" "TICK_MODELS=claude:model-c"
 live 1 claude work
 launch
@@ -585,7 +572,6 @@ check "a chained tick's pick respects the cap of the agent it picks" \
     "log=$(cat "$LOG") claude=$(cat "$FAKE_AGENTS/claude.argv" 2>/dev/null)"
 release; rm -f "$FAKE_AGENTS"/codex.uncool
 rm -rf "$H/state/model-cooldown"; usage 10
-# A stale reading allows nothing, and the launcher says so rather than stopping silently.
 printf '{"timestamp": 1000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' > "$H/usage-cache.json"
 rm -f "$H/state/locks/usage-unknown.stamp"
 agents_env "TICK_MODELS=claude:model-c"
@@ -598,7 +584,6 @@ mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/claude:model-
 launch
 check "with every entry cooling down the launcher stops early and quietly" '[ ! -s "$LOG" ] && [ ! -e "$FAKE_AGENTS/claude.argv" ]' "log=$(cat "$LOG")"
 rm -rf "$H/state/model-cooldown"
-# What check refuses about agents and their usage.
 check_with "TICK_MODELS='fake-model gemini:model-g'" "AGENT_BIN_gemini=$H/fakebin/gemini" "USAGE_SOURCE_gemini="
 check "an agent without a default source must name one" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*USAGE_SOURCE_gemini unset: name gemini.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
@@ -648,7 +633,6 @@ stop_tick "TERM to a fleet dispatch's group stops the wait, and its runner write
 rm -f "$FAKE_FLEET_HANG"
 write_env
 
-# HARNESS_INSTANCE_DIR moves the whole instance.
 mv "$I" "$H/elsewhere"
 HARNESS_INSTANCE_DIR="$H/elsewhere" "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "HARNESS_INSTANCE_DIR names the instance" '[ "$rc" -eq 0 ] && grep -q "config:        $H/elsewhere/harness.env" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"

@@ -2,8 +2,8 @@
 # Runs a tick through the real fleet and fleetd: bin/tick.sh in runner mode with FLEET_DISPATCH=1
 # dispatches to a fleetd on a unix socket, whose agent adapter is a script that records its stdin and
 # what the harness sees of it, and hits a usage limit on the first model. Then the dashboard reads the
-# same fleet's status. Needs cargo
-# to build the workspace; without it the suite is skipped, except in CI, where that is a failure.
+# same fleet's status. Needs cargo to build the workspace; without it the suite is skipped, except
+# in CI, where that is a failure.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # A suite run inside a tick must not hand its marker to fleetd or the runner.

@@ -48,7 +48,6 @@ L="$H/state/locks"; LOG="$H/state/logs/allocator.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 usage() { printf '{"timestamp": %s000, "data": {"fiveHourPercent": %s, "weeklyPercent": %s}}\n' "$(date +%s)" "$1" "$2" > "$H/usage-cache.json"; }
-# Polls every 50 ms until the command $@ succeeds, for at most 20 s.
 until_ok() { local n=0; until "$@"; do [ "$n" -lt 400 ] || return 1; sleep 0.05; n=$((n + 1)); done; }
 # Records process $1 as slot $2's tick of kind $3 in state directory $4 (default this home's).
 record() {
@@ -112,7 +111,6 @@ launch
 check "a live landing tick keeps a second one from starting" '[ ! -s "$FAKE_LANES" ]' "lanes=$(cat "$FAKE_LANES")"
 release_all
 
-# Another installation's landing tick on the same host is not this one's.
 hold 1; hold 2
 live landing "$H/other-state"
 launch

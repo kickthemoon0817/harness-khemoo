@@ -83,13 +83,11 @@ check "gemini without a source allows nothing" '[ "$(pool gemini:gemini-3-pro)" 
 export USAGE_SOURCE_gemini=none
 check "gemini with the source none has the full width" '[ "$(pool gemini:gemini-3-pro)" = "8 gemini=8" ]' "$(pool gemini:gemini-3-pro)"
 
-# The pool sums the agents' caps, up to the width.
 cache 75 10; rollout 86 3600 0
 check "the pool is the agents' caps summed" '[ "$(pool "claude:opus codex:gpt-5.5")" = "2 claude=1 codex=1" ]' "$(pool "claude:opus codex:gpt-5.5")"
 check "the pool never passes the width" '[ "$(pool "claude:opus gemini:g")" = "8 claude=1 gemini=8" ]' "$(pool "claude:opus gemini:g")"
 check "a bare model runs on TICK_AGENT" '[ "$(TICK_AGENT=codex pool gpt-5.5)" = "1 codex=1" ]' "$(TICK_AGENT=codex pool gpt-5.5)"
 
-# A normalized file of any windows, refreshed by its fetch script when stale.
 cat > "$H/fetch" <<EOF
 #!/usr/bin/env bash
 printf '{"timestamp": %s000, "windows": [{"name": "hourly", "used_pct": 65, "window_minutes": 60}, {"name": "monthly", "used_pct": 10, "window_minutes": 43200}]}\n' "\$(date +%s)" > "$H/gemini.json"
@@ -105,7 +103,6 @@ check "a reading dated an hour ahead allows nothing" '[ "$(pool gemini:g)" = "0 
 export USAGE_SOURCE_gemini=none
 unset USAGE_FETCH_gemini
 
-# usage-ok.sh asks about the agent its tick runs.
 cache 87 87; ok claude
 check "usage-ok.sh under the stand-down point exits 0" '[ "$rc" -eq 0 ] && [[ "$out" == "claude: five_hour=87% weekly=87% "*": go on" ]]' "rc=$rc $out"
 cache 88 10; ok claude

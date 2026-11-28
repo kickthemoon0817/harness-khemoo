@@ -32,8 +32,7 @@ case "$cmd" in
     fi
     now=$(date -u +%FT%TZ)
     echo "$issue $pid $now" > "$F"
-    # Every claim, for the supervisor's loop signal: an issue claimed by tick after tick. Cut to
-    # its newest lines past a MiB.
+    # Every claim, for the supervisor's loop signal: an issue claimed by tick after tick.
     if [ "${HARNESS_SUPERVISOR:-}" = 1 ]; then
       echo "$issue $pid $now" >> "$S/claims.log"
       if [ "$(stat -c %s "$S/claims.log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
