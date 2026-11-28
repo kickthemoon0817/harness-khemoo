@@ -17,7 +17,10 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::command::{self, Environment, MAX_OUTPUT_BYTES, RunError};
-use super::files::read_text_or_empty;
+use super::files::read_owned_text;
+
+/// A lock file holds one short line.
+const LOCK_FILE_BYTES: u64 = 4096;
 use super::models::{BuildLane, LockParty};
 use super::parsers::issue_from_path;
 use super::procs::ProcessTable;
@@ -84,7 +87,8 @@ impl BuildLockReader {
         Ok(named_locks
             .into_iter()
             .map(|(host, path)| {
-                let (holder_pid, holder_tree) = parse_lock_file(&read_text_or_empty(&path));
+                let (holder_pid, holder_tree) =
+                    parse_lock_file(&read_owned_text(&path, LOCK_FILE_BYTES).unwrap_or_default());
                 let holder = holder_pid
                     .filter(|pid| processes.contains_key(pid))
                     .map(|pid| LockParty {
@@ -154,7 +158,10 @@ pub fn parse_lock_file(text: &str) -> (Option<i64>, Option<String>) {
         .map_or((None, None), |found| {
             (
                 found.get(1).and_then(|pid| pid.as_str().parse().ok()),
-                found.get(2).map(|tree| tree.as_str().trim().to_owned()),
+                found
+                    .get(2)
+                    .map(|tree| tree.as_str().trim().to_owned())
+                    .filter(|tree| !tree.is_empty()),
             )
         })
 }
@@ -208,5 +215,6 @@ mod tests {
             (Some(2_088_784), Some("/home/x/trees/app-2464".to_owned()))
         );
         assert_eq!(parse_lock_file(""), (None, None));
+        assert_eq!(parse_lock_file("pid 1, , x"), (Some(1), None));
     }
 }

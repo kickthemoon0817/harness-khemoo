@@ -300,6 +300,14 @@ pub struct App {
 }
 
 impl App {
+    /// Every value no response may carry: harness.env's GitHub token and the environment's.
+    pub fn secret_values(&self) -> Vec<String> {
+        std::iter::once(self.github_token.clone())
+            .chain(github::environment_secrets())
+            .filter(|secret| !secret.is_empty())
+            .collect()
+    }
+
     pub fn new(args: &Args, lookup: Lookup<'_>) -> Result<Self, String> {
         let harness_home = args
             .harness_home
@@ -477,8 +485,7 @@ fn run_app(args: &Args) -> Result<(), String> {
     }
     let collector = app.collector(&args.gh)?;
     if args.once {
-        std::fs::create_dir_all(&collector.config.data_dir)
-            .map_err(|error| format!("{}: {error}", collector.config.data_dir.display()))?;
+        files::prepare_private_dir(&collector.config.data_dir)?;
         collector.refresh_local_sample_in_place();
         if collector.config.remote_interval_s > 0.0 {
             collector.refresh_remote_probes_in_place();
@@ -490,15 +497,11 @@ fn run_app(args: &Args) -> Result<(), String> {
         if !collector.config.fleet_status_command.is_empty() {
             collector.refresh_fleet_in_place();
         }
-        let body = pretty(&collector.snapshot());
-        println!(
-            "{}",
-            if app.github_token.is_empty() {
-                body
-            } else {
-                body.replace(&app.github_token, "[redacted]")
-            }
-        );
+        let mut body = pretty(&collector.snapshot());
+        for secret in app.secret_values() {
+            body = body.replace(&secret, "[redacted]");
+        }
+        println!("{body}");
         return Ok(());
     }
     let port = match args.port {
@@ -508,7 +511,19 @@ fn run_app(args: &Args) -> Result<(), String> {
                 .map_err(|_| format!("DASHBOARD_PORT {port:?} is not a port"))
         })?,
     };
-    serve(Arc::new(collector), port, args.refresh, &app.github_token)
+    serve(
+        Arc::new(collector),
+        port,
+        args.refresh,
+        &app.secret_values(),
+    )
+}
+
+/// A listener on 127.0.0.1 only: the dashboard is never reachable from another host.
+pub fn bind_loopback(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 /// The snapshot as `--once` prints it: one space an indent level.
@@ -529,15 +544,15 @@ fn serve(
     collector: Arc<Collector>,
     port: u16,
     refresh_s: u64,
-    github_token: &str,
+    secret_values: &[String],
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
+        let listener = bind_loopback(port)
+            .and_then(tokio::net::TcpListener::from_std)
             .map_err(|error| format!("cannot listen on 127.0.0.1:{port}: {error}"))?;
         let bound = listener
             .local_addr()
@@ -548,7 +563,7 @@ fn serve(
         let server = Arc::new(Server::new(
             Arc::clone(&collector),
             refresh_s,
-            &[github_token.to_owned()],
+            secret_values,
             token,
             bound,
         ));
@@ -558,14 +573,14 @@ fn serve(
         collector.start(
             Some(Box::new(move || publisher.publish_in_place())),
             interval,
-        );
+        )?;
         let url_path = collector.config.data_dir.join(URL_FILE_NAME);
         files::write_private(&url_path, &format!("{}\n", server.url()))
             .map_err(|error| format!("{}: {error}", url_path.display()))?;
         let config = &collector.config;
         eprintln!(
             "harness dashboard on {} (home {}, data {}, repo {}, queue label {})",
-            server.url(),
+            server.url().replace(&server.access_token, "[token]"),
             config.harness_home.display(),
             config.data_dir.display(),
             config.repo.as_deref().unwrap_or("unset"),

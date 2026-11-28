@@ -312,6 +312,11 @@ fn fleet_runs_without_the_dashboards_tokens() {
         "OPENAI_API_KEY",
         "Deploy_Private_Key",
         "GOOGLE_APPLICATION_CREDENTIALS",
+        "OPENAI_KEY",
+        "GITHUB_PAT",
+        "NPM_AUTH",
+        "SENTRY_DSN",
+        "SESSIONID",
     ];
     let mut command = dashboard();
     command.args([
@@ -337,7 +342,9 @@ fn fleet_runs_without_the_dashboards_tokens() {
     command
         .env("SSH_AUTH_SOCK", "/tmp/agent.sock")
         .env("HOME", "/home/x")
-        .env("KEYBOARD", "kept");
+        .env("KEYBOARD", "kept")
+        .env("DATABASE_URL", "postgres://user:pw@db.example.com/app")
+        .env("PLAIN_URL", "https://example.com/app");
     let state = json_of(&command.output().expect("harness runs"));
     assert!(
         state["fleet"]["error"].is_null(),
@@ -355,7 +362,12 @@ fn fleet_runs_without_the_dashboards_tokens() {
             "{secret} reached fleet"
         );
     }
+    assert!(
+        !names.iter().any(|name| name == "DATABASE_URL"),
+        "a URL with a password reached fleet"
+    );
     for kept in [
+        "PLAIN_URL",
         "SSH_AUTH_SOCK",
         "HOME",
         "PATH",
@@ -465,11 +477,8 @@ fn the_request_log_never_holds_the_access_token() {
     server.wait().ok();
     let logged = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(logged.contains("/api/state?t=[token]"), "{logged}");
-    assert_eq!(
-        logged.matches(&token).count(),
-        1,
-        "only the start line names the URL: {logged}"
-    );
+    assert!(!logged.contains(&token), "{logged}");
+    assert!(logged.contains("/?t=[token] (home"), "{logged}");
     assert!(!logged.contains(&format!("?t={token} HTTP")));
     assert!(!logged.contains(FAKE_TOKEN));
     assert!(!home.home.join("data/dashboard.url").exists());
@@ -566,7 +575,8 @@ fn the_start_script_runs_it_detached_and_stops_it() {
     assert_eq!(run(&["status"]).status.code(), Some(1));
     let log = std::fs::read_to_string(data.join("dashboard.log")).unwrap_or_default();
     assert!(!log.contains(FAKE_TOKEN));
-    assert!(log.contains(&url));
+    assert!(!log.contains(&token));
+    assert!(log.contains("?t=[token]"));
     assert!(!log.contains(&format!("?t={token} HTTP")));
 }
 
@@ -788,4 +798,43 @@ fn the_dashboards_queue_count_matches_harness_claimable() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn a_token_from_the_environment_never_reaches_an_error() {
+    let home = Home::new();
+    let gh = home.home.join("bin/gh-echo");
+    write_script(
+        &gh,
+        "#!/usr/bin/env bash\necho \"HTTP 401 for $GITHUB_TOKEN and $GH_TOKEN\" >&2\nexit 1\n",
+    );
+    let output = dashboard()
+        .args([
+            "--harness-home",
+            &home.path(""),
+            "--data-dir",
+            &home.path("data"),
+            "--gh",
+            &gh.display().to_string(),
+        ])
+        .args([
+            "--usage-cache",
+            &home.path("usage-cache.json"),
+            "--remote-interval",
+            "0",
+            "--once",
+        ])
+        .env("GITHUB_TOKEN", "plainEnvironmentSecret42")
+        .output()
+        .expect("harness runs");
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let state = json_of(&output);
+    assert!(
+        state["queue"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HTTP 401")
+    );
+    assert!(!printed.contains("plainEnvironmentSecret42"));
+    assert!(!printed.contains(FAKE_TOKEN));
 }

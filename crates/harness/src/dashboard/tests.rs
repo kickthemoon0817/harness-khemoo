@@ -453,7 +453,9 @@ fn publisher_keeps_its_own_cadence_whatever_the_source_intervals() {
     let collector = Arc::new(harness.collector_with(config, pinned()));
     let published = Arc::new(Mutex::new(0));
     let counter = Arc::clone(&published);
-    collector.start(Some(Box::new(move || *lock(&counter) += 1)), 1.0);
+    collector
+        .start(Some(Box::new(move || *lock(&counter) += 1)), 1.0)
+        .expect("starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     while *lock(&published) < 3 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -2608,4 +2610,41 @@ fn sections_track_content_and_require_the_token() {
     .body;
     assert!(header.contains("different/repo [redacted]"));
     assert!(!header.contains(FAKE_TOKEN));
+}
+
+#[test]
+fn a_token_cut_by_an_error_message_leaves_no_part_behind() {
+    let harness = FixtureHarness::new();
+    let gh = harness.home.join("bin/gh-straddle");
+    let padding = "x".repeat(290);
+    write_script(
+        &gh,
+        &format!("#!/usr/bin/env bash\necho \"{padding} $GH_TOKEN\" >&2\nexit 1\n"),
+    );
+    let counter = harness.home.join("bin/count-straddle");
+    write_script(
+        &counter,
+        &format!(
+            "#!/usr/bin/env bash\necho \"$GH_TOKEN {}\" >&2\nexit 3\n",
+            "y".repeat(190)
+        ),
+    );
+    let mut config = harness.config();
+    config.queue_depth_command = vec![counter.display().to_string()];
+    let github =
+        GitHubClient::new("example/repo", Some(FAKE_TOKEN), &gh.display().to_string()).ok();
+    let collector = Collector::new(config, github, pinned());
+    collector.refresh_github_in_place();
+    collector.refresh_claimable_in_place();
+    let snapshot = collector.snapshot();
+    for error in [
+        &snapshot["queue"]["error"],
+        &snapshot["queue"]["claimable_sh"]["error"],
+    ] {
+        let error = error.as_str().unwrap_or_default();
+        assert!(!error.is_empty());
+        for fragment in ["ghp_", "FAKEtoken", "0123456789"] {
+            assert!(!error.contains(fragment), "{fragment} in {error}");
+        }
+    }
 }

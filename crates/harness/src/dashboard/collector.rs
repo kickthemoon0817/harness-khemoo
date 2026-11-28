@@ -32,7 +32,6 @@ use super::models::{
 use super::parsers::{self, model_label, parse_claim};
 use super::procs::{ProcessScanner, ProcessTable, TickCandidate, map_pids_to_issues};
 use super::queue::{IssueNode, IssueQueue, QueueLabels, parse_dependencies};
-use super::redact::redact;
 use super::runqueue::{RunQueueReader, StopWords};
 use super::shlex;
 use super::text::{basename, float_g, iso, optional_int, parse_iso, split_lines, tail_chars};
@@ -71,12 +70,58 @@ pub const FLEET_OUTPUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 const PID_LOOKUPS_PER_CYCLE: usize = 3;
 const SMALL_FILE_BYTES: u64 = 1024 * 1024;
 
-/// Variables fleet never gets: it needs no credential of the dashboard's, and `FLEET_STATUS_CMD`
-/// may be any command the instance names.
-static SECRET_VARIABLE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new("(?i)TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL")
+/// A URL with a password in its userinfo.
+static URL_WITH_PASSWORD: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]*:[^/\s@]*@")
         .expect("a constant pattern compiles")
 });
+
+/// Name parts that mark a secret, matched whole or as a part's end (`APIKEY`, `MYTOKEN`).
+const SECRET_PART_ENDS: [&str; 16] = [
+    "KEY",
+    "AUTH",
+    "PASS",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "COOKIE",
+    "SESSION",
+    "TOKEN",
+    "SECRET",
+    "CRED",
+    "CREDS",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "PAT",
+    "DSN",
+];
+/// Name parts that mark a secret at a part's start too (`SESSIONID`); short words such as `KEY`
+/// and `PAT` only whole, so `KEYBOARD` and `PATH` stay.
+const SECRET_PART_STARTS: [&str; 6] = [
+    "TOKEN",
+    "SECRET",
+    "SESSION",
+    "PASSWORD",
+    "COOKIE",
+    "CREDENTIAL",
+];
+
+/// True for a variable fleet never gets: it needs no credential of the dashboard's, and
+/// `FLEET_STATUS_CMD` may be any command the instance names. `SSH_AUTH_SOCK` stays: an ssh
+/// transport may authenticate through the agent.
+fn secret_variable(name: &str, value: &str) -> bool {
+    if name == "SSH_AUTH_SOCK" {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    let secret_name = upper
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| {
+            SECRET_PART_ENDS.iter().any(|word| part.ends_with(word))
+                || SECRET_PART_STARTS.iter().any(|word| part.starts_with(word))
+        });
+    secret_name || URL_WITH_PASSWORD.is_match(value)
+}
 
 /// Where each usage window cuts the pool (lib/usage.sh defaults).
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -551,16 +596,12 @@ impl Collector {
 
     /// Creates the data directory, owner-only, loads the saved history and GitHub cache, starts
     /// the source threads, and publishes now and every `publish_interval_s`.
-    pub fn start(self: &Arc<Self>, publish: Option<Box<dyn Fn() + Send>>, publish_interval_s: f64) {
-        std::fs::create_dir_all(&self.config.data_dir).ok();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.config.data_dir,
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .ok();
-        }
+    pub fn start(
+        self: &Arc<Self>,
+        publish: Option<Box<dyn Fn() + Send>>,
+        publish_interval_s: f64,
+    ) -> Result<(), String> {
+        files::prepare_private_dir(&self.config.data_dir)?;
         self.load_local_history_in_place();
         self.load_github_cache_in_place();
         self.flow_tracker.load();
@@ -612,6 +653,7 @@ impl Collector {
                 }
             }));
         }
+        Ok(())
     }
 
     /// Asks the source threads to end and waits briefly for them.
@@ -664,12 +706,18 @@ impl Collector {
         lock(&self.results).fail(source, error, attempted_at);
     }
 
-    /// An error message for the page, with the token removed.
+    /// An error message for the page: the token, the environment's GitHub tokens and every
+    /// secret-looking value masked.
     pub fn describe(&self, message: &str) -> String {
         match &self.github {
             Some(github) => github.redact(message),
-            None => message.to_owned(),
+            None => super::github::scrub(&super::github::environment_secrets(), message),
         }
+    }
+
+    /// The end of a command's output for a message, masked before it is cut.
+    fn output_tail(&self, text: &str, limit: usize) -> String {
+        tail_chars(&self.describe(text.trim()), limit).to_owned()
     }
 
     /// Re-reads the resource status, when the instance has a command for it, and the process
@@ -732,7 +780,7 @@ impl Collector {
                 Err(format!(
                     "RuntimeError: resource status exit {}: {}",
                     output.status,
-                    tail_chars(output.stderr.trim(), 200)
+                    self.output_tail(&output.stderr, 200)
                 ))
             }
         });
@@ -936,7 +984,7 @@ impl Collector {
             return Err(format!(
                 "RuntimeError: ssh exit {}: {}",
                 output.status,
-                tail_chars(output.stderr.trim(), 160)
+                self.output_tail(&output.stderr, 160)
             ));
         }
         Ok(parsers::parse_machine_probe(&output.stdout))
@@ -1080,7 +1128,7 @@ impl Collector {
                 Err(format!(
                     "RuntimeError: queue count exit {}: {}",
                     output.status,
-                    tail_chars(detail.trim(), 200)
+                    self.output_tail(detail, 200)
                 ))
             }
         });
@@ -1099,10 +1147,9 @@ impl Collector {
     /// worked.
     pub fn refresh_fleet_in_place(&self) {
         let started = self.now();
-        // SSH_AUTH_SOCK stays: an ssh transport may authenticate through the agent.
         let mut environment: Vec<(String, String)> = std::env::vars_os()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-            .filter(|(name, _)| !SECRET_VARIABLE.is_match(name))
+            .filter(|(name, value)| !secret_variable(name, value))
             .collect();
         for (name, value) in &self.config.fleet_environment {
             environment.retain(|(existing, _)| existing != name);
@@ -1117,10 +1164,10 @@ impl Collector {
         .map_err(|error: RunError| error.to_string())
         .and_then(|output| {
             fleet::parse(&output.stdout).map_err(|error| {
-                redact(&format!(
+                self.describe(&format!(
                     "RuntimeError: fleet exit {}: {error}; {}",
                     output.status,
-                    tail_chars(output.stderr.trim(), 200)
+                    self.output_tail(&output.stderr, 200)
                 ))
             })
         });
@@ -1568,4 +1615,33 @@ fn history_line(row: &HistoryRow) -> String {
         });
     }
     format!("{}\n", columns.join("\t"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secret_variable;
+
+    #[test]
+    fn secret_looking_variables_are_kept_from_fleet() {
+        for name in [
+            "OPENAI_KEY",
+            "GITHUB_PAT",
+            "NPM_AUTH",
+            "SENTRY_DSN",
+            "my_api_token",
+            "DB_PASSWORD",
+            "SESSIONID",
+            "OAUTH",
+        ] {
+            assert!(secret_variable(name, "x"), "{name}");
+        }
+        for name in ["PATH", "KEYBOARD", "HOME", "SSH_AUTH_SOCK", "LANG"] {
+            assert!(!secret_variable(name, "x"), "{name}");
+        }
+        assert!(secret_variable(
+            "DATABASE_URL",
+            "postgres://user:pw@db.example.com/app"
+        ));
+        assert!(!secret_variable("SITE", "https://example.com/a:b"));
+    }
 }
