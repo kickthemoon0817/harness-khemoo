@@ -38,7 +38,7 @@ queue() {  # <packet name> <runs> <want> <bar 0|1> <minutes BUSY>
 reset() { rm -rf "$T/ev/"*; : > "$S/stalls.log"; rm -f "$S/locks/operator-priority" "$S/locks/local-card-issues"; }
 
 reset; probes 0; LEASE_CALLS="$T/lease.calls" "$D"
-check "a pass with no waiting queue still reads lease.sh status, which samples idle holds" 'grep -qx status "$T/lease.calls"' "$(cat "$T/lease.calls" 2>/dev/null)"
+check "a pass with no waiting queue still reads lease.sh status, which keeps the idle-hold clocks" 'grep -qx status "$T/lease.calls"' "$(cat "$T/lease.calls" 2>/dev/null)"
 
 reset; probes 0; queue 2026-11-26-2504-lanes runs-w03 a@one 0 8; "$D"
 check "a queue pinned to a held card 5+ min is unpinned onto the free idle quiet card" \

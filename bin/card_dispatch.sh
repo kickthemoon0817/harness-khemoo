@@ -10,8 +10,8 @@
 # This host's card takes part only for the issues the owner opened it to
 # (state/locks/local-card-issues): when no live lease holds one of its slots and nothing computes
 # on it, a listed issue's waiting queue gets `local`.
-# Every pass reads `lease.sh status`, waiting queues or not: those reads are the samples that let
-# lease.sh reclaim a hold whose slot containers stay down (its IDLE_HOLD_S rule).
+# Every pass reads `lease.sh status`, waiting queues or not: those reads keep the idle-since clocks
+# of lease.sh's IDLE_HOLD_S rule, which an acquire that needs a slot reads; sampling releases nothing.
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 S="${HARNESS_STATE:-$H/state}"
