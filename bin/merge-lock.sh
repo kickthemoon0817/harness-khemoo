@@ -9,6 +9,12 @@ set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 L="${HARNESS_STATE:-$H/state}/locks"
 F="$L/merge.lock"
+# The issue is written into the lock beside the holder's pid, which is read back as its second
+# field: anything but a number could name another pid as the holder, such as 1, which never dies.
+if [ "${1:-}" = acquire ] && ! [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+  echo "usage: merge-lock.sh acquire <issue>, with <issue> a number" >&2; exit 2
+fi
+mkdir -p "$L"
 if [ "${1:-}" = status ]; then
   pid=""
 elif [ -x "$H/bin/tick-pid.sh" ]; then
@@ -22,7 +28,7 @@ fi
 exec 8>"$L/merge.guard"; flock 8
 case "${1:-}" in
   acquire)
-    issue="${2:?issue number}"
+    issue=$2
     if [ -s "$F" ]; then
       hp=$(awk '{print $2}' "$F")
       if [ "$hp" != "$pid" ] && kill -0 "$hp" 2>/dev/null; then echo "BUSY $(cat "$F")"; exit 1; fi
