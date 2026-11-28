@@ -133,10 +133,11 @@ fn markup(text: &str) -> Option<&'static str> {
 /// anywhere in the body, whatever the parser makes of it and whatever surrounds it: GitHub finds a
 /// mention, a bare link or a cross-reference inside emphasis, a table cell or a task item, where a
 /// word boundary would not. Any `@` (a mention, an address, a ref at a commit), `www.` and `://` (a
-/// bare link), a cross-reference to another repository or a commit (`owner/repo#1`, `/` and a SHA),
-/// a link reference's definition (`]:`), a character reference (`&#64;`, `&commat;`, the character
-/// GitHub renders), an escaped `/` or `:`, which hides a URL from these checks, and a closing
-/// keyword, which closes whatever it names once its PR merges. A plain `#N` holds none of them.
+/// bare link), a cross-reference to another repository or a commit (`owner/repo#1`,
+/// `owner/repo/issues/1`, `/` and a SHA), a link reference's definition (`]:`), a character
+/// reference (`&#64;`, `&commat;`, the character GitHub renders), an escaped `/` or `:`, which hides
+/// a URL from these checks, and a closing keyword, which closes whatever it names once its PR
+/// merges. A plain `#N` holds none of them.
 static UNSAFE: LazyLock<[(Regex, &str); 12]> = LazyLock::new(|| {
     let pattern = |text: &str| Regex::new(text).unwrap_or_else(|error| panic!("{text}: {error}"));
     [
@@ -145,7 +146,9 @@ static UNSAFE: LazyLock<[(Regex, &str); 12]> = LazyLock::new(|| {
         (pattern(r"://"), "a URL"),
         (pattern(r"(?m)(^|[\s(<:=])//"), "a URL"),
         (
-            pattern(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+[#@]|(?i)/[0-9a-f]{7,40}"),
+            pattern(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:[#@]|/(?i:issues|pull|discussions|commit)/)|(?i)/[0-9a-f]{7,40}",
+            ),
             "a cross-reference",
         ),
         (
@@ -683,6 +686,9 @@ mod tests {
             ("a scheme_://x", "a URL"),
             ("see octocat/Hello-World#1", "a cross-reference"),
             ("_see octocat/Hello-World#1_", "a cross-reference"),
+            ("see octocat/Spoon-Knife/issues/1", "a cross-reference"),
+            ("see octocat/Spoon-Knife/pull/2", "a cross-reference"),
+            ("read _o/r/Discussions/3_", "a cross-reference"),
             ("at commit /0123abc", "a cross-reference"),
             ("the commit _/0123ABCdef_", "a cross-reference"),
             ("_fixes #3_", "a closing keyword"),

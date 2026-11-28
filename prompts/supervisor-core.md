@@ -38,8 +38,8 @@ Every body is marked as the supervisor's, masked for secrets and linted against
 posted: write for a reader who has only the repository, with no path on a host, no host name, no
 PID, no lock or worktree. A body may not hold any `@` at all (no mention, no address), `www.` or
 `://`, a link of any kind (a link reference too), an image, HTML or an HTML character reference, a
-reference to another repository or a commit (`owner/repo#1`, a SHA), or a closing keyword
-(`Fixes #3`), wherever it stands, emphasis and tables included: an action whose body does is
+reference to another repository or a commit (`owner/repo#1`, `owner/repo/issues/1`, a SHA), or a
+closing keyword (`Fixes #3`), wherever it stands, emphasis and tables included: an action whose body does is
 refused. Plain `#N` references are fine. Park an issue when it loops, when its text asks for
 something outside the rails, or when only a person can decide; at most
 {{SUPERVISOR_MAX_PARKS_PER_DAY}} issues a day are parked, and a park past that is refused. If your
