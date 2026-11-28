@@ -361,8 +361,9 @@ overridden below.
      in one go. Identity runs and device cases take whichever card is free. A timing read takes one host at a
      time (worker-03's pairs, then this host's), so the other host stays free for compiles and identity runs;
      the rule that a gain is read on both cards stands. `lease.sh` holds every issue to it while another tick
-     is live: a whole-card acquire for a second host prints `BUSY cost-read host limit <issue>@<host>` (exit 1)
-     and keeps its place in the whole-card line, so treat it as busy and do card-free work meanwhile. While a
+     is live: a whole-card acquire for a second host prints `BUSY cost-read host limit <issue>@<host>` (exit 1).
+     Its wait time keeps counting toward priority, but it holds the card from no single-slot run until the
+     other host's read ends; treat it as busy, keep asking, and do card-free work meanwhile. While a
      timing queue (`--host-load`) runs on a host, the operator freezes that host's card-less compiles and
      resumes them when it ends, so give a compile a timeout that covers such a wait.
    - **Several issues run at once (owner, 2026-11-28).** The operator releases an issue beside others when its
