@@ -76,11 +76,6 @@ pub enum Environment {
     Exactly(Vec<(String, String)>),
 }
 
-#[cfg(test)]
-thread_local! {
-    pub static RECORDED: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 fn kill_group(child: &Child) {
     if let Ok(pid) = i32::try_from(child.id())
         && let Some(pid) = rustix::process::Pid::from_raw(pid)
@@ -136,8 +131,6 @@ pub fn run(
     timeout: Duration,
     max_stdout: usize,
 ) -> Result<Output, RunError> {
-    #[cfg(test)]
-    RECORDED.with(|recorded| recorded.borrow_mut().push(argv.to_vec()));
     let program = argv.first().map(String::as_str).unwrap_or_default();
     let name = basename(program).to_owned();
     if program.is_empty() {

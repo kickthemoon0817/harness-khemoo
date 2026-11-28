@@ -513,6 +513,12 @@ pub struct Collector {
     pub local_history_path: PathBuf,
     pub github_cache_path: PathBuf,
     pub remote_probe_script: String,
+    /// Every command this collector ran, from any of its threads.
+    #[cfg(test)]
+    pub recorded: Mutex<Vec<Vec<String>>>,
+    /// Every error it logged.
+    #[cfg(test)]
+    pub logged: Mutex<Vec<String>>,
 }
 
 impl Collector {
@@ -586,6 +592,10 @@ impl Collector {
             local_history_path: config.data_dir.join("local_history.tsv"),
             github_cache_path: config.data_dir.join("github_cache.json"),
             remote_probe_script: format!("{MEMORY_PROBE}{remote_device}{CONTAINER_PROBE}"),
+            #[cfg(test)]
+            recorded: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            logged: Mutex::new(Vec::new()),
             config,
         }
     }
@@ -693,13 +703,37 @@ impl Collector {
                     .map(|text| (*text).to_owned())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown".to_owned());
-                eprintln!("Dashboard refresh of {} failed: {message}", source.name());
+                self.log_error(&format!(
+                    "Dashboard refresh of {} failed: {message}",
+                    source.name()
+                ));
                 self.store_failure(source, self.describe(&format!("panic: {message}")), started);
             }
             if self.wait_for_stop(interval_s) {
                 break;
             }
         }
+    }
+
+    /// Runs one of the collector's commands; the tests read what it ran.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn run(
+        &self,
+        argv: &[String],
+        environment: Environment,
+        timeout: Duration,
+        max_stdout: usize,
+    ) -> Result<Output, RunError> {
+        #[cfg(test)]
+        lock(&self.recorded).push(argv.to_vec());
+        command::run(argv, environment, timeout, max_stdout)
+    }
+
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn log_error(&self, message: &str) {
+        eprintln!("{message}");
+        #[cfg(test)]
+        lock(&self.logged).push(message.to_owned());
     }
 
     pub fn store_failure(&self, source: Source, error: String, attempted_at: f64) {
@@ -766,24 +800,25 @@ impl Collector {
                 self.config.state_dir().display().to_string(),
             ),
         ]);
-        let outcome = command::run(
-            &self.config.resource_status_command,
-            environment,
-            seconds(self.config.command_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|output| {
-            if output.success() {
-                Ok(output)
-            } else {
-                Err(format!(
-                    "RuntimeError: resource status exit {}: {}",
-                    output.status,
-                    self.output_tail(&output.stderr, 200)
-                ))
-            }
-        });
+        let outcome = self
+            .run(
+                &self.config.resource_status_command,
+                environment,
+                seconds(self.config.command_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|output| {
+                if output.success() {
+                    Ok(output)
+                } else {
+                    Err(format!(
+                        "RuntimeError: resource status exit {}: {}",
+                        output.status,
+                        self.output_tail(&output.stderr, 200)
+                    ))
+                }
+            });
         match outcome {
             Ok(output) => {
                 let status = parsers::parse_lease_status(&output.stdout);
@@ -852,7 +887,7 @@ impl Collector {
         }
         text.push_str("--- docker\n");
         let docker = ["docker", "ps", "--format", DOCKER_FORMAT].map(str::to_owned);
-        if let Ok(output) = command::run(
+        if let Ok(output) = self.run(
             &docker,
             Environment::Inherit(Vec::new()),
             Duration::from_secs(5),
@@ -869,7 +904,7 @@ impl Collector {
         if self.config.device_probe_command.is_empty() {
             return String::new();
         }
-        command::run(
+        self.run(
             &self.config.device_probe_command,
             Environment::Inherit(Vec::new()),
             seconds(self.config.device_probe_timeout_s),
@@ -973,13 +1008,14 @@ impl Collector {
         .iter()
         .map(|word| (*word).to_owned())
         .collect();
-        let output = command::run(
-            &argv,
-            Environment::Inherit(Vec::new()),
-            seconds(self.config.remote_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())?;
+        let output = self
+            .run(
+                &argv,
+                Environment::Inherit(Vec::new()),
+                seconds(self.config.remote_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())?;
         if !output.success() {
             return Err(format!(
                 "RuntimeError: ssh exit {}: {}",
@@ -1108,30 +1144,31 @@ impl Collector {
         } else {
             self.config.queue_depth_command.clone()
         };
-        let outcome = command::run(
-            &argv,
-            Environment::Inherit(environment),
-            seconds(self.config.claimable_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|output: Output| {
-            let printed = output.stdout.trim();
-            if let Some(count) = optional_int(printed).filter(|_| output.success()) {
-                Ok(count)
-            } else {
-                let detail = if output.stderr.is_empty() {
-                    printed
+        let outcome = self
+            .run(
+                &argv,
+                Environment::Inherit(environment),
+                seconds(self.config.claimable_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|output: Output| {
+                let printed = output.stdout.trim();
+                if let Some(count) = optional_int(printed).filter(|_| output.success()) {
+                    Ok(count)
                 } else {
-                    output.stderr.as_str()
-                };
-                Err(format!(
-                    "RuntimeError: queue count exit {}: {}",
-                    output.status,
-                    self.output_tail(detail, 200)
-                ))
-            }
-        });
+                    let detail = if output.stderr.is_empty() {
+                        printed
+                    } else {
+                        output.stderr.as_str()
+                    };
+                    Err(format!(
+                        "RuntimeError: queue count exit {}: {}",
+                        output.status,
+                        self.output_tail(detail, 200)
+                    ))
+                }
+            });
         match outcome {
             Ok(count) => {
                 let duration = self.now() - started;
@@ -1155,22 +1192,23 @@ impl Collector {
             environment.retain(|(existing, _)| existing != name);
             environment.push((name.clone(), value.clone()));
         }
-        let outcome = command::run(
-            &self.config.fleet_status_command,
-            Environment::Exactly(environment),
-            seconds(self.config.fleet_timeout_s),
-            FLEET_OUTPUT_MAX_BYTES,
-        )
-        .map_err(|error: RunError| error.to_string())
-        .and_then(|output| {
-            fleet::parse(&output.stdout).map_err(|error| {
-                self.describe(&format!(
-                    "RuntimeError: fleet exit {}: {error}; {}",
-                    output.status,
-                    self.output_tail(&output.stderr, 200)
-                ))
-            })
-        });
+        let outcome = self
+            .run(
+                &self.config.fleet_status_command,
+                Environment::Exactly(environment),
+                seconds(self.config.fleet_timeout_s),
+                FLEET_OUTPUT_MAX_BYTES,
+            )
+            .map_err(|error: RunError| error.to_string())
+            .and_then(|output| {
+                fleet::parse(&output.stdout).map_err(|error| {
+                    self.describe(&format!(
+                        "RuntimeError: fleet exit {}: {error}; {}",
+                        output.status,
+                        self.output_tail(&output.stderr, 200)
+                    ))
+                })
+            });
         match outcome {
             Ok(report) => {
                 let duration = self.now() - started;
@@ -1326,7 +1364,7 @@ impl Collector {
                 reason: "state/paused present".to_owned(),
             };
         }
-        let Ok(output) = command::run(
+        let Ok(output) = self.run(
             &self.config.crontab_command,
             Environment::Inherit(Vec::new()),
             seconds(self.config.command_timeout_s),
