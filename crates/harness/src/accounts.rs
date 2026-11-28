@@ -31,9 +31,10 @@ const AGENTS: [(&str, &str); 2] = [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "C
 /// account's credentials file. A tick, fetch or sign-in check on an account runs without every one of
 /// them, its own agent's and the others', since a tick may start another agent as a sub-agent: the
 /// default account must never sign in on an account's behalf. Read from Claude Code 2.1.332 and
-/// Codex 0.155.1, and from the Antigravity CLI's documentation for agy 1.5.19, with Google's
-/// application-default credentials.
-const CREDENTIALS: [&str; 22] = [
+/// Codex 0.155.1, from the Antigravity CLI's documentation for agy 1.5.19, and from what Google's
+/// SDKs and gcloud read. Unsetting them is defence in depth, not a boundary: the keyring and the
+/// home folder an agy or a gcloud login keeps its credentials in are shared.
+const CREDENTIALS: [&str; 32] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -55,6 +56,16 @@ const CREDENTIALS: [&str; 22] = [
     "GOOGLE_CLOUD_QUOTA_PROJECT",
     "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "GEMINI_DEFAULT_AUTH_TYPE",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+    "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
     "USAGE_CREDENTIALS_FILE",
 ];
 /// How long a sign-in check holds: the launcher fires every couple of minutes, and no firing should
@@ -1043,6 +1054,9 @@ pub(crate) mod tests {
             "CODEX_API_KEY",
             "AGY_ADC_AUTH",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_API_KEY",
+            "GEMINI_DEFAULT_AUTH_TYPE",
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
             "AWS_BEARER_TOKEN_BEDROCK",
             "USAGE_CREDENTIALS_FILE",
         ] {

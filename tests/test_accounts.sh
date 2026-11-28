@@ -22,7 +22,7 @@ cat > "$H/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ]; then
     echo "${CLAUDE_CONFIG_DIR:-default}" >> "$FAKE_SEEN/claude.auth"
-    echo "key=${ANTHROPIC_API_KEY:-unset} token=${CLAUDE_CODE_OAUTH_TOKEN:-unset} codex=${OPENAI_API_KEY:-unset} file=${USAGE_CREDENTIALS_FILE:-unset}" >> "$FAKE_SEEN/claude.auth-keys"
+    echo "key=${ANTHROPIC_API_KEY:-unset} token=${CLAUDE_CODE_OAUTH_TOKEN:-unset} codex=${OPENAI_API_KEY:-unset} file=${USAGE_CREDENTIALS_FILE:-unset} google=${GOOGLE_API_KEY:-unset}" >> "$FAKE_SEEN/claude.auth-keys"
     if [ -e "$CLAUDE_CONFIG_DIR/signed-out" ]; then
         echo '{"loggedIn": false, "authMethod": "none", "loginExpiresAt": null}'
         exit 1
@@ -41,7 +41,7 @@ case $prompt in
 esac
 dir=${CLAUDE_CONFIG_DIR:-default}
 { echo "dir=$dir"; echo "marker=$HARNESS_TICK"; echo "slot=$(cut -d' ' -f4- "$HARNESS_STATE/locks/slot1.tick")"
-  echo "keys=${ANTHROPIC_API_KEY:-unset} ${CLAUDE_CODE_OAUTH_TOKEN:-unset} ${OPENAI_API_KEY:-unset} ${AWS_BEARER_TOKEN_BEDROCK:-unset} ${USAGE_CREDENTIALS_FILE:-unset}"
+  echo "keys=${ANTHROPIC_API_KEY:-unset} ${CLAUDE_CODE_OAUTH_TOKEN:-unset} ${OPENAI_API_KEY:-unset} ${AWS_BEARER_TOKEN_BEDROCK:-unset} ${USAGE_CREDENTIALS_FILE:-unset} ${GOOGLE_API_KEY:-unset} ${GEMINI_API_KEY:-unset}"
   echo "usage=$("$HARNESS_HOME/libexec/usage-ok.sh")"; } >> "$FAKE_SEEN/claude.ticks"
 if [ -e "$dir/limit" ]; then rm -f "$dir/limit"; echo "You've hit your session limit · resets 5pm"; exit 1; fi
 exit 0
@@ -97,7 +97,8 @@ unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN SUPERVISOR CLAUDE_CONFIG
 # The default account's credentials, in the environment the launcher starts from.
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" HOME="$H/home" FAKE_SEEN="$H/seen" \
     ANTHROPIC_API_KEY=sk-ant-default-account CLAUDE_CODE_OAUTH_TOKEN=default-oauth-token OPENAI_API_KEY=sk-default-codex \
-    AWS_BEARER_TOKEN_BEDROCK=default-bedrock USAGE_CREDENTIALS_FILE="$H/home/.claude/.credentials.json"
+    AWS_BEARER_TOKEN_BEDROCK=default-bedrock USAGE_CREDENTIALS_FILE="$H/home/.claude/.credentials.json" \
+    GOOGLE_API_KEY=default-google-key GEMINI_API_KEY=default-gemini-key
 S="$H/state"; LOG="$S/logs/allocator.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -211,9 +212,9 @@ check "the allocator's line counts each account on its own" \
     'grep -q "claude@work=1\[five_hour:10%,weekly:10%\] claude@home=1\[five_hour:40%,weekly:10%\] codex@work=1\[primary:30%\] pool=1" "$LOG"' "$(cat "$LOG")"
 check "the trailer names the account" 'grep -q "^\[tick.sh\] exit=0 .*agent=claude@work model=model-a$" "$S"/logs/tick-*.log' "$(cat "$S"/logs/tick-*.log)"
 check "a tick on an account gets none of the default account's credential variables" \
-    'grep -qx "keys=unset unset unset unset unset" "$H/seen/claude.ticks"' "$(cat "$H/seen/claude.ticks")"
+    'grep -qx "keys=unset unset unset unset unset unset unset" "$H/seen/claude.ticks"' "$(cat "$H/seen/claude.ticks")"
 check "nor does its sign-in check, another agent's key and the default credentials file included" \
-    '[ "$(sort -u "$H/seen/claude.auth-keys")" = "key=unset token=unset codex=unset file=unset" ]' "$(sort -u "$H/seen/claude.auth-keys")"
+    '[ "$(sort -u "$H/seen/claude.auth-keys")" = "key=unset token=unset codex=unset file=unset google=unset" ]' "$(sort -u "$H/seen/claude.auth-keys")"
 
 touch "$A/claude/claude-work/limit"
 launch
