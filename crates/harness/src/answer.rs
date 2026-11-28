@@ -13,6 +13,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -85,7 +88,7 @@ impl Action {
 
 /// The last JSON object of `text` that reads as an answer: a line that starts with `{` begins it,
 /// tried from the end, at most [`START_LINES`] of them.
-pub fn last_answer(text: &str) -> Option<Answer> {
+pub fn last_answer(text: &str) -> Option<Result<Answer, String>> {
     let mut starts: Vec<usize> = Vec::new();
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
@@ -103,9 +106,34 @@ pub fn last_answer(text: &str) -> Option<Answer> {
         if !(object.contains_key("directive") || object.contains_key("github")) {
             return None;
         }
-        serde_json::from_value(value).ok()
+        Some(serde_json::from_value(value).map_err(|error| error.to_string()))
     })
 }
+
+/// What a body the supervisor posts must not hold: each would reach past the issue it is on. A
+/// mention notifies a person or a team, a link or an image sends readers, or their browsers,
+/// elsewhere, HTML hides what it says, an address is a person's, and a closing keyword closes
+/// whatever it names once its PR merges.
+static UNSAFE: LazyLock<[(Regex, &str); 7]> = LazyLock::new(|| {
+    let pattern = |text: &str| Regex::new(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+    [
+        (pattern(r"(^|[^A-Za-z0-9_])@[A-Za-z0-9]"), "an @-mention"),
+        (pattern(r"(?i)\b[a-z][a-z0-9+.-]*://|(?i)\bwww\."), "a URL"),
+        (pattern(r"!\["), "an image"),
+        (pattern(r"\]\("), "a link"),
+        (pattern(r"<[A-Za-z/!?]"), "HTML or an autolink"),
+        (
+            pattern(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]"),
+            "an email address",
+        ),
+        (
+            pattern(
+                r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[\s:]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]",
+            ),
+            "a closing keyword",
+        ),
+    ]
+});
 
 /// The labels a `label` action may add or remove: the configured take-first and take-last labels,
 /// which set the order work is taken in. The operator's label goes on only through `park`, with
@@ -148,6 +176,9 @@ fn body(field: &str, text: &str, limit: usize) -> Result<String, String> {
     }
     if redact(text) != text {
         return Err(format!("{field}: looks like it holds a secret"));
+    }
+    if let Some((_, what)) = UNSAFE.iter().find(|(pattern, _)| pattern.is_match(text)) {
+        return Err(format!("{field}: holds {what}"));
     }
     Ok(text.to_owned())
 }
@@ -316,10 +347,16 @@ fn lint(paths: &Paths, text: &str) -> Result<(), String> {
     }
 }
 
+/// Performs `plan`, its comment first: a park's label goes on only once its question is posted,
+/// so no issue waits on the operator for a question nobody can read.
 fn perform(paths: &Paths, repo: &Repo, plan: &Plan, queue_label: &str) -> Result<(), String> {
     in_queue(repo, plan.issue, queue_label)?;
     if let Some(text) = &plan.comment {
         lint(paths, text)?;
+        repo.api(
+            &["-X", "POST", "-f", &format!("body={text}")],
+            &format!("issues/{}/comments", plan.issue),
+        )?;
     }
     for name in &plan.add {
         repo.api(
@@ -333,13 +370,16 @@ fn perform(paths: &Paths, repo: &Repo, plan: &Plan, queue_label: &str) -> Result
             &format!("issues/{}/labels/{}", plan.issue, path_segment(name)),
         )?;
     }
-    if let Some(text) = &plan.comment {
-        repo.api(
-            &["-X", "POST", "-f", &format!("body={text}")],
-            &format!("issues/{}/comments", plan.issue),
-        )?;
-    }
     Ok(())
+}
+
+/// The issues parked in the 24 hours before `now`, as the directive log records them.
+pub fn recent_parks(log: &str, now: u64) -> usize {
+    log.lines()
+        .filter(|line| line.contains(" github: parked #"))
+        .filter_map(|line| crate::supervisor::epoch_of(line.split_whitespace().next()?))
+        .filter(|at| at.saturating_add(86_400) > now)
+        .count()
 }
 
 fn read_output(path: &Path) -> Result<String, String> {
@@ -362,15 +402,25 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
     paths.prepare()?;
     let now = now_s();
     let text = read_output(output)?;
-    let Some(answer) = last_answer(&text) else {
-        directive::log(
-            paths,
-            now,
-            &["answer: none found in the supervisor's output; nothing applied".to_owned()],
-        )?;
-        return Ok(1);
+    let answer = match last_answer(&text) {
+        None => {
+            directive::log(
+                paths,
+                now,
+                &["answer: none found in the supervisor's output; nothing applied".to_owned()],
+            )?;
+            return Ok(1);
+        }
+        Some(Err(error)) => {
+            directive::log(
+                paths,
+                now,
+                &[format!("answer refused: {error}; nothing applied")],
+            )?;
+            return Ok(1);
+        }
+        Some(Ok(answer)) => answer,
     };
-    let mut failed = false;
     match &answer.directive {
         None => directive::log(
             paths,
@@ -379,6 +429,7 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
         )?,
         Some(value) => {
             let context = Context::from_env(env, paths, now)?;
+            // One answer is one decision: its actions may rest on its directive, so they go with it.
             if directive::apply(
                 paths,
                 value.to_string().as_bytes(),
@@ -387,7 +438,15 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
             )
             .is_err()
             {
-                failed = true;
+                directive::log(
+                    paths,
+                    now,
+                    &[
+                        "answer refused: its directive was refused; no GitHub action taken"
+                            .to_owned(),
+                    ],
+                )?;
+                return Ok(1);
             }
         }
     }
@@ -400,8 +459,13 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
                 answer.github.len()
             )],
         )?;
-        return Ok(u8::from(failed));
+        return Ok(0);
     }
+    let max_parks: usize = env("SUPERVISOR_MAX_PARKS_PER_DAY")
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(2);
+    let log_text = files::read_text_limited(&paths.directive_log(), 1 << 20).unwrap_or_default();
+    let mut parks = recent_parks(&log_text, now);
     let allowed = allowed_labels(env);
     let operator = env("OPERATOR_LABEL").unwrap_or_else(|| "ai:operator".to_owned());
     let queue_label = env("ISSUE_LABEL").unwrap_or_else(|| "ai".to_owned());
@@ -409,6 +473,9 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
     for value in &answer.github {
         let line = match serde_json::from_value::<Action>(value.clone()) {
             Err(error) => format!("github: refused an action: {error}"),
+            Ok(Action::Park { issue, .. }) if parks >= max_parks => format!(
+                "github: refused park on #{issue}: {parks} issues parked in 24 h already (SUPERVISOR_MAX_PARKS_PER_DAY)"
+            ),
             Ok(action) => match plan(&action, &allowed, &operator) {
                 Err(why) => format!(
                     "github: refused {} on #{}: {why}",
@@ -422,7 +489,12 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
                         plan.issue
                     ),
                     Some(repo) => match perform(paths, repo, &plan, &queue_label) {
-                        Ok(()) => describe(&action, &plan),
+                        Ok(()) => {
+                            if matches!(action, Action::Park { .. }) {
+                                parks += 1;
+                            }
+                            describe(&action, &plan)
+                        }
                         Err(why) => format!(
                             "github: refused {} on #{}: {why}",
                             action.name(),
@@ -434,7 +506,7 @@ pub fn run(env: Lookup, paths: &Paths, output: &Path) -> Result<u8, String> {
         };
         directive::log(paths, now, &[line])?;
     }
-    Ok(u8::from(failed))
+    Ok(0)
 }
 
 fn describe(action: &Action, plan: &Plan) -> String {
@@ -472,17 +544,88 @@ mod tests {
     #[test]
     fn the_last_answer_of_the_output_is_read() {
         let text = "I looked.\n{\"directive\": null, \"github\": []}\nThen I changed my mind:\n```json\n{\n  \"directive\": {\"version\": 1},\n  \"github\": [{\"comment\": {\"issue\": 7, \"body\": \"x\"}}]\n}\n```\n";
-        let answer = last_answer(text).unwrap();
+        let answer = last_answer(text).unwrap().unwrap();
         assert_eq!(answer.directive, Some(json!({"version": 1})));
         assert_eq!(answer.github.len(), 1);
         assert!(last_answer("no json here\n{not json\n").is_none());
         assert!(last_answer("{\"other\": 1}\n").is_none());
-        // A key the schema does not have makes the document no answer.
-        assert!(last_answer("{\"directive\": null, \"shell\": \"rm -rf /\"}\n").is_none());
+        // A key the schema does not have refuses the answer, and says which.
+        let refused = last_answer("{\"directive\": null, \"shell\": \"rm -rf /\"}\n").unwrap();
+        assert!(refused.is_err_and(|why| why.contains("unknown field `shell`")));
+        assert!(
+            last_answer("{\"directive\": null, \"github\": {\"comment\": 1}}\n")
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_body_reaches_no_one_past_its_issue() {
+        for (body, what) in [
+            ("ping @owner-a about it", "an @-mention"),
+            ("@example-org/team please look", "an @-mention"),
+            ("see https://example.com/x", "a URL"),
+            ("see ftp://192.0.2.1/x", "a URL"),
+            ("see www.example.com", "a URL"),
+            ("the [docs](relative/path)", "a link"),
+            ("![tracker](x)", "an image"),
+            ("<img src=x>", "HTML"),
+            ("<b>bold</b>", "HTML"),
+            ("<!-- hidden -->", "HTML"),
+            (
+                "write to dev-a.example.com's owner, ops@example.com",
+                "an email address",
+            ),
+            ("Fixes #3", "a closing keyword"),
+            ("this closes example-org/other#12", "a closing keyword"),
+            ("Resolved: #4", "a closing keyword"),
+        ] {
+            let refused = plan_of(json!({"comment": {"issue": 7, "body": body}}));
+            assert!(
+                refused.as_ref().is_err_and(|why| why.contains(what)),
+                "{body:?}: {refused:?}"
+            );
+            assert!(
+                plan_of(json!({"park": {"issue": 7, "question": body}})).is_err(),
+                "{body:?}"
+            );
+        }
+        // Plain references and words stay.
+        for body in [
+            "Waits on #3; a prefix #4 and a fixed point stay.",
+            "user@ is not an address",
+            "a < b and 2 > 1",
+            "email the team",
+        ] {
+            assert!(
+                plan_of(json!({"comment": {"issue": 7, "body": body}})).is_ok(),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parks_are_counted_over_the_last_day_from_the_log() {
+        let now = crate::supervisor::epoch_of("2026-11-28T12:00:00Z").unwrap();
+        let log = "2026-11-27T11:00:00Z github: parked #1 for the operator\n2026-11-27T12:30:00Z github: parked #2 for the operator\n2026-11-28T09:00:00Z github: refused park on #3: x\n2026-11-28T10:00:00Z github: parked #4 for the operator\n";
+        assert_eq!(recent_parks(log, now), 2);
     }
 
     #[test]
     fn actions_name_their_kind_and_nothing_else() {
+        for wrong in [
+            json!({"comment": {"issue": "7", "body": "x"}}),
+            json!({"comment": {"issue": 7, "body": 7}}),
+            json!({"label": {"issue": 7, "add": "ai:first"}}),
+            json!({"park": {"issue": 7}}),
+            json!({"park": {"issue": 7, "question": "q", "label": "ai:operator"}}),
+            json!({"comment": {"issue": 7, "body": "x"}, "label": {"issue": 7}}),
+        ] {
+            assert!(
+                serde_json::from_value::<Action>(wrong.clone()).is_err(),
+                "{wrong}"
+            );
+        }
         assert!(serde_json::from_value::<Action>(json!({"merge": {"issue": 7}})).is_err());
         assert!(
             serde_json::from_value::<Action>(

@@ -54,7 +54,8 @@ const PLACE_KEYS: [&str; 5] = [
 
 /// The rails: what the supervisor and its directive may do. Read from harness.env only, never from
 /// the environment, which a process of this user could set to loosen them.
-const RAIL_KEYS: [&str; 21] = [
+const RAIL_KEYS: [&str; 22] = [
+    "SUPERVISOR_MAX_PARKS_PER_DAY",
     "OPERATOR_LOGINS",
     "ISSUE_LABEL",
     "OPERATOR_LABEL",
@@ -741,29 +742,15 @@ fn note_unpause(paths: &Paths, now: u64) {
     }
 }
 
-/// The queue as the supervisor weighs it: the launcher's last claimable count, plus the issues
-/// whose claim a live tick holds.
+/// The queue as the supervisor weighs it: the claimable issues and those whose claim a live tick
+/// holds, as the launcher counted both at one moment (`queue`: `<claimable> <held>`). A claim moves
+/// an issue from the one to the other, so it changes nothing here; counts taken apart would.
 fn queue_total(paths: &Paths) -> Option<u64> {
-    let claimable = read_number(&paths.file("claimable"))?;
-    let live: BTreeSet<u32> = crate::ticks::scan(&paths.state.to_string_lossy())
-        .unwrap_or_default()
-        .iter()
-        .map(|tick| tick.pid)
-        .collect();
-    let held = std::fs::read_dir(paths.state.join("locks"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("claim."))
-        .filter_map(|entry| files::read_text_limited(&entry.path(), SMALL_FILE).ok())
-        .filter(|text| {
-            text.split_whitespace()
-                .nth(1)
-                .and_then(|pid| pid.parse::<u32>().ok())
-                .is_some_and(|pid| live.contains(&pid))
-        })
-        .count();
-    Some(claimable + u64::try_from(held).unwrap_or(0))
+    let text = files::read_text_limited(&paths.file("queue"), SMALL_FILE).ok()?;
+    let mut words = text.split_whitespace();
+    let claimable: u64 = words.next()?.parse().ok()?;
+    let held: u64 = words.next()?.parse().ok()?;
+    Some(claimable + held)
 }
 
 /// The inputs of the events after `since`, but the loops, which [`loop_signals`] reads from GitHub.
@@ -792,9 +779,16 @@ pub fn gather(paths: &Paths, since: u64) -> Inputs {
 }
 
 /// Whether the supervisor's agent may run one short supervisor tick: its entry is not cooling down
-/// and every window of the agent is under the point where a running tick stands down. It needs no
-/// room under the agent's cap: it runs outside the slots, once, within its budget, and holding it
-/// back while the work ticks fill the cap would leave the harness unsteered when it most needs it.
+/// and every window of the agent is under the point where a running tick stands down.
+///
+/// It needs no room under the agent's cap, an exception to the rule every tick meets: it runs
+/// outside the slots, once, within its budget, and holding it back while the work ticks fill the cap
+/// would leave the harness unsteered when it most needs it. The exception covers only the cap. It
+/// does not lift the ceiling: a window at its stand-down point, a reading that is not fresh or an
+/// entry cooling down still keeps it from starting. It does not let two run: the lock and the
+/// minimum interval still hold. And it adds no work: its tick file counts toward the agent's cap from
+/// the moment it starts, so the launcher starts that many fewer work ticks, and the agent runs at
+/// most one tick past its cap for at most `SUPERVISOR_BUDGET_MIN`.
 pub fn room(env: Lookup, paths: &Paths, entry: &Entry) -> Result<(), String> {
     let settings = usage::Settings::from_env(env)?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
@@ -1310,15 +1304,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("logs/allocator.log"), "[tick.sh] exit=9\n").unwrap();
-        std::fs::write(paths.file("claimable"), "4\n").unwrap();
+        // Three claimable and one held: a claim that moves one across leaves the queue at four.
+        std::fs::write(paths.file("queue"), "3 1\n").unwrap();
         std::fs::write(paths.file("queue_at_run"), "2\n").unwrap();
-        // A claim whose tick is gone does not count toward the queue.
-        std::fs::create_dir_all(dir.path().join("locks")).unwrap();
-        std::fs::write(
-            dir.path().join("locks/claim.7"),
-            "7 999999 2026-11-28T00:00:00Z\n",
-        )
-        .unwrap();
         std::fs::write(paths.file("paused"), "").unwrap();
         note_unpause(&paths, NOW);
         let inputs = gather(&paths, 0);
@@ -1367,5 +1355,37 @@ mod room_tests {
         std::fs::create_dir_all(dir.path().join("model-cooldown")).unwrap();
         std::fs::write(dir.path().join("model-cooldown/claude:opus"), "").unwrap();
         assert!(room(&env, &paths, &entry).is_err_and(|why| why.contains("cooling down")));
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn a_claim_is_no_queue_event_and_new_or_finished_work_is() {
+        let dir = crate::dashboard::testkit::TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        paths.prepare().unwrap();
+        let settings = Settings::from_env(&|_| None).unwrap();
+        let queue_event = |record: &str| {
+            std::fs::write(paths.file("queue"), record).unwrap();
+            let mut inputs = gather(&paths, 0);
+            inputs.queue_at_run = Some(5);
+            events(&inputs, &settings, 0, now_s())
+                .iter()
+                .any(|event| event.kind == EventKind::Claimable)
+        };
+        // Five at the last run: 5 claimable, then 4 claimable and 1 held, then 3 and 2.
+        assert!(!queue_event("5 0\n"));
+        assert!(!queue_event("4 1\n"));
+        assert!(!queue_event("3 2\n"));
+        // An issue landed, or a new one was queued.
+        assert!(queue_event("3 1\n"));
+        assert!(queue_event("6 0\n"));
+        // A record that does not read is no event.
+        assert!(!queue_event("five\n"));
     }
 }

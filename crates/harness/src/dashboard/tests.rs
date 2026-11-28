@@ -3248,7 +3248,7 @@ fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_whi
     let directive = json!({
         "version": 1, "reason": "one vendor <b>at a time</b>", "applied_at": at(0), "expires_at": at(3600),
         "width": 2, "models": ["codex:gpt"],
-        "stop": [{"pid": 4242, "reason": "loops on #7", "start": 1, "due_at": at(1200)}]
+        "stop": [{"pid": 4242, "reason": "loops on #7", "start": 1, "named_at": at(0), "due_at": at(1200)}]
     });
     std::fs::write(state.join("directive.json"), directive.to_string()).ok();
     std::fs::create_dir_all(state.join("supervisor")).ok();
