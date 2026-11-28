@@ -266,7 +266,7 @@ fleet_check() {
         --arg agent "$TICK_AGENT" --arg wanted "${FLEET_DEVICE:-auto}" '
         def need($k): if type == "object" and has($k) then .[$k] else error("no \($k) in \(type)") end;
         def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
-        def str: if type == "string" then . elif . == null then "None" elif type == "boolean" then (if . then "True" else "False" end) else tojson end;
+        def str: if type == "string" then . else tojson end;
         def device:
             if need("ok") | truthy | not then
                 need("error") as $e
