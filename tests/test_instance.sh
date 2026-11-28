@@ -27,6 +27,9 @@ printf '%s\n' "${HARNESS_BIN:-unset}" > "$FAKE_LINT_ENV.bin"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
 printf '%s\n' "$*" >> "$FAKE_AGENTS/claude.argv"
 [ -e "$FAKE_AGENTS/claude.limit" ] && echo "You've hit your session limit · resets 5pm"
+# An issue body quoting the sentence, and the tick going on after it.
+[ -e "$FAKE_AGENTS/claude.echo" ] && printf '%s\n' "Read the issue:" "You've hit your session limit · resets 5pm" \
+    "is what the user saw." step-1 step-2 step-3 step-4 step-5
 exit 0
 EOF
 # codex and gemini: each records its argv, its stdin and its marker, and prints its own CLI's
@@ -39,6 +42,15 @@ printf '%s\n' "$*" >> "$FAKE_AGENTS/$name.argv"
 cat > "$FAKE_AGENTS/$name.stdin"
 printf '%s\n' "${HARNESS_TICK:-unset}" > "$FAKE_AGENTS/$name.marker"
 printf '%s\n' "token=${GH_TOKEN:-unset}" > "$FAKE_AGENTS/$name.env"
+# What a tool the agent runs inherits: grep reads its own.
+grep '^SigIgn:' /proc/self/status | cut -f2 > "$FAKE_AGENTS/$name.sigign"
+# pid, pgid and session of this agent, then the pgid of the runner that started it.
+group() { local stat; stat=$(cat "/proc/$1/stat"); set -- ${stat##*) }; echo "$3 $4"; }
+echo "$$ $(group $$) $(group $PPID | cut -d' ' -f1)" > "$FAKE_AGENTS/$name.group"
+# A tick that is stopped, with a tool of its own.
+[ -e "$FAKE_AGENTS/$name.hang" ] && { sleep 30 & wait; }
+# Ends another entry's cooldown, so the next chained tick may pick it.
+[ -e "$FAKE_AGENTS/$name.uncool" ] && rm -f "$(cat "$FAKE_AGENTS/$name.uncool")"
 limit() { case $name in codex) echo "ERROR: You've hit your usage limit. Try again later." ;; gemini) echo "Error: RESOURCE_EXHAUSTED: Quota exceeded" ;; esac; }
 [ -e "$FAKE_AGENTS/$name.limit" ] && { limit; exit 1; }
 # The message without the failure: a tick that quoted it and went on.
@@ -79,6 +91,8 @@ dispatch)
     prompt=$(cat)
     [ -n "$prompt" ] || { echo "fleet: empty prompt" >&2; exit 125; }
     printf '%s' "$prompt" > "$FAKE_FLEET_STDIN"
+    # A wait that is stopped, with a helper of its own.
+    [ -e "$FAKE_FLEET_HANG" ] && { sleep 30 & wait; }
     [ "$model" = "$(cat "$FAKE_FLEET_LIMIT" 2>/dev/null)" ] && { echo "You've hit your usage limit · resets 5pm"; exit 1; }
     echo "agent output on $model"
     exit "$(cat "$FAKE_FLEET_RC" 2>/dev/null || echo 0)" ;;
@@ -123,7 +137,7 @@ export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.
     PATH="$H/fakebin:$PATH" FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron" \
     FAKE_FLEET_STATUS="$here/tests/fixtures/fleet/status.json" FAKE_FLEET_DOWN="$H/fleet-down" FAKE_FLEET_ARGV="$H/fleet-argv.txt" \
     FAKE_FLEET_STDIN="$H/fleet-stdin.txt" FAKE_FLEET_LIMIT="$H/fleet-limit" FAKE_FLEET_RC="$H/fleet-rc" \
-    FAKE_AGENTS="$H/agents" FAKE_WORK="$H/work.txt" HOME="$H/home"
+    FAKE_AGENTS="$H/agents" FAKE_WORK="$H/work.txt" FAKE_FLEET_HANG="$H/fleet-hang" HOME="$H/home"
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE
 mkdir -p "$H/agents"
 LOG="$H/state/logs/allocator.log"
@@ -403,6 +417,12 @@ check "a limit message from each agent cools that entry and the tick moves on to
 check "codex and gemini get their argv, with the prompt on stdin and never in argv" \
     '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && [ "$(cat "$FAKE_AGENTS/gemini.argv")" = "--model model-g --yolo" ] && head -1 "$FAKE_AGENTS/gemini.stdin" | grep -qx "This tick runs on model-g." && grep -q "^Core rules for" "$FAKE_AGENTS/codex.stdin" && ! grep -q "Core rules\|This tick" "$FAKE_AGENTS"/*.argv' \
     "$(head -c 300 "$FAKE_AGENTS"/*.argv)"
+check "a tick and every tool it runs take SIGINT and SIGQUIT" \
+    '[ $(( 16#$(cat "$FAKE_AGENTS/gemini.sigign") & 6 )) -eq 0 ] && [ $(( 16#$(cat "$FAKE_AGENTS/codex.sigign") & 6 )) -eq 0 ]' \
+    "gemini=$(cat "$FAKE_AGENTS/gemini.sigign" 2>/dev/null) codex=$(cat "$FAKE_AGENTS/codex.sigign" 2>/dev/null)"
+read -r g_pid g_pgid g_sid g_runner < "$FAKE_AGENTS/gemini.group"
+check "a tick leads a process group and session of its own, apart from its runner's" \
+    '[ "$g_pgid" = "$g_pid" ] && [ "$g_sid" = "$g_pid" ] && [ "$g_runner" != "$g_pid" ]' "$(cat "$FAKE_AGENTS/gemini.group")"
 check "every agent's tick carries its marker and never GH_TOKEN" \
     '[ "$(cat "$FAKE_AGENTS/gemini.marker")" = "state=$H/state slot=1 agent=gemini model=model-g kind=work" ] && grep -qx "token=unset" "$FAKE_AGENTS/codex.env" && grep -qx "token=unset" "$FAKE_AGENTS/gemini.env"' \
     "$(cat "$FAKE_AGENTS/gemini.marker" 2>/dev/null)"
@@ -432,6 +452,12 @@ launch
 check "a gemini limit message from a tick that exited 0 is no usage limit" \
     '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$H/state/logs/"tick-*.log && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
 rm -f "$FAKE_AGENTS/gemini.quoted"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'"
+touch "$FAKE_AGENTS/claude.echo"
+launch
+check "a limit sentence quoted mid-output, with more output after it, cools nothing" \
+    '[ ! -e "$H/state/model-cooldown/claude:model-c" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -q "session limit" "$H/state/logs/"tick-*.log' "log=$(cat "$LOG")"
+rm -f "$FAKE_AGENTS/claude.echo"
 agents_env "TICK_MODELS=codex:model-x"
 touch "$FAKE_AGENTS/codex.orphan"
 launch
@@ -513,6 +539,43 @@ launch
 check "an old lane tick has claimed, so the lane's queued issue gets a lane tick" \
     'head -1 "$FAKE_PROMPT" | grep -q "^This tick runs on lane-model, the model lane"' "prompt=$(head -1 "$FAKE_PROMPT" 2>/dev/null)"
 release; rm -f "$FAKE_WORK"; echo 0 > "$FAKE_LANE"
+# Chaining: a short tick chains when CHAIN_MIN_TICK_S is 0. The codex tick ends claude's cooldown,
+# so the chained tick runs on claude, the better entry: the next tick may be another agent's.
+mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/claude:model-c"
+echo "$H/state/model-cooldown/claude:model-c" > "$FAKE_AGENTS/codex.uncool"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2"
+launch
+check "a chained tick may run on another agent" \
+    '[ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 1 ] && [ "$(wc -l < "$FAKE_AGENTS/claude.argv")" -eq 1 ] && grep -q "slot1 chains tick 2" "$LOG"' \
+    "log=$(cat "$LOG")"
+# claude at 75 % has room for one tick; the codex tick starts a live claude tick in the other slot,
+# so the chained tick, picking past claude at its cap, runs on codex again.
+usage 75; touch "$H/state/model-cooldown/claude:model-c"
+cat > "$FAKE_AGENTS/claude.fill.sh" <<EOF
+#!/usr/bin/env bash
+[ -e "$H/state/locks/slot2.tick" ] && exit 0
+# Not the runner's slot lock: the live tick this starts must not hold slot 1 past the test.
+for fd in \$(ls /proc/\$\$/fd); do [ "\$fd" -gt 2 ] && eval "exec \$fd>&-"; done 2>/dev/null
+flock -o "$H/state/locks/slot2.lock" sleep 60 >/dev/null 2>&1 & pid=\$!
+stat=\$(cat /proc/\$pid/stat); read -ra f <<<"\${stat##*) }"
+printf '%s %s claude m work\n' \$pid \${f[19]} > "$H/state/locks/slot2.tick"
+echo \$pid > "$FAKE_AGENTS/filler"
+EOF
+chmod +x "$FAKE_AGENTS/claude.fill.sh"
+cat > "$H/fakebin/codex-fill" <<'EOF'
+#!/usr/bin/env bash
+"$FAKE_AGENTS/claude.fill.sh"
+exec "$(dirname "$0")/codex" "$@"
+EOF
+chmod +x "$H/fakebin/codex-fill"
+agents_env "TICK_MODELS='claude:model-c codex:model-x'" "CHAIN_MIN_TICK_S=0" "MAX_CHAIN=2" "MAX_SLOTS=2" "AGENT_BIN_codex=$H/fakebin/codex-fill"
+launch
+filler=$(cat "$FAKE_AGENTS/filler" 2>/dev/null)
+check "a chained tick's pick respects the cap of the agent it picks" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(wc -l < "$FAKE_AGENTS/codex.argv")" -eq 2 ] && grep -q "slot1 chains tick 2" "$LOG"' \
+    "log=$(cat "$LOG") claude=$(cat "$FAKE_AGENTS/claude.argv" 2>/dev/null)"
+pkill -P "$filler" 2>/dev/null; kill "$filler" 2>/dev/null; rm -f "$H/state/locks/slot2.tick" "$FAKE_AGENTS"/codex.uncool "$FAKE_AGENTS/filler"
+rm -rf "$H/state/model-cooldown"; usage 10
 # A stale reading allows nothing, and the launcher says so rather than stopping silently.
 printf '{"timestamp": 1000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' > "$H/usage-cache.json"
 rm -f "$H/state/locks/usage-unknown.stamp"
@@ -535,6 +598,34 @@ check "an empty limit pattern is refused" '[ "$rc" -eq 1 ] && grep -q "missing: 
 write_env
 CLAUDE_FLAGS=--from-the-environment "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "an old key in the environment, not in harness.env, is not this config's" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
+write_env
+
+# Stopping a tick: TERM to its process group ends the agent and its tool, never the runner, which
+# writes the trailer. $1 names the check; the tick is the one slot 1 records.
+stop_tick() {
+    local n=0 pid runner
+    rm -f "$H/state/logs/"tick-*.log; : > "$LOG"
+    "$H/bin/tick.sh"
+    until [ -s "$H/state/locks/slot1.tick" ] || [ "$n" -ge 200 ]; do sleep 0.05; n=$((n + 1)); done
+    read -r pid _ < "$H/state/locks/slot1.tick"
+    runner=$(pgrep -f "$H/bin/tick.sh runner" | head -1)
+    sleep 0.3
+    kill -TERM -- "-$pid"
+    sleep 0.5
+    tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+    check "$1" \
+        '[ -n "$runner" ] && [ "$runner" != "$pid" ] && grep -q "^\[tick.sh\] exit=143 " "$tick_log"' \
+        "pid=$pid runner=$runner log=$(cat "$tick_log" 2>/dev/null)"
+    settle
+}
+agents_env "TICK_MODELS=codex:model-x"
+touch "$FAKE_AGENTS/codex.hang"
+stop_tick "TERM to a local tick's group stops it, and its runner writes the trailer"
+rm -f "$FAKE_AGENTS/codex.hang"
+fleet_env
+touch "$FAKE_FLEET_HANG"
+stop_tick "TERM to a fleet dispatch's group stops the wait, and its runner writes the trailer"
+rm -f "$FAKE_FLEET_HANG"
 write_env
 
 # HARNESS_INSTANCE_DIR moves the whole instance.

@@ -137,6 +137,18 @@ entire history in the GitHub UI, and any tick can resume any other tick's work f
 | Something every tick needs is down | `hooks/hold` holds the harness; nothing spawns or chains until it recovers |
 | Launcher missed | Stateless recompute; the next firing catches up |
 
+What the design leaves open, knowingly:
+
+- Two runners may both pick the last room of one agent in the moment between a pick and the
+  slot file it leads to. The second tick runs past that agent's cap; if its windows are full, its
+  limit message cools the entry as usual.
+- An agent runs for a few milliseconds before its slot file exists, so a scan in that moment does
+  not count it.
+- A tool shell runs as the harness's user and could write a slot file of its own. No design that
+  trusts files of one user can tell that from the runner's.
+- The dashboard counts the lane's agent whenever `LANE_LABEL` is set, not only when the launcher
+  wants a lane tick, so the pool it shows is an upper bound, and it says so.
+
 ## What is deliberately absent
 
 **No daemon** — cron plus flock is more robust than a supervisor process that can itself die.

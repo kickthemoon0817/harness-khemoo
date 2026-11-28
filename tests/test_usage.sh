@@ -68,6 +68,15 @@ rollout 95 -60 0
 check "a rollout whose window reset reads as empty" '[ "$(pool codex:gpt-5.5)" = "8 codex=8" ]' "$(pool codex:gpt-5.5)"
 rollout 95 -60 86400
 check "an old rollout whose window reset still allows only one tick" '[ "$(pool codex:gpt-5.5)" = "1 codex=1" ]' "$(pool codex:gpt-5.5)"
+rollout 82 3600 0
+mkfifo "$H/sessions/2026/11/28/rollout-z.jsonl"
+out=$(TICK_MODELS=codex:gpt-5.5 timeout 10 "$HARNESS_BIN" usage --json | jq -r '.agents[0].cap')
+check "a FIFO among the rollouts is passed over, never waited on" '[ "$out" = 4 ]' "$out"
+rm -f "$H/sessions/2026/11/28/rollout-z.jsonl"
+mkfifo "$H/fifo.json"
+out=$(TICK_MODELS=claude:opus USAGE_CACHE="$H/fifo.json" timeout 10 "$HARNESS_BIN" usage --json | jq -r '.agents[0].reading.state')
+check "a FIFO as claude's cache is unreadable, never waited on" '[ "$out" = unreadable ]' "$out"
+rm -f "$H/fifo.json"
 rm -f "$H/sessions/2026/11/28/rollout-a.jsonl"
 check "no rollout: codex starts nothing" '[ "$(pool codex:gpt-5.5)" = "0 codex=0" ]' "$(pool codex:gpt-5.5)"
 check "gemini without a source allows nothing" '[ "$(pool gemini:gemini-3-pro)" = "0 gemini=0" ]' "$(pool gemini:gemini-3-pro)"

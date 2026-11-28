@@ -56,7 +56,7 @@ INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
 LOCAL_AGENTS="claude codex gemini"
 CLAUDE_LIMIT_RE="You've (reached|hit) your [^.]{0,40}limit"
 CODEX_LIMIT_RE="You've hit your usage limit|rate_limit_reached"
-GEMINI_LIMIT_RE="Quota exceeded|RESOURCE_EXHAUSTED|status 429"
+GEMINI_LIMIT_RE="Quota exceeded|RESOURCE_EXHAUSTED|status 429|You have exhausted your"
 agent_setting() {  # $1 = setting, $2 = agent, $3 = default when the setting is unset
     local name="$1_$2"
     if [ -n "${!name+x}" ]; then printf '%s' "${!name}"; else printf '%s' "$3"; fi
@@ -443,6 +443,15 @@ limit_failed() {
     [ "$1" != gemini ] || [ "$2" -ne 0 ]
 }
 
+# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message:
+# one of its last 5 non-empty lines starts with it, after spaces and an error prefix such as
+# `Error:`, `ERROR:` or `[API Error:`. An agent that quotes the sentence mid-output, from an issue
+# body or a diff, writes more after it.
+limit_message() {
+    tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
+        | grep -qE -- "^[[:space:]]*(\[?([A-Za-z]+ )?([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($(agent_limit_re "$2"))"
+}
+
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
 # model list that no reachable device offers for dispatch (or FLEET_DEVICE, when that names one).
 # fleet exits 1 when any device failed, with the document complete, so only the document decides.
@@ -638,15 +647,24 @@ if [ "${1:-}" = "runner" ]; then
             # pipe, never on disk or in argv. The slot file is how `harness ticks` and
             # libexec/tick-pid.sh know it: they never read its environment, which a non-dumpable
             # agent keeps private.
-            HARNESS_TICK="$marker" "${argv[@]}" < <(compose_prompt "$lane") >>"$log" 2>&1 &
+            # In a session and process group of its own, so stopping the tick (TERM to its group)
+            # reaches the agent and its tools but never this runner, which then writes the trailer.
+            # setsid does not fork: a background job of a shell without job control is no group
+            # leader, so $! stays the agent's pid. A background job also starts with SIGINT and
+            # SIGQUIT ignored, which every tool would inherit, and the runner, started as one
+            # itself, cannot reset them (bash keeps a signal ignored on entry ignored); env can, so
+            # `kill -INT` and `timeout -s INT` reach the agent's tools.
+            setsid env --default-signal=INT,QUIT HARNESS_TICK="$marker" "${argv[@]}" < <(compose_prompt "$lane") >>"$log" 2>&1 &
             tick_pid=$!
             record_tick "$tick_pid" "$agent" "$model" "$kind"
             wait "$tick_pid"; rc=$?
             rm -f "$slot_file"
+            limited=""
+            [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" \
+                && limit_message "$log_from" "$agent" && limited=1
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$agent model=$model" >>"$log"
-            if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" \
-                && tail -c +"$log_from" "$log" | tail -n 40 | grep -qE -- "$(agent_limit_re "$agent")"; then
+            if [ -n "$limited" ]; then
                 mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
                 echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
                 tried="$tried $entry"
