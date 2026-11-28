@@ -829,10 +829,11 @@ if [ "${1:-}" = supervisor ]; then
     harness_supervisor supervisor begin --reason "${2:-}" >/dev/null 2>>"$log"
     run_s=$(date +%s)
     agent_argv "$agent" "$model"
-    # Recorded as the runner records a tick, in a file of its own: `harness ticks` counts it toward
-    # its agent's cap, and libexec/tick-pid.sh, which reads only the slots' files, gives it no claim.
+    # Started and recorded as the runner starts and records a tick, in a session and process group of
+    # its own and in a file of its own: `harness ticks` counts it toward its agent's cap, and
+    # libexec/tick-pid.sh, which reads only the slots' files, gives it no claim.
     slot_file="$LOCKS/supervisor.tick"
-    HARNESS_TICK="state=$HARNESS_STATE slot=0 agent=$agent model=$model kind=supervisor" \
+    setsid env --default-signal=INT,QUIT HARNESS_TICK="state=$HARNESS_STATE slot=0 agent=$agent model=$model kind=supervisor" \
         timeout -k 30 "$(( SUPERVISOR_BUDGET_MIN * 60 ))" "${argv[@]}" < <(compose_supervisor_prompt) >>"$log" 2>&1 &
     tick_pid=$!
     record_tick "$tick_pid" "$agent" "$model" supervisor

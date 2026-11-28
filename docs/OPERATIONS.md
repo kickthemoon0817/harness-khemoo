@@ -71,13 +71,15 @@ that changed:
 2026-11-28T10:02:11Z apply: codex windows fill; claude first (until 2026-11-28T16:02:11Z)
 2026-11-28T10:02:11Z   models: none -> ["claude:claude-opus-5-5","codex:gpt-5.5"]
 2026-11-28T10:02:11Z   clamped width to 4 (the configured width)
-2026-11-28T10:30:02Z stop: TERM to pid 4242 (process group 4242) after its grace: loops on #7
+2026-11-28T10:30:02Z stop: the supervisor stopped pid 4242, TERM to its own process group 4242 after its grace: loops on #7
 2026-11-28T16:02:13Z expired at 2026-11-28T16:02:11Z, defaults in force
 ```
 
 Other first lines are `refused: <why>` (the directive in force stays), `clear: <reason>`,
 `ignored, defaults in force: <why>` (a directive that no longer validates, logged once) and
-`stop: pid <n> skipped: <why>`. The allocator log says `directive: quiet (pause|wake) until ...`
+`stop: pid <n> skipped: <why>` (no longer a live tick, its pid reused, or not leading a process
+group of its own). A stopped tick's log ends with an `exit=143` trailer.
+The allocator log says `directive: quiet (pause|wake) until ...`
 once while a directive keeps the launcher quiet, and `its quiet ended early on <event>` when a wake
 event ended it.
 

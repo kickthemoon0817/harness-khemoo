@@ -30,6 +30,9 @@ case $prompt in
 esac
 printf '%s\n' "${prompt%%$'\n'*}" >> "$FAKE_LANES"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
+# One tick held open, for a stop to end.
+[ -e "$FAKE_LONG" ] && rm -f "$FAKE_LONG" && sleep 30
+exit 0
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
 #!/usr/bin/env bash
@@ -43,7 +46,7 @@ EOF
 printf '#!/usr/bin/env bash\nexit 1\n' > "$H/fakebin/gh"
 chmod +x "$H/fakebin/"*
 git -C "$H/target" init -q
-write_env() {  # $1 = SUPERVISOR's value
+write_env() {  # $1 = SUPERVISOR's value; any further argument is one more line
     cat > "$H/instance/harness.env" <<EOF
 TARGET_REPO=$H/target
 WORKTREE_ROOT=$H/worktrees
@@ -63,12 +66,13 @@ SUPERVISOR_MIN_INTERVAL_S=3600
 SUPERVISOR_INTERVAL_S=7200
 SUPERVISOR_STOP_GRACE_S=2
 EOF
+    [ $# -gt 1 ] && printf '%s\n' "${@:2}" >> "$H/instance/harness.env"
 }
 write_env 1
 unset HARNESS_TICK FLEET_SESSION HARNESS_STATE GH_TOKEN
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" PATH="$H/fakebin:$PATH" \
     FAKE_LANES="$H/lanes.txt" FAKE_ARGS="$H/args.txt" FAKE_SUP_PROMPT="$H/sup-prompt.txt" FAKE_SUP_ENV="$H/sup-env.txt" \
-    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json" FAKE_SUP_TICKS="$H/sup-ticks.txt" FAKE_READY="$H/ready.txt" FAKE_SUP_CLAIM="$H/sup-claim.txt"
+    FAKE_SUP_CRASH="$H/sup-crash" FAKE_DIRECTIVE="$H/directive-in.json" FAKE_SUP_TICKS="$H/sup-ticks.txt" FAKE_READY="$H/ready.txt" FAKE_LONG="$H/long" FAKE_SUP_CLAIM="$H/sup-claim.txt"
 S="$H/state"; L="$S/locks"; LOG="$S/logs/allocator.log"; DLOG="$S/logs/directive.log"; SUP="$S/supervisor"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
@@ -224,30 +228,47 @@ record() {
     stat=$(cat "/proc/$1/stat"); read -ra f <<<"${stat##*) }"
     printf '%s %s claude model-a work\n' "$1" "${f[19]}" > "$3/locks/slot$2.tick"
 }
-# A stand-in tick in a process group of its own, as the runner's setsid gives it; a process no slot
-# file records; and another installation's tick.
-setsid sleep 60 & tick=$!; holders+=("$tick")
-until_ok bash -c "[ \"\$(ps -o pgid= -p $tick | tr -d ' ')\" = $tick ]"
-record "$tick" 9 "$S"
+# A process no slot file records; another installation's tick; and a tick in the test shell's own
+# process group, which a stop refuses rather than signal.
 sleep 60 & plain=$!; holders+=("$plain")
 sleep 60 & foreign=$!; holders+=("$foreign")
 record "$foreign" 9 "$H/other"
+sleep 60 & shared=$!; holders+=("$shared")
+record "$shared" 8 "$S"
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $plain, \"reason\": \"x\"}]}"
 check "a pid that is no tick is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"not a live tick of this installation"* ]]' "rc=$rc $out"
 apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $foreign, \"reason\": \"x\"}]}"
 check "another installation's tick is refused" '[ "$rc" -eq 1 ] && [[ "$out" == *"not a live tick of this installation"* ]]' "rc=$rc $out"
-apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"stop\": [{\"pid\": $tick, \"reason\": \"loops on #7\"}]}"
-check "a live tick of this installation may be named" '[ "$rc" -eq 0 ]' "rc=$rc $out"
-launch
+# A runner's own tick, held open. A stopped tick of a few seconds chains only under a
+# CHAIN_MIN_TICK_S below that.
+write_env 1 CHAIN_MIN_TICK_S=1
+apply "{\"version\": 1, \"reason\": \"one\", \"expires_at\": \"$(at 3600)\", \"width\": 1}"
+: > "$FAKE_LANES"; : > "$LOG"; touch "$FAKE_LONG"
+"$H/bin/tick.sh"
+until_ok test -s "$L/slot1.tick"
+tick=$(cut -d' ' -f1 "$L/slot1.tick")
+apply "{\"version\": 1, \"reason\": \"stop\", \"expires_at\": \"$(at 3600)\", \"width\": 1, \"stop\": [{\"pid\": $tick, \"reason\": \"loops on #7\"}, {\"pid\": $shared, \"reason\": \"shares a group\"}]}"
+check "live ticks of this installation may be named" '[ "$rc" -eq 0 ]' "rc=$rc $out"
+"$H/bin/tick.sh"
 check "the tick is not stopped before its grace" 'kill -0 "$tick" 2>/dev/null' "gone early"
 sleep 2.2
-launch
-until_ok bash -c "! kill -0 $tick 2>/dev/null"
-check "after its grace the tick gets TERM, and the stop is logged" \
-    '! kill -0 "$tick" 2>/dev/null && grep -q "stop: TERM to pid $tick (process group $tick) after its grace: loops on #7" "$DLOG"' "$(tail -n 3 "$DLOG")"
+"$H/bin/tick.sh"
+until_ok no_runner
+check "after its grace the tick's own process group gets TERM, and the stop is logged" \
+    '! kill -0 "$tick" 2>/dev/null && grep -q "stop: the supervisor stopped pid $tick, TERM to its own process group $tick after its grace: loops on #7" "$DLOG"' \
+    "$(grep "stop:" "$DLOG")"
+check "the runner survives the stop: it writes the tick's trailer" \
+    'grep -q "^\[tick.sh\] exit=143 " "$S"/logs/tick-*-slot1.log' "$(tail -n 2 "$S"/logs/tick-*-slot1.log)"
+check "and it chains the next tick" \
+    'grep -q "slot1 chains tick 2" "$LOG" && [ "$(ticks_run)" = 2 ]' "lanes=$(cat "$FAKE_LANES") log=$(cat "$LOG")"
+check "a tick outside a process group of its own is refused, not signalled" \
+    'kill -0 "$shared" && grep -q "stop: pid $shared skipped: its process group ([0-9]*) is not its own" "$DLOG"' "$(grep "stop:" "$DLOG")"
 check "nothing else was stopped" 'kill -0 "$plain" && kill -0 "$foreign"' "plain or foreign gone"
 launch
 check "a stop is sent once" '[ "$(grep -c "stop: .*pid $tick" "$DLOG")" -eq 1 ]' "$(grep "stop:" "$DLOG")"
+kill "$shared"; rm -f "$L/slot8.tick"
+write_env 1
+"$HARNESS_BIN" directive clear >/dev/null
 
 # --- a supervisor that crashes leaves the defaults in force --------------------------------------
 reset_supervisor

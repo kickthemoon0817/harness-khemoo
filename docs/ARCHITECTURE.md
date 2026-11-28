@@ -107,7 +107,7 @@ linted. A directive narrows or reorders what the configuration allows, never wid
 | `models` | the entries to try, in this order | a subset or reordering of the configured list; any other entry is refused |
 | `focus`, `avoid` | a sentence on each tick's lane line | changes what a tick prefers, never what it may claim |
 | `notes` | one line to the tick working an issue, through `libexec/usage-ok.sh` | shown once per tick |
-| `stop` | TERM to a tick's process group after `SUPERVISOR_STOP_GRACE_S`; the group holds its runner, so that slot chains nothing | only a live tick of this installation whose start time still matches |
+| `stop` | TERM to the tick's own process group after `SUPERVISOR_STOP_GRACE_S`; its runner writes the trailer (`exit=143`) and chains as usual | only a live tick of this installation whose start time still matches and that leads its own group; any other is refused and logged |
 
 The usage ceiling and caps, claims, the merge lock, the token's handling, the lint and the human's
 pause stay in the script, and the human's pause (`state/paused`, the cron line, `hooks/hold`)

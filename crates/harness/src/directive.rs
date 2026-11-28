@@ -916,7 +916,10 @@ pub enum Verdict {
 }
 
 /// Whether `stop` may be sent: the pid is still a live tick of this installation, not the
-/// supervisor, with the start time recorded when it was named, in a process group of its own.
+/// supervisor, with the start time recorded when it was named, and leads the process group TERM
+/// goes to. The runner starts each tick in a session of its own, so the group holds the tick and
+/// its tools and never the runner, which then writes the trailer and chains; a tick in any other
+/// group is refused rather than signalled.
 pub fn verify(stop: &Stop, live: &[LiveTick], group: Option<u32>, own_group: u32) -> Verdict {
     let Some(tick) = live.iter().find(|tick| tick.pid == stop.pid) else {
         return Verdict::Skip("no longer a live tick of this installation".to_owned());
@@ -928,8 +931,9 @@ pub fn verify(stop: &Stop, live: &[LiveTick], group: Option<u32>, own_group: u32
         return Verdict::Skip("its pid now names another process".to_owned());
     }
     match group {
-        Some(group) if group > 1 && group != own_group => Verdict::Signal(group),
-        _ => Verdict::Skip("its process group is not its own".to_owned()),
+        Some(group) if group == stop.pid && group != own_group => Verdict::Signal(group),
+        Some(group) => Verdict::Skip(format!("its process group ({group}) is not its own")),
+        None => Verdict::Skip("its process group cannot be read".to_owned()),
     }
 }
 
@@ -972,7 +976,7 @@ fn enforce(env: Lookup, paths: &Paths) -> Result<ExitCode, String> {
                     });
                 match sent {
                     Some(Ok(())) => format!(
-                        "stop: TERM to pid {} (process group {group}) after its grace: {}",
+                        "stop: the supervisor stopped pid {}, TERM to its own process group {group} after its grace: {}",
                         stop.pid, stop.reason
                     ),
                     Some(Err(error)) => format!("stop: pid {} not signalled: {error}", stop.pid),
@@ -1261,12 +1265,16 @@ mod tests {
         assert!(
             matches!(verify(&stop, &reused, Some(4242), 1), Verdict::Skip(why) if why.contains("another process"))
         );
+        // A tick that shares its runner's group, or any other, is refused: TERM would reach more.
+        assert!(
+            matches!(verify(&stop, &live(), Some(77), 1), Verdict::Skip(why) if why.contains("(77) is not its own"))
+        );
         assert!(matches!(
             verify(&stop, &live(), Some(1), 1),
             Verdict::Skip(_)
         ));
         assert!(matches!(
-            verify(&stop, &live(), Some(77), 77),
+            verify(&stop, &live(), Some(4242), 4242),
             Verdict::Skip(_)
         ));
         assert!(matches!(verify(&stop, &live(), None, 1), Verdict::Skip(_)));
