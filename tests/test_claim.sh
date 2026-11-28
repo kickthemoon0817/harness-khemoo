@@ -29,5 +29,19 @@ out=$(HARNESS_STATE="$H/st" "$CLAIM" acquire 12); check "the claim lives under H
 "$CLAIM" acquire abc >/dev/null 2>&1; rc=$?; check "a non-numeric issue is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 "$CLAIM" take 7 >/dev/null 2>&1; rc=$?; check "an unknown command is refused" '[ "$rc" -eq 2 ]' "rc=$rc"
 
+# With libexec/tick-pid.sh beside it, the claim belongs to the tick that the runner marked, whatever
+# agent runs it, and a shell outside any tick of this harness takes none.
+cp "$here/libexec/tick-pid.sh" "$H/libexec/"
+export HARNESS_STATE="$H/state" CLAIM H
+unset HARNESS_TICK FLEET_SESSION
+HARNESS_TICK="state=$H/state slot=1 agent=gemini model=m kind=work" \
+    bash -c 'echo $$ > "$H/tick"; bash -c "\"\$CLAIM\" acquire 13 > \"\$H/out\""; true'
+check "a tool shell's claim belongs to its marked tick" \
+    'grep -qx ACQUIRED "$H/out" && grep -q "^13 $(cat "$H/tick") " "$L/claim.13"' "$(cat "$H/out") $(cat "$L/claim.13" 2>/dev/null)"
+HARNESS_TICK="state=$H/elsewhere slot=1 agent=gemini model=m kind=work" \
+    bash -c 'echo $$ > "$H/tick"; bash -c "\"\$CLAIM\" acquire 14 > \"\$H/out\" 2>&1; echo rc=\$? >> \"\$H/out\""; true'
+check "a tick of another state directory takes no claim here" \
+    '! grep -q "^14 $(cat "$H/tick") " "$L/claim.14" 2>/dev/null' "$(cat "$H/out")"
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

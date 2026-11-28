@@ -1,50 +1,60 @@
 #!/usr/bin/env bash
-# Exercises libexec/tick-pid.sh: the nearest ancestor matching an `exe` or `exe:arg` entry of
-# TICK_AGENT_EXES is the tick. Agent names here are made up where they can be, so an agent that runs
-# the suite is never mistaken for one; the default's cases use claude and only check that the fake
-# process was or was not chosen, since a real `claude -p` may sit further up.
+# Exercises libexec/tick-pid.sh: the tick is the nearest ancestor that carries HARNESS_TICK for this
+# state directory, or FLEET_SESSION, while its parent does not. The suite may itself run under a
+# tick, whose processes sit further up, so a case where none of its own processes is the tick only
+# checks that none of them was chosen.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
-export H TP="$here/libexec/tick-pid.sh" OUT="$H/out"
-cp "$(command -v bash)" "$H/agent-b"
+export H TP="$here/libexec/tick-pid.sh" OUT="$H/out" HARNESS_STATE="$H/state"
+unset HARNESS_TICK FLEET_SESSION
+MARK="state=$H/state slot=1 agent=codex model=m kind=work"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
-# Each shell runs a second command so it forks tick-pid.sh instead of exec'ing into it.
-run_as() {  # $1 = argv[0] for the shell, $2 = its script; the shell's pid goes to $H/pid
-    (exec -a "$1" bash -c 'echo $$ > "$0"; '"$2"'; true' "$H/pid")
+# The outer shell writes its pid to $H/pid and runs $1 under a tool shell of its own, which runs
+# tick-pid.sh; every shell runs a second command, so none execs into the next.
+under() {  # $1 = what the tool shell runs; the outer shell's environment is the caller's
+    bash -c 'echo $$ > "$H/pid"; bash -c "$0; true"; true' "$1"
 }
+tp='"$TP" > "$OUT" 2>&1'
 
-TICK_AGENT_EXES=agent-a run_as /opt/bin/agent-a '"$TP" > "$OUT"'
-check "an ancestor whose argv[0] is a listed agent is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+HARNESS_TICK="$MARK" under "$tp"
+check "the topmost process carrying the marker is the tick, not the tool shell under it" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES=agent-a run_as bash 'bash -c "echo agent-a -p; \"\$TP\" > \"\$OUT\" 2>&1; echo rc=\$? >> \"\$OUT\""' >/dev/null
-check "a shell whose command text names the agent is not the tick" 'grep -q "^ERROR: no ancestor in TICK_AGENT_EXES" "$OUT" && grep -qx "rc=1" "$OUT"' "$(cat "$OUT")"
+HARNESS_TICK="state=$H/other slot=1 agent=codex model=m kind=work" under "$tp"
+check "a marker of another state directory is not this harness's tick" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES="codex agent-a" run_as agent-a '(exec -a codex bash -c "echo \$\$ > \"$H/inner\"; \"\$TP\" > \"\$OUT\"; true")'
-check "the nearest listed ancestor wins" '[ "$(cat "$OUT")" = "$(cat "$H/inner")" ]' "out=$(cat "$OUT") inner=$(cat "$H/inner")"
+HARNESS_TICK="state=$H/state-2 slot=1 agent=codex model=m kind=work" under "$tp"
+check "a state directory that only starts with this one is another" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-(exec -a renamed "$H/agent-b" -c 'echo $$ > "$0"; TICK_AGENT_EXES=agent-b "$TP" > "$OUT"; true' "$H/pid")
-check "an ancestor whose executable is a listed agent is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+FLEET_SESSION=d-1-abc under "$tp"
+check "the topmost process carrying FLEET_SESSION is a dispatched tick" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-TICK_AGENT_EXES=agent-a:-p run_as agent-a '"$TP" > "$OUT" 2>&1'
-check "an entry with an argument refuses another first argument" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+under "$tp"
+check "without a marker there is no tick among the shells" \
+    '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ] && ! grep -qx "$(cat "$H/pid")" "$OUT"' "out=$(cat "$OUT")"
 
-# bash's argv[1] here is -c, as an interactive `claude` has no -p.
-(unset TICK_AGENT_EXES; run_as claude '"$TP" > "$OUT" 2>&1')
-check "by default an interactive claude is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# A tool runner that clears its environment leaves an unmarked gap; the agent above it is the tick.
+HARNESS_TICK="$MARK" under 'env -i H="$H" TP="$TP" OUT="$OUT" HARNESS_STATE="$HARNESS_STATE" bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"'
+check "a tool shell with a cleared environment still finds the tick above it" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-# bash -p only skips the startup files here; it makes argv[1] -p.
-(unset TICK_AGENT_EXES; exec -a claude bash -p -c 'echo $$ > "$0"; "$TP" > "$OUT"; true' "$H/pid")
-check "by default claude -p is the tick" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# An npm-installed agent CLI runs as node with its script as argv[1], and starts its native agent.
+printf '%s\n' 'echo $$ > "$H/pid"; bash -c "\"\$TP\" > \"\$OUT\" 2>&1; true"; true' > "$H/agent.js"
+(export HARNESS_TICK="$MARK"; exec -a node bash "$H/agent.js")
+check "a node shim, not the agent under it, is the tick" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
 
-# bash runs the script file named exec, so the process reads as `codex exec`.
-printf '%s\n' 'echo $$ > "$H/pid"; "$TP" > "$OUT" 2>&1; true' > "$H/exec"
-(unset TICK_AGENT_EXES; cd "$H" && exec -a codex bash exec)
-check "by default codex exec is not the tick" '[ "$(cat "$OUT")" != "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
-(export TICK_AGENT_EXES="claude:-p codex:exec"; cd "$H" && exec -a codex bash exec)
-check "codex exec is the tick once codex:exec is listed" '[ "$(cat "$OUT")" = "$(cat "$H/pid")" ]' "out=$(cat "$OUT") pid=$(cat "$H/pid")"
+# The tick of another installation runs this one's: only the inner marker names this state.
+HARNESS_TICK="state=$H/other slot=1 agent=a model=m kind=work" \
+    bash -c 'HARNESS_TICK="$0" bash -c "echo \$\$ > \"\$H/inner\"; \"\$TP\" > \"\$OUT\" 2>&1; true"; true' "$MARK"
+check "a tick under another installation's tick is its own" \
+    '[ "$(cat "$OUT")" = "$(cat "$H/inner")" ]' "out=$(cat "$OUT") inner=$(cat "$H/inner")"
 
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Prints the rate-limit reading and exits 0 while both windows are under the point where a tick
-# stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT unless set; the
-# weekly window reads USAGE_TICK_STOP_WEEK_PCT, the same point unless set), 1 at or above it,
-# and 2 when no fresh reading exists. Ticks run it before starting any build, suite, long run
-# or agent.
+# Prints the usage reading of this tick's agent and exits 0 while each of its windows is under the
+# point where a tick stands down (USAGE_TICK_STOP_PCT, two under the ceiling USAGE_CEILING_PCT
+# unless set, for a window under a day; USAGE_TICK_STOP_LONG_PCT, the same point unless set, for a
+# longer one), 1 at or above one, and 2 when no fresh reading exists (`harness usage check`). The
+# agent is the one HARNESS_TICK names, else the fleet adapter that started the tick, else
+# TICK_AGENT. Ticks run it before starting any build, suite, long run or agent.
 set -u
 # shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
 harness_load
-# shellcheck source=/dev/null
-. "$HARNESS_HOME/lib/usage.sh"
 
 # A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue this tick claimed that is newer than the
 # claim, once per tick. Silent, and never fatal, when no claim, no token or no answer is found.
@@ -39,15 +38,13 @@ operator_notes() {
 }
 operator_notes || true
 
-read_usage
-if [ -z "$five" ] || [ -z "$week" ]; then
-    echo "usage unknown: no fresh reading in $USAGE_CACHE; start nothing"
-    exit 2
-fi
-stops="stop=${USAGE_TICK_STOP_PCT}% week_stop=${USAGE_TICK_STOP_WEEK_PCT}% ceiling=${USAGE_CEILING_PCT}%"
-if under_ceiling "$USAGE_TICK_STOP_PCT" "$USAGE_TICK_STOP_WEEK_PCT"; then
-    echo "five=${five}% week=${week}% $stops: go on"
-    exit 0
-fi
-echo "five=${five}% week=${week}% $stops: start nothing, pause and end"
-exit 1
+agent=${FLEET_ADAPTER:-${TICK_AGENT:-claude}}
+# The marker's fields after its state are fixed, and the state itself may hold spaces.
+case ${HARNESS_TICK:-} in
+    "state=$HARNESS_STATE slot="*) agent=${HARNESS_TICK% model=*}; agent=${agent##* agent=} ;;
+esac
+# harness.env is sourced, not exported, and harness usage reads its settings from the environment.
+vars=$(compgen -v USAGE_)
+# shellcheck disable=SC2086,SC2163
+[ -n "$vars" ] && export $vars
+exec "$HARNESS_BIN" usage check --agent "$agent"

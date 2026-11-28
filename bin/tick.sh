@@ -9,7 +9,7 @@
 #                                 internal: one tick that claims only a merge slot's ready issue
 #
 # The launcher is invoked from cron every couple of minutes. It sizes the pool from
-# live API rate-limit headroom AND the number of unclaimed issues, then spawns enough
+# each agent's usage windows AND the number of unclaimed issues, then spawns enough
 # runners to fill it. Every step is ordered cheapest-first so the common case (nothing
 # to do) costs no API calls.
 set -u
@@ -30,13 +30,8 @@ harness_load
 : "${HEARTBEAT_INTERVAL:=1800}"
 : "${LOG_RETENTION:=200}"
 : "${HOLD_TIMEOUT_S:=5}"
-# shellcheck source=/dev/null
-. "$HARNESS_HOME/lib/usage.sh"
-: "${CLAUDE_BIN:=claude}"
-# Set, but possibly empty: an explicit `CLAUDE_FLAGS=` means "pass no flags".
-[ -z "${CLAUDE_FLAGS+x}" ] && CLAUDE_FLAGS="--dangerously-skip-permissions"
-# The agent a tick runs: an adapter name in fleet's sense. Only claude runs locally; any agent can
-# run through `fleet dispatch` when FLEET_DISPATCH=1 (docs/FLEET.md).
+: "${USAGE_CEILING_PCT:=90}"
+# The agent that runs a model listed without one.
 : "${TICK_AGENT:=claude}"
 : "${FLEET_BIN:=fleet}"
 fleet=""; [ "${FLEET_DISPATCH:-}" = 1 ] && fleet=1
@@ -51,15 +46,101 @@ mkdir -p "$LOGS" "$LOCKS"
 CORE_PROMPT="$HARNESS_HOME/prompts/tick-core.md"
 INSTANCE_PROMPT="$HARNESS_INSTANCE_DIR/prompts/tick.md"
 
+# The agent CLIs a tick runs on this host, each reading its prompt from stdin, never argv, which ps
+# shows. AGENT_BIN_<agent> names the executable (default: the agent's name), AGENT_FLAGS_<agent> its
+# flags (set but empty passes none) and AGENT_LIMIT_RE_<agent> the extended regex its usage-limit
+# message matches. Through fleet any adapter runs, and the device's fleetd.toml fixes its argv.
+LOCAL_AGENTS="claude codex gemini"
+CLAUDE_LIMIT_RE="You've (reached|hit) your [^.]{0,40}limit"
+CODEX_LIMIT_RE="You've hit your usage limit|rate_limit_reached"
+GEMINI_LIMIT_RE="Quota exceeded|RESOURCE_EXHAUSTED|status 429"
+agent_setting() {  # $1 = setting, $2 = agent, $3 = default when the setting is unset
+    local name="$1_$2"
+    if [ -n "${!name+x}" ]; then printf '%s' "${!name}"; else printf '%s' "$3"; fi
+}
+agent_bin() { local name="AGENT_BIN_$1"; printf '%s' "${!name:-$1}"; }
+agent_limit_re() {
+    case $1 in
+        claude) agent_setting AGENT_LIMIT_RE claude "$CLAUDE_LIMIT_RE" ;;
+        codex) agent_setting AGENT_LIMIT_RE codex "$CODEX_LIMIT_RE" ;;
+        gemini) agent_setting AGENT_LIMIT_RE gemini "$GEMINI_LIMIT_RE" ;;
+        # A fleet adapter of another name runs one of these CLIs under it.
+        *) agent_setting AGENT_LIMIT_RE "$1" "$CLAUDE_LIMIT_RE|$CODEX_LIMIT_RE|$GEMINI_LIMIT_RE" ;;
+    esac
+}
+# Sets argv to the command line that runs agent $1 on model $2 here.
+agent_argv() {
+    local bin flags
+    bin=$(agent_bin "$1")
+    # The entry names the model; a --model among the flags would contradict it.
+    case $1 in
+        claude) flags=$(agent_setting AGENT_FLAGS claude --dangerously-skip-permissions) ;;
+        codex) flags=$(agent_setting AGENT_FLAGS codex --dangerously-bypass-approvals-and-sandbox) ;;
+        gemini) flags=$(agent_setting AGENT_FLAGS gemini --yolo) ;;
+    esac
+    flags=$(printf '%s' "$flags" | sed -E 's/--model[= ][^ ]+//')
+    # shellcheck disable=SC2206
+    case $1 in
+        claude) argv=("$bin" -p --model "$2" $flags) ;;
+        codex) argv=("$bin" exec --model "$2" $flags -) ;;
+        # gemini runs headless because its stdin is not a terminal.
+        gemini) argv=("$bin" --model "$2" $flags) ;;
+    esac
+}
+
 # The launcher fires every couple of minutes: a state that persists is logged once, not each time.
 log_changed() {  # $1 = message
     tail -1 "$LOGS/allocator.log" 2>/dev/null | cut -d' ' -f2- | grep -qxF -- "$1" \
         || echo "$(date -u +%Y%m%dT%H%M%SZ) $1" >> "$LOGS/allocator.log"
 }
 
+# Model priority, best first: state/tick-model (whitespace-separated) overrides TICK_MODELS. Each
+# entry is agent:model, or a model that TICK_AGENT runs. An entry that hit its usage limit is
+# skipped until its cooldown passes.
+: "${TICK_MODELS:=claude-opus-5-5}"
+: "${MODEL_COOLDOWN_S:=1800}"
+MODEL_COOL="$HARNESS_STATE/model-cooldown"
+model_list() {
+    if [ -s "$HARNESS_STATE/tick-model" ]; then tr -s '[:space:]' ' ' < "$HARNESS_STATE/tick-model"
+    else printf '%s' "$TICK_MODELS"; fi
+}
+entry_of() {  # $1 = a list entry; prints it as agent:model
+    case $1 in *:*) printf '%s' "$1" ;; *) printf '%s' "$TICK_AGENT:$1" ;; esac
+}
+
+# The model lane: an issue labelled LANE_LABEL (the operator sets it on difficult or important
+# issues) is worked on LANE_MODEL. A tick runs on that lane while claimable lane issues outnumber
+# the live lane ticks, and its prompt tells it to claim only those; other ticks leave them alone.
+# While LANE_MODEL cools down on its usage limit, any tick may claim them, so none waits on it.
+# The lane is off unless both are set.
+: "${LANE_MODEL:=}"
+: "${LANE_LABEL:=}"
+lane_entry=""; [ -n "$LANE_MODEL" ] && lane_entry=$(entry_of "$LANE_MODEL")
+lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
+
+# The agents the model list and the lane name, one a line, each once.
+list_agents() {
+    local w
+    for w in $(model_list) $(lane_on && printf '%s' "$lane_entry"); do
+        w=$(entry_of "$w"); printf '%s\n' "${w%%:*}"
+    done | awk '!seen[$0]++'
+}
+
+# Runs `harness usage` with what it reads: harness.env is sourced here, not exported.
+harness_usage() {
+    (
+        vars=$(compgen -v USAGE_)
+        # shellcheck disable=SC2086,SC2163
+        [ -n "$vars" ] && export $vars
+        [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
+        export MAX_SLOTS MODEL_COOLDOWN_S
+        TICK_MODELS=$(model_list) LANE_MODEL=$(lane_on && printf '%s' "$lane_entry") exec "$HARNESS_BIN" usage "$@"
+    )
+}
+
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
-    local root argv
+    local root argv a bin
     if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
     else
         if [ -z "${TARGET_REPO:-}" ]; then echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
@@ -81,12 +162,17 @@ instance_missing() {
         if [ -n "$fleet" ]; then
             type -P -- "$FLEET_BIN" >/dev/null || echo "an executable FLEET_BIN ($FLEET_BIN)"
         else
-            [ "$TICK_AGENT" = claude ] \
-                || echo "$HARNESS_ENV_FILE: TICK_AGENT=$TICK_AGENT needs FLEET_DISPATCH=1; only claude runs locally"
-            type -P -- "$CLAUDE_BIN" >/dev/null || echo "an executable CLAUDE_BIN ($CLAUDE_BIN)"
+            for a in $(list_agents); do
+                case " $LOCAL_AGENTS " in
+                    *" $a "*)
+                        bin=$(agent_bin "$a")
+                        type -P -- "$bin" >/dev/null || echo "an executable AGENT_BIN_$a ($bin)" ;;
+                    *) echo "$HARNESS_ENV_FILE: agent $a needs FLEET_DISPATCH=1; only $LOCAL_AGENTS run locally" ;;
+                esac
+            done
         fi
     fi
-    # A tick runs the lint through it before every post.
+    # A tick runs the lint through it before every post, and the launcher counts ticks and usage with it.
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
@@ -101,12 +187,47 @@ fi
 # reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
 export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
     ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
-    TICK_AGENT TICK_AGENT_EXES FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG HARNESS_BIN
+    TICK_AGENT FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG HARNESS_BIN
 export -n GH_TOKEN
+
+# Sets allowed, the pool's cap from each agent's usage windows; usage_line, each agent's cap and
+# windows for the log; and unknown, the agents without a fresh reading. Slots past TICK_WIDTH and up
+# to MAX_SLOTS are left for the landing tick. A failed reading allows nothing.
+compute_allowed() {
+    local doc err
+    allowed=0; usage_line="usage=unknown"; unknown=""
+    err=$(mktemp)
+    if doc=$(harness_usage --json 2>"$err"); then
+        { read -r allowed; read -r usage_line; read -r unknown; } < <(jq -r '
+            .pool_cap,
+            ([.agents[] | "\(.agent)=\(.cap)[" + (if .reading.state == "fresh" or .reading.state == "unmetered"
+                then [.windows[] | "\(.name):\(.used_pct | if . == floor then floor else . end)%"] | join(",") else "unknown" end) + "]"] | join(" ")),
+            ([.agents[] | select(.reading.state == "stale" or .reading.state == "unreadable") | .agent] | join(" "))' <<<"$doc")
+        [[ "$allowed" =~ ^[0-9]+$ ]] || allowed=0
+    else
+        log_changed "ERROR harness usage failed ($(tail -n 1 "$err" | cut -c1-200)); starting nothing"
+    fi
+    rm -f "$err"
+}
+
+# Sets ticks to this state directory's live ticks, `pid age slot agent model kind` a line, from
+# `harness ticks`. A failed read is logged and counts none.
+read_ticks() {
+    local err
+    err=$(mktemp)
+    if ! ticks=$("$HARNESS_BIN" ticks 2>"$err"); then
+        log_changed "ERROR harness ticks failed ($(tail -n 1 "$err" | cut -c1-200)); counting no live tick"
+        ticks=""
+    fi
+    rm -f "$err"
+}
+# How many of the live ticks of kind $1 (any when empty) are younger than CLAIM_GRACE_S.
+young_ticks() {
+    awk -v grace="${CLAIM_GRACE_S:-360}" -v kind="$1" 'NF && $2 < grace && (kind == "" || $6 == kind)' <<<"$ticks" | wc -l
+}
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
 compute_want() {
-    local pid age
     if queue_depth "$ISSUE_LABEL"; then
         claimable=$queue_n
     else
@@ -117,32 +238,18 @@ compute_want() {
     fi
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
-    young=0
-    for pid in $(pgrep -f "$tick_re" 2>/dev/null); do
-        age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young=$(( young + 1 ))
-    done
+    read_ticks
+    young=$(young_ticks "")
     want=$(( claimable - young ))
     [ "$want" -lt 0 ] && want=0
 }
 
-# Model priority, best first: state/tick-model (whitespace-separated) overrides
-# TICK_MODELS. A model that hit its usage limit is skipped until its cooldown passes.
-: "${TICK_MODELS:=claude-opus-5-5}"
-: "${MODEL_COOLDOWN_S:=1800}"
-MODEL_COOL="$HARNESS_STATE/model-cooldown"
-model_list() {
-    if [ -s "$HARNESS_STATE/tick-model" ]; then tr -s '[:space:]' ' ' < "$HARNESS_STATE/tick-model"
-    else printf '%s' "$TICK_MODELS"; fi
-}
-pick_model() {  # $1 = models already tried this tick
-    local m stamp
-    for m in $(model_list); do
-        case " $1 " in *" $m "*) continue ;; esac
-        stamp="$MODEL_COOL/$m"
-        if [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]; then continue; fi
-        echo "$m"; return 0
-    done
+# The best entry that is not cooling down and not among $1, the entries this tick tried, whose
+# agent runs fewer ticks than its usage windows allow (harness usage pick). Further arguments go to
+# the pick: --landing, --entry <entry>.
+pick_model() {
+    local tried=$1; shift
+    harness_usage pick --tried "$tried" "$@"
 }
 
 cron_active() { crontab -l 2>/dev/null | grep -qE '^[[:space:]]*[^#[:space:]].*bin/tick\.sh'; }
@@ -193,22 +300,14 @@ queue_depth() {  # $1 = the label to count
     queue_n=$out
 }
 
-# The model lane: an issue labelled LANE_LABEL (the operator sets it on difficult or important
-# issues) is worked on LANE_MODEL. A tick runs on that lane while claimable lane issues outnumber
-# the live lane ticks, and its prompt tells it to claim only those; other ticks leave them alone.
-# While LANE_MODEL cools down on its usage limit, any tick may claim them, so none waits on it.
-# The lane is off unless both are set.
-: "${LANE_MODEL:=}"
-: "${LANE_LABEL:=}"
-lane_on() { [ -n "$LANE_MODEL" ] && [ -n "$LANE_LABEL" ]; }
 lane_cooling() {
-    local stamp="$MODEL_COOL/$LANE_MODEL"
+    local stamp="$MODEL_COOL/$lane_entry"
     [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
 }
 lane_wanted() {  # true when this tick should run on the model lane
     lane_on && [ -n "${QUEUE_DEPTH_CMD:-}" ] || return 1
     lane_cooling && return 1
-    local want_l young_l=0 pid age
+    local want_l
     if ! queue_depth "$LANE_LABEL"; then
         log_changed "ERROR lane queue count failed ($queue_error); no lane tick"
         return 1
@@ -217,28 +316,16 @@ lane_wanted() {  # true when this tick should run on the model lane
     [ "$want_l" -gt 0 ] || return 1
     # The count excludes issues a live tick holds, so only a lane tick young enough
     # to be still choosing its issue stands for one of them (compute_want's rule).
-    for pid in $(pgrep -f -- "$lane_re$LANE_MODEL" 2>/dev/null); do
-        age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young_l=$(( young_l + 1 ))
-    done
-    [ "$young_l" -lt "$want_l" ]
+    read_ticks
+    [ "$(young_ticks lane)" -lt "$want_l" ] || return 1
+    # The lane's agent needs room under its usage windows like any other.
+    pick_model "" --entry "$lane_entry" >/dev/null 2>&1
 }
 
 # A merge slot's landing tick: it may start past the width the usage windows allow, so it
 # claims nothing but an issue waiting for the slot and never chains.
 LANDING_MARK="This tick is the merge slot's landing tick"
 LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
-# How a live tick shows in the process table. Through fleet it is the `fleet dispatch` waiting on
-# it, whose argv carries no prompt, so a landing tick is told by its label.
-if [ -n "$fleet" ]; then
-    tick_re="^[^ ]*${FLEET_BIN##*/} dispatch "
-    lane_re="${FLEET_BIN##*/} dispatch .*--model "
-    landing_re="${FLEET_BIN##*/} dispatch .*--label tick=landing"
-else
-    tick_re='^[^ ]*claude -p'
-    lane_re='claude -p .*--model '
-    landing_re="claude -p $LANDING_MARK"
-fi
 
 # The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
 # the key's value through a sed escape, never eval, so a value cannot run as code.
@@ -255,15 +342,16 @@ compose_prompt() {  # $1 = the lane line
     sed "${subst[@]}" "$INSTANCE_PROMPT"
 }
 
-# Prints each device `fleet status --json` reports; fails unless a reachable one offers TICK_AGENT
-# for dispatch (and is FLEET_DEVICE, when that names one). fleet exits 1 when any device failed, with
-# the document complete, so only the document decides.
+# Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
+# model list that no reachable device offers for dispatch (or FLEET_DEVICE, when that names one).
+# fleet exits 1 when any device failed, with the document complete, so only the document decides.
 fleet_check() {
     # The document is read as text, so one that is not JSON is reported like one of the wrong shape.
     # A device is down when its ok is false, null, 0, "", [] or {}.
     # shellcheck disable=SC2016
     timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null | jq -Rrs \
-        --arg agent "$TICK_AGENT" --arg wanted "${FLEET_DEVICE:-auto}" '
+        --argjson agents "$(list_agents | jq -Rsc 'split("\n") | map(select(. != ""))')" \
+        --arg wanted "${FLEET_DEVICE:-auto}" '
         def need($k): if type == "object" and has($k) then .[$k] else error("no \($k) in \(type)") end;
         def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
         def str: if type == "string" then . else tojson end;
@@ -271,15 +359,18 @@ fleet_check() {
             if need("ok") | truthy | not then
                 need("error") as $e
                 | {line: "fleet device:  \(need("name") | str) (\(need("transport") | str)) unreachable: \($e | need("code") | str): \($e | need("message") | str)",
-                   usable: false}
+                   usable: []}
             else
                 . as $d
-                | ([need("status") | need("adapters") | if type == "array" then .[] else error("adapters is not a list") end
-                    | select(need("name") == $agent)] | first) as $a
-                | (if $a then "\($agent) \($a | need("running") | str)/\($a | need("max_concurrent") | str) running" else "no \($agent) adapter" end) as $offer
-                | {line: "fleet device:  \($d | need("name") | str) (\($d | need("transport") | str)) reachable, \($offer)",
-                   usable: ($a != null and ($a.max_concurrent | if type == "number" then . > 0 else error("max_concurrent is not a number") end)
-                            and ($wanted == "auto" or $wanted == $d.name))}
+                | [need("status") | need("adapters") | if type == "array" then .[] else error("adapters is not a list") end] as $adapters
+                | [$agents[] as $agent
+                   | ([$adapters[] | select(need("name") == $agent)] | first) as $a
+                   | {agent: $agent,
+                      offer: (if $a then "\($agent) \($a | need("running") | str)/\($a | need("max_concurrent") | str) running" else "no \($agent) adapter" end),
+                      usable: ($a != null and ($a.max_concurrent | if type == "number" then . > 0 else error("max_concurrent is not a number") end)
+                               and ($wanted == "auto" or $wanted == $d.name))}] as $offers
+                | {line: "fleet device:  \($d | need("name") | str) (\($d | need("transport") | str)) reachable, \([$offers[].offer] | join(", "))",
+                   usable: [$offers[] | select(.usable) | .agent]}
             end;
         [try (
             (if test("^\\s*$") then error("empty output") else fromjson end)
@@ -288,7 +379,9 @@ fleet_check() {
             | device
         ) catch {error: (tostring | gsub("\\s+"; " ") | .[:160])}] as $items
         | ($items[] | if has("error") then "fleet:         fleet status --json gave no status document (\(.error))" else .line end),
-          (if any($items[]; has("error")) or ([$items[] | select(.usable)] | length) == 0 then "" | halt_error(1) else empty end)'
+          ([$items[] | .usable[]?] as $ok
+           | $agents[] | select(. as $agent | any($items[]; has("error")) or ($ok | any(. == $agent) | not))
+           | "@missing \(.)")'
 }
 
 # ----------------------------------------------------------------- check mode
@@ -301,13 +394,17 @@ if [ "${1:-}" = check ]; then
     echo "worktree root: ${WORKTREE_ROOT:-}"
     echo "repository:    ${GH_REPO:-(unset)}"
     echo "queue:         ${QUEUE_DEPTH_CMD:-gh issue list --label $ISSUE_LABEL, in the target repo}"
-    echo "claude:        $CLAUDE_BIN"
-    echo "agent:         $TICK_AGENT"
+    echo "default agent: $TICK_AGENT"
     if [ -n "$fleet" ]; then
         echo "dispatch:      fleet: $FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto}, config ${FLEET_CONFIG:-$HARNESS_INSTANCE_DIR/fleet.toml}"
     else
         echo "dispatch:      local"
     fi
+    for a in $(list_agents); do
+        if [ -n "$fleet" ]; then echo "agent $a: fleet adapter $a"
+        elif [[ " $LOCAL_AGENTS " == *" $a "* ]]; then agent_argv "$a" '<model>'; echo "agent $a: ${argv[*]} < prompt"
+        else echo "agent $a: no local profile"; fi
+    done
     echo "models:        $(model_list)"
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; else echo "model lane:    off"; fi
     # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
@@ -328,8 +425,21 @@ if [ "${1:-}" = check ]; then
     elif ! cron_active; then echo "paused:        yes, no active crontab line runs bin/tick.sh"
     else echo "paused:        no"; fi
     missing=$(instance_missing)
+    if type -P -- "$HARNESS_BIN" >/dev/null; then
+        err=$(mktemp)
+        if out=$(harness_usage 2>"$err"); then
+            printf '%s\n' "$out" | sed 's/^/usage:         /'
+        else
+            missing+="${missing:+$'\n'}a usage configuration that harness usage reads ($(tail -n 1 "$err"))"
+        fi
+        rm -f "$err"
+    fi
     if [ -n "$fleet" ] && type -P -- "$FLEET_BIN" >/dev/null; then
-        fleet_check || missing+="${missing:+$'\n'}a fleet device that can take a $TICK_AGENT tick"
+        out=$(fleet_check)
+        printf '%s\n' "$out" | grep -v '^@missing '
+        for a in $(printf '%s\n' "$out" | sed -n 's/^@missing //p'); do
+            missing+="${missing:+$'\n'}a fleet device that can take a $a tick"
+        done
     fi
     if [ -n "$missing" ]; then
         printf '%s\n' "$missing" | sed 's/^/missing: /'
@@ -373,58 +483,61 @@ if [ "${1:-}" = "runner" ]; then
         log="$LOGS/tick-$ts-slot$slot.log"
         cd "$TARGET_REPO" || exit 1
         start_s=$(date +%s)
-        # Run on the best model that is not cooling down. A tick that dies on a model's
-        # usage limit cools that model and re-runs at once on the next one in the list.
-        tried=""; model=""; rc=0
+        # Run on the best entry that is not cooling down and whose agent has room under its usage
+        # windows. A tick that dies on its usage limit cools that entry and re-runs at once on the
+        # next one, which may be another agent's.
+        tried=""; entry=""; rc=0
         while :; do
             if [ -n "$landing" ]; then
-                model=$(pick_model "$tried")
-                if [ -z "$model" ]; then
-                    echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
-                    break
-                fi
+                kind=landing
+                entry=$(pick_model "$tried" --landing 2>>"$log")
                 lane="$LANDING_LANE"
-            elif lane_wanted && [[ " $tried " != *" $LANE_MODEL "* ]]; then
-                model="$LANE_MODEL"
-                lane="This tick runs on $LANE_MODEL, the model lane: claim only an issue labelled \`$LANE_LABEL\`. If none is claimable, print a one-line summary and end."
+            elif lane_wanted && [[ " $tried " != *" $lane_entry "* ]]; then
+                kind=lane
+                entry=$lane_entry
+                lane="This tick runs on ${lane_entry#*:}, the model lane: claim only an issue labelled \`$LANE_LABEL\`. If none is claimable, print a one-line summary and end."
             else
-                model=$(pick_model "$tried")
-                if [ -z "$model" ]; then
-                    echo "[tick.sh] every model in '$(model_list)' is cooling down; nothing run" >>"$log"
-                    break
-                fi
+                kind=work
+                entry=$(pick_model "$tried" 2>>"$log")
                 if ! lane_on; then
-                    lane="This tick runs on $model."
+                    lane="This tick runs on ${entry#*:}."
                 elif lane_cooling; then
-                    lane="This tick runs on $model. $LANE_MODEL is cooling down on its usage limit, so an issue labelled \`$LANE_LABEL\` may be claimed too."
+                    lane="This tick runs on ${entry#*:}. ${lane_entry#*:} is cooling down on its usage limit, so an issue labelled \`$LANE_LABEL\` may be claimed too."
                 else
-                    lane="This tick runs on $model: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
+                    lane="This tick runs on ${entry#*:}: never claim an issue labelled \`$LANE_LABEL\`; those are worked on the model lane."
                 fi
             fi
-            flags="$(printf '%s' "$CLAUDE_FLAGS" | sed -E 's/--model[= ][^ ]+//') --model $model"
+            if [ -z "$entry" ]; then
+                echo "[tick.sh] no entry of '$(model_list)' can run: each is cooling down or its agent is at its usage cap; nothing run" >>"$log"
+                break
+            fi
+            agent=${entry%%:*}; model=${entry#*:}
+            # How `harness ticks` and libexec/tick-pid.sh tell this tick, whichever process runs it.
+            marker="state=$HARNESS_STATE slot=$slot agent=$agent model=$model kind=$kind"
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
             log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
             if [ -n "$fleet" ]; then
-                # The prompt goes on stdin, never into argv, which ps shows. fleet exits with the
-                # agent's status and writes its output here, so what follows reads it as a local run's.
-                # The timeout allows the longest budget and half an hour to wrap up.
-                dispatch=("$FLEET_BIN" dispatch --device "${FLEET_DEVICE:-auto}" --adapter "$TICK_AGENT"
+                # fleet exits with the agent's status and writes its output here, so what follows
+                # reads it as a local run's. The timeout allows the longest budget and half an hour
+                # to wrap up.
+                dispatch=("$FLEET_BIN" dispatch --device "${FLEET_DEVICE:-auto}" --adapter "$agent"
                     --workdir "$TARGET_REPO" --model "$model" --wait --timeout $(( (LONG_TICK_BUDGET_MIN + 30) * 60 )))
-                [ -n "$landing" ] && dispatch+=(--label tick=landing)
-                compose_prompt "$lane" | "${dispatch[@]}" >>"$log" 2>&1
+                [ "$kind" = landing ] && dispatch+=(--label tick=landing)
+                compose_prompt "$lane" | HARNESS_TICK="$marker" "${dispatch[@]}" >>"$log" 2>&1
                 rc=$?
             else
-                "$CLAUDE_BIN" -p "$(compose_prompt "$lane")" $flags >>"$log" 2>&1
+                agent_argv "$agent" "$model"
+                compose_prompt "$lane" | HARNESS_TICK="$marker" "${argv[@]}" >>"$log" 2>&1
                 rc=$?
             fi
             # The trailer makes a silently dead tick distinguishable from a quiet one.
-            echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s model=$model" >>"$log"
+            echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$agent model=$model" >>"$log"
             if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] \
-                && tail -c +"$log_from" "$log" | tail -n 40 | grep -qE "You've (reached|hit) your [^.]{0,40}limit"; then
-                mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$model"
-                echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $model hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
-                tried="$tried $model"
+                && tail -c +"$log_from" "$log" | tail -n 40 | grep -qE -- "$(agent_limit_re "$agent")"; then
+                mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
+                echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
+                tried="$tried $entry"
                 continue
             fi
             break
@@ -442,7 +555,7 @@ if [ "${1:-}" = "runner" ]; then
         [ "$slot" -gt "$allowed" ] && break
         compute_want
         [ "$want" -lt 1 ] && break
-        echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot chains tick $(( chain + 1 )) after ${dur}s: pct=${pct}% allowed=$allowed claimable=$claimable young=$young" \
+        echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot chains tick $(( chain + 1 )) after ${dur}s: $usage_line allowed=$allowed claimable=$claimable young=$young" \
             >>"$LOGS/allocator.log"
     done
     exit 0
@@ -471,16 +584,19 @@ while [ "$s" -le "$MAX_SLOTS" ]; do
     s=$(( s + 1 ))
 done
 [ "$free" -eq 0 ] && exit 0
-# Every model cooling down and no model lane to run: a runner would only log that nothing ran.
-[ -z "$(pick_model "")" ] && ! lane_wanted && exit 0
+# No entry can run even a landing tick (each cools down or its agent's windows allow none), and
+# no model lane can run: a runner would only log that nothing ran. A pick that fails goes on, so
+# compute_allowed logs why.
+pick_model "" --landing >/dev/null 2>&1
+[ "$?" -eq 1 ] && ! lane_wanted && exit 0
 
 compute_allowed
-if [ "$pct" = "?" ]; then
+if [ -n "$unknown" ]; then
     # Say so at most hourly: the launcher fires every couple of minutes.
     stamp="$LOCKS/usage-unknown.stamp"
     if [ ! -f "$stamp" ] || [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -ge 3600 ]; then
         touch "$stamp"
-        echo "$(date -u +%Y%m%dT%H%M%SZ) no fresh usage reading in $USAGE_CACHE; starting nothing" >>"$LOGS/allocator.log"
+        echo "$(date -u +%Y%m%dT%H%M%SZ) no fresh usage reading for $unknown; none of its ticks start" >>"$LOGS/allocator.log"
     fi
 fi
 compute_want
@@ -500,13 +616,13 @@ spawn=$(( allowed - busy ))
 # claim, one landing tick starts past the width for an issue waiting for the slot.
 if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
-    && ! pgrep -f -- "$landing_re" >/dev/null 2>&1; then
+    && ! awk '$6 == "landing" { found = 1 } END { exit !found }' <<<"$ticks"; then
     ready=0
     if queue_depth "$READY_LABEL"; then ready=$queue_n
     else log_changed "ERROR ready queue count failed ($queue_error); no landing tick"; fi
     if [ "$ready" -gt 0 ]; then
         slotmax=$(( busy + 1 )); [ "$slotmax" -gt "$MAX_SLOTS" ] && slotmax=$MAX_SLOTS
-        echo "$(date -u +%Y%m%dT%H%M%SZ) five=${five:-?}% week=${week:-?}% allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
+        echo "$(date -u +%Y%m%dT%H%M%SZ) $usage_line allowed=$allowed busy=$busy ready=$ready -> spawning 1 landing tick" \
             >>"$LOGS/allocator.log"
         setsid "$0" runner "$slotmax" 0 landing >/dev/null 2>&1 &
         exit 0
@@ -515,7 +631,7 @@ fi
 [ "$spawn" -eq 0 ] && exit 0   # quiet: no log spam on the frequent no-op firings
 
 ts=$(date -u +%Y%m%dT%H%M%SZ)
-echo "$ts five=${five:-?}% week=${week:-?}% allowed=$allowed busy=$busy claimable=$claimable -> spawning $spawn" \
+echo "$ts $usage_line allowed=$allowed busy=$busy claimable=$claimable -> spawning $spawn" \
     >>"$LOGS/allocator.log"
 
 i=0

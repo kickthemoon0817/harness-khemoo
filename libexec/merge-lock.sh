@@ -13,7 +13,7 @@ if [ "${1:-}" = status ]; then
   pid=""
 elif [ -x "$H/libexec/tick-pid.sh" ]; then
   pid=$("$H/libexec/tick-pid.sh" 2>/dev/null) || {
-    echo "ERROR: no tick (an ancestor in TICK_AGENT_EXES) above this shell; call merge-lock.sh from the tick's own shell" >&2
+    echo "ERROR: no tick (an ancestor carrying HARNESS_TICK or FLEET_SESSION) above this shell; call merge-lock.sh from the tick's own shell" >&2
     exit 2
   }
 else
