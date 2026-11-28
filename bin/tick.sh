@@ -119,8 +119,9 @@ log_changed() {  # $1 = message
 }
 
 # Model priority, best first: state/tick-model (whitespace-separated) overrides TICK_MODELS. Each
-# entry is agent:model, or a model that TICK_AGENT runs. An entry that hit its usage limit is
-# skipped until its cooldown passes.
+# entry is agent:model, agent@account:model for a tick on an account folder under
+# AGENT_ACCOUNTS_DIR, or a model that TICK_AGENT runs. An entry that hit its usage limit is skipped
+# until its cooldown passes.
 : "${TICK_MODELS:=claude-opus-5-5}"
 : "${MODEL_COOLDOWN_S:=1800}"
 MODEL_COOL="$HARNESS_STATE/model-cooldown"
@@ -134,7 +135,7 @@ d_quiet=""; d_until=""; d_why=""; d_woken=""; d_width=""; d_models=""; d_focus="
 model_list() {
     if [ -n "$d_models" ]; then printf '%s' "$d_models"; else configured_models; fi
 }
-entry_of() {  # $1 = a list entry; prints it as agent:model
+entry_of() {  # $1 = a list entry; prints it as agent:model or agent@account:model
     case $1 in *:*) printf '%s' "$1" ;; *) printf '%s' "$TICK_AGENT:$1" ;; esac
 }
 
@@ -152,32 +153,57 @@ entry_cooling() {
     [ -f "$stamp" ] && [ $(( $(date +%s) - $(date -r "$stamp" +%s) )) -lt "$MODEL_COOLDOWN_S" ]
 }
 
-list_agents() {
+# Each agent, or agent@account, of the model list and the lane, once.
+list_seats() {
     local w
     for w in $(model_list) $(lane_on && printf '%s' "$lane_entry"); do
         w=$(entry_of "$w"); printf '%s\n' "${w%%:*}"
     done | awk '!seen[$0]++'
 }
+list_agents() { list_seats | sed 's/@.*//' | awk '!seen[$0]++'; }
 
-# Runs `harness usage` with what it reads: harness.env is sourced here, not exported. The lane's
-# entry counts toward the pool only while pool_lane names it.
+# The accounts' root and the agents' executables, which `harness` reads to find an account folder
+# and ask its CLI whether it is signed in. With no root, accounts are off and neither is exported.
+accounts_export() {
+    local v
+    [ -n "${AGENT_ACCOUNTS_DIR:-}" ] || return 0
+    export AGENT_ACCOUNTS_DIR
+    for v in $(compgen -v AGENT_BIN_); do export "${v?}"; done
+}
+# Prints VARIABLE=folder, what a tick on each agent@account of $@ runs with; fails, naming each
+# refused account on stderr, when a folder is missing, a symlink or writable by every user.
+account_env() {
+    ( accounts_export; exec "$HARNESS_BIN" accounts env "$@" )
+}
+
+# Runs `harness usage`, or with `accounts` first `harness accounts`, with what it reads: harness.env
+# is sourced here, not exported. The lane's entry counts toward the pool only while pool_lane names
+# it.
 pool_lane=""
 harness_usage() {
+    local sub=usage
+    [ "${1:-}" = accounts ] && { sub=accounts; shift; }
     (
         vars=$(compgen -v USAGE_)
         # shellcheck disable=SC2086,SC2163
         [ -n "$vars" ] && export $vars
         [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
+        accounts_export
+        # The supervisor's account is checked for its sign-in with the lists' accounts.
+        [ -n "$supervisor" ] && [[ "${SUPERVISOR_MODEL:-}" == *@* ]] && export SUPERVISOR SUPERVISOR_MODEL
         export MAX_SLOTS MODEL_COOLDOWN_S
-        TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" usage "$@"
+        TICK_MODELS=$(model_list) LANE_MODEL=$pool_lane exec "$HARNESS_BIN" "$sub" "$@"
     )
 }
-# Runs each stale agent's fetch command, once per launcher firing and per tick a runner starts; the
-# readings are only read in between.
+# Runs each stale agent's fetch command and checks again each account's old sign-in, once per
+# launcher firing and per tick a runner starts; the readings are only read in between. An account
+# found signed out, or signed in again, is logged here, once.
 usage_refresh() {
-    local was=$pool_lane
+    local was=$pool_lane line
     lane_on && pool_lane=$lane_entry
-    harness_usage refresh >/dev/null 2>&1
+    harness_usage refresh 2>/dev/null | while IFS= read -r line; do
+        echo "$(date -u +%Y%m%dT%H%M%SZ) $line" >>"$LOGS/allocator.log"
+    done
     pool_lane=$was
 }
 
@@ -193,6 +219,7 @@ harness_supervisor() {
         [ -n "$vars" ] && export $vars
         [ -n "${TICK_WIDTH:-}" ] && export TICK_WIDTH
         [ -n "$gh" ] && [ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+        accounts_export
         export MAX_SLOTS MODEL_COOLDOWN_S TICK_MODELS TICK_AGENT LONG_TICK_BUDGET_MIN
         exec "$HARNESS_BIN" "$@"
     )
@@ -320,7 +347,7 @@ directive_lane() {
 
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
-    local root argv a bin k name
+    local root argv a bin k name s own accounts
     if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
     else
         if [ -z "${TARGET_REPO:-}" ]; then echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
@@ -353,10 +380,16 @@ instance_missing() {
         fi
     fi
     for a in $(list_agents); do
-        # Only claude's cache and codex's rollouts are found without being named.
+        # Only claude's cache and codex's rollouts are found without being named. An account of
+        # another agent may name its own, else it takes the agent's.
         name="USAGE_SOURCE_$a"
         case $a in claude|codex) ;; *)
-            [ -n "${!name:-}" ] || echo "$HARNESS_ENV_FILE: $name unset: name $a's usage source, or none" ;;
+            for s in $(list_seats | grep -E "^$a(@|\$)"); do
+                own=""
+                [ "$s" != "$a" ] && own="USAGE_SOURCE_${a}_$(printf '%s' "${s#*@}" | tr - _)"
+                [ -n "${!name:-}" ] || { [ -n "$own" ] && [ -n "${!own:-}" ]; } \
+                    || echo "$HARNESS_ENV_FILE: ${own:+$own or }$name unset: name $s's usage source, or none"
+            done ;;
         esac
         # An empty pattern matches every line, so every attempt would read as a usage limit.
         name="AGENT_LIMIT_RE_$a"
@@ -384,9 +417,26 @@ instance_missing() {
     type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
+    # Each account named must be a folder a tick can run with; a fleet device keeps its own, and the
+    # supervisor always runs here.
+    accounts=$(list_seats | grep '@')
+    if [ -n "$accounts" ] && [ -n "$fleet" ]; then
+        for s in $accounts; do
+            echo "$HARNESS_ENV_FILE: $s names an account; a FLEET_DISPATCH=1 tick runs on the device's own, so name none"
+        done
+        accounts=""
+    fi
+    if [ -n "$supervisor" ]; then
+        s=$(supervisor_entry); s=${s%%:*}
+        [[ "$s" == *@* ]] && accounts+="${accounts:+$'\n'}$s"
+    fi
+    if [ -n "$accounts" ]; then
+        # shellcheck disable=SC2086
+        account_env $(printf '%s\n' "$accounts" | awk '!seen[$0]++') 2>&1 >/dev/null | sed 's/^/an account folder for /'
+    fi
     if [ -n "$supervisor" ]; then
         [ -r "$SUPERVISOR_CORE" ] || echo "$SUPERVISOR_CORE"
-        a=$(supervisor_entry); a=${a%%:*}
+        a=$(supervisor_entry); a=${a%%:*}; a=${a%%@*}
         if supervisor_argv "$a" '<model>'; then
             type -P -- "${argv[0]}" >/dev/null || echo "an executable AGENT_BIN_$a (${argv[0]}) for the supervisor"
         else
@@ -425,12 +475,13 @@ compute_pool() {
     if doc=$(harness_usage --json 2>"$err"); then
         { read -r pool_cap; read -r room; read -r usage_line; read -r unknown; } < <(jq -r '
             def windows: [.windows[] | "\(.name):\(.used_pct | if . == floor then floor else . end)%"];
+            def key: .agent + (if .account then "@" + .account else "" end);
             .pool_cap, .room,
-            ([.agents[] | "\(.agent)=\(.cap)[" + (.reading.state as $s
+            ([.agents[] | "\(key)=\(.cap)[" + (.reading.state as $s
                 | if $s == "fresh" or $s == "unmetered" then windows
                   elif $s == "holding" then ["holding"] + windows
                   else ["unknown"] end | join(",")) + "]"] | join(" ")),
-            ([.agents[] | select(.reading.state == "stale" or .reading.state == "unreadable") | .agent] | join(" "))' <<<"$doc")
+            ([.agents[] | select(.reading.state == "stale" or .reading.state == "unreadable") | key] | join(" "))' <<<"$doc")
         [[ "$pool_cap" =~ ^[0-9]+$ ]] || pool_cap=0
         [[ "$room" =~ ^[0-9]+$ ]] || room=0
     else
@@ -629,11 +680,11 @@ compose_supervisor_prompt() {
     printf '%s\n' "$doc"
 }
 
-# Records process $1 as this slot's tick, running agent $2 on model $3 as a tick of kind $4: its
-# pid, its start time, field 22 of /proc/<pid>/stat, which stays readable for a non-dumpable
-# process and which a reused pid does not share, and the boot that start time counts from, so a
-# file a crash left behind matches no process after a reboot. Written whole, by rename, and
-# readable by this user only.
+# Records process $1 as this slot's tick, running agent $2 (agent@account on an account) on model $3
+# as a tick of kind $4: its pid, its start time, field 22 of /proc/<pid>/stat, which stays readable
+# for a non-dumpable process and which a reused pid does not share, and the boot that start time
+# counts from, so a file a crash left behind matches no process after a reboot. Written whole, by
+# rename, and readable by this user only.
 record_tick() {
     local stat start boot
     local -a fields
@@ -735,8 +786,8 @@ if [ "${1:-}" = check ]; then
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; pool_lane=$lane_entry; else echo "model lane:    off"; fi
     if [ -n "$supervisor" ]; then
         echo "supervisor:    $(supervisor_entry), budget $SUPERVISOR_BUDGET_MIN min, at least ${SUPERVISOR_MIN_INTERVAL_S:-600}s apart, at most ${SUPERVISOR_INTERVAL_S:-1800}s"
-        e=$(supervisor_entry)
-        if supervisor_argv "${e%%:*}" "${e#*:}"; then echo "supervisor:    runs with no tools: ${argv[*]} < prompt"
+        e=$(supervisor_entry); a=${e%%:*}
+        if supervisor_argv "${a%%@*}" "${e#*:}"; then echo "supervisor:    runs with no tools: ${argv[*]} < prompt"
         else echo "supervisor:    cannot run: $refusal"; fi
         echo "directive:     $(harness_supervisor directive show 2>&1 | head -1)"
     fi
@@ -766,6 +817,8 @@ if [ "${1:-}" = check ]; then
             missing+="${missing:+$'\n'}a usage configuration that harness usage reads ($(tail -n 1 "$err"))"
         fi
         rm -f "$err"
+        # Each account folder found, its sign-in checked again when the last check is old.
+        [ -n "${AGENT_ACCOUNTS_DIR:-}" ] && harness_usage accounts 2>&1 | sed 's/^/account:       /'
     fi
     if [ -n "$fleet" ] && type -P -- "$FLEET_BIN" >/dev/null; then
         out=$(fleet_check)
@@ -851,9 +904,22 @@ if [ "${1:-}" = "runner" ]; then
                 log_changed "no entry of '$(model_list)' can run: each cools down or its agent is at its usage cap; nothing run"
                 break
             fi
-            agent=${entry%%:*}; model=${entry#*:}
+            seat=${entry%%:*}; agent=${seat%%@*}; model=${entry#*:}
+            # A tick on an account runs with the agent's variable naming its folder; an entry whose
+            # folder is refused is passed over, as one on its usage limit is.
+            account_var=""
+            if [ "$seat" != "$agent" ]; then
+                if [ -n "$fleet" ]; then why="a FLEET_DISPATCH=1 tick runs on the device's own account"
+                elif account_var=$(account_env "$seat" 2>&1); then why=""
+                else why=$account_var; fi
+                if [ -n "$why" ]; then
+                    log_changed "$entry not run: $why"
+                    tried="$tried $entry"
+                    continue
+                fi
+            fi
             # The tick's own description, for its tool shells (libexec/usage-ok.sh reads its agent).
-            marker="state=$HARNESS_STATE slot=$slot agent=$agent model=$model kind=$kind"
+            marker="state=$HARNESS_STATE slot=$slot agent=$seat model=$model kind=$kind"
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
             log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
@@ -879,16 +945,17 @@ if [ "${1:-}" = "runner" ]; then
             # SIGQUIT ignored, which every tool would inherit, and the runner, started as one
             # itself, cannot reset them (bash keeps a signal ignored on entry ignored); env can, so
             # `kill -INT` and `timeout -s INT` reach the agent's tools.
-            setsid env --default-signal=INT,QUIT HARNESS_TICK="$marker" "${argv[@]}" < <(compose_prompt "$lane") >>"$log" 2>&1 &
+            setsid env --default-signal=INT,QUIT HARNESS_TICK="$marker" ${account_var:+"$account_var"} "${argv[@]}" \
+                < <(compose_prompt "$lane") >>"$log" 2>&1 &
             tick_pid=$!
-            record_tick "$tick_pid" "$agent" "$model" "$kind"
+            record_tick "$tick_pid" "$seat" "$model" "$kind"
             wait "$tick_pid"; rc=$?
             rm -f "$slot_file"
             limited=""
             [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" \
                 && limit_message "$log_from" "$agent" && limited=1
             # The trailer makes a silently dead tick distinguishable from a quiet one.
-            echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$agent model=$model" >>"$log"
+            echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$seat model=$model" >>"$log"
             if [ -n "$limited" ]; then
                 mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
                 echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
@@ -913,9 +980,9 @@ if [ "${1:-}" = "runner" ]; then
         [ -n "$d_width" ] && [ "$slot" -gt "$d_width" ] && break
         usage_refresh; lane_known=""
         compute_pool
-        # The slot goes on only while the agent it ran can still run here: another agent's room is
-        # the launcher's to fill.
-        pick_model "" --agent "$agent" >/dev/null || break
+        # The slot goes on only while the agent (or account) it ran can still run here: another's
+        # room is the launcher's to fill.
+        pick_model "" --agent "$seat" >/dev/null || break
         compute_want
         [ "$want" -lt 1 ] && break
         echo "$(date -u +%Y%m%dT%H%M%SZ) slot$slot chains tick $(( chain + 1 )) after ${dur}s: $usage_line pool=$pool_cap room=$room claimable=$claimable young=$young" \
@@ -933,16 +1000,21 @@ fi
 if [ "${1:-}" = supervisor ]; then
     exec {sfd}>"$LOCKS/supervisor.lock"
     flock -n "$sfd" || exit 0
-    entry=$(supervisor_entry); agent=${entry%%:*}; model=${entry#*:}
+    entry=$(supervisor_entry); seat=${entry%%:*}; agent=${seat%%@*}; model=${entry#*:}
     # Recorded at once, as this shell, so the launcher that started it counts it toward its agent
     # before it sizes the pool; the agent's own record replaces it once it runs. libexec/tick-pid.sh
     # reads only the slots' files, so the record gives no claim.
     slot_file="$LOCKS/supervisor.tick"
-    record_tick "$$" "$agent" "$model" supervisor
+    record_tick "$$" "$seat" "$model" supervisor
     trap 'rm -f "$slot_file"' EXIT
     harness_paused && exit 0
     if ! supervisor_argv "$agent" "$model"; then
         log_changed "supervisor not run: $refusal"
+        exit 0
+    fi
+    account_var=""
+    if [ "$seat" != "$agent" ] && ! account_var=$(account_env "$seat" 2>&1); then
+        log_changed "supervisor not run: $account_var"
         exit 0
     fi
     log="$LOGS/supervisor-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -952,18 +1024,20 @@ if [ "${1:-}" = supervisor ]; then
     run_s=$(date +%s)
     sup_env=("HOME=$HOME" "PATH=$PATH")
     for k in USER LOGNAME LANG LC_ALL TMPDIR TERM ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR OPENAI_API_KEY CODEX_HOME XDG_CONFIG_HOME; do
+        [ "$k" = "${account_var%%=*}" ] && continue
         [ -n "${!k:-}" ] && sup_env+=("$k=${!k}")
     done
+    [ -n "$account_var" ] && sup_env+=("$account_var")
     # In a session and process group of its own, as a tick runs; the lock stays this shell's alone.
     ( exec {sfd}>&-; cd "$work" && exec setsid env -i --default-signal=INT,QUIT "${sup_env[@]}" \
         timeout -k 30 "$(( SUPERVISOR_BUDGET_MIN * 60 ))" "${argv[@]}" ) \
         < <(compose_supervisor_prompt) >"$answer" 2>>"$log" &
     tick_pid=$!
-    record_tick "$tick_pid" "$agent" "$model" supervisor
+    record_tick "$tick_pid" "$seat" "$model" supervisor
     wait "$tick_pid"; rc=$?
     dur=$(( $(date +%s) - run_s ))
     cat "$answer" >>"$log"
-    echo "[tick.sh] exit=$rc duration=${dur}s agent=$agent model=$model" >>"$log"
+    echo "[tick.sh] exit=$rc duration=${dur}s agent=$seat model=$model" >>"$log"
     if [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" && tail -n 40 "$log" | grep -qE -- "$(agent_limit_re "$agent")"; then
         mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
         echo "$(date -u +%Y%m%dT%H%M%SZ) supervisor $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
