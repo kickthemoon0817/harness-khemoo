@@ -78,7 +78,7 @@ gives each contract.
 an access token. It shows running ticks, the queue, landings, usage and the allocator log, plus
 the instance's devices, run queues and build locks when `harness.env` configures them.
 `bin/dashboard.sh status` prints the URL again, `bin/dashboard.sh stop` stops it, and
-`libexec/dashboard.py --help` lists the options.
+`harness dashboard --help` lists the options.
 
 ## Fleet
 
@@ -100,7 +100,9 @@ It runs every `tests/test_*.sh` and `tests/test_*.py`, plus any suites under `in
 The shell suites need Linux: bash 4+, `flock`, `setsid` and `lslocks` (util-linux), `pgrep`
 (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git` and `python3`. On another OS,
 run them in a container started with `--init`, so killed processes are reaped.
-`tests/test_fleet_e2e.sh` also needs `cargo`, to build the Rust workspace, and is skipped without it. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
+`tests/test_fleet_e2e.sh` also needs `cargo`, to build the Rust workspace, and is skipped without it.
+The dashboard's tests are Rust tests (`cargo test -p harness`); they run anywhere and leave out the
+cases that need `/proc` and `lslocks` where those are missing.
 
 ## Safety posture
 
