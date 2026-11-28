@@ -310,6 +310,7 @@ struct RawAdapter {
 enum Preset {
     Claude,
     Codex,
+    Gemini,
 }
 
 struct PresetTable {
@@ -334,6 +335,14 @@ impl Preset {
                 args: &["exec", "--model", "{model}", "-"],
                 models: &[],
                 match_exe: &["codex"],
+                max_concurrent: 1,
+                timeout_s: 3600,
+            },
+            // Gemini runs headless when stdin is not a terminal, and reads the prompt from it.
+            Self::Gemini => PresetTable {
+                args: &["--model", "{model}"],
+                models: &[],
+                match_exe: &["gemini"],
                 max_concurrent: 1,
                 timeout_s: 3600,
             },

@@ -62,6 +62,26 @@ async fn the_static_env_table_is_set_after_the_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_session_and_adapter_are_set_over_the_env_table() {
+    let dir = TempDir::new();
+    let root = dir.mkdir("root");
+    let agent = dir.script("agent", "echo \"$FLEET_SESSION|$FLEET_ADAPTER\"\n");
+    let env = "[adapters.a.env]\nFLEET_SESSION = \"forged\"\nFLEET_ADAPTER = \"forged\"";
+    let toml = base_config(&dir) + &adapter("a", &agent, &[], &root, env);
+    let running = start(&toml).await;
+    let (mut conn, _) = connect(&running, Role::Dispatch).await;
+    let id = dispatch(
+        &mut conn,
+        json!({"adapter": "a", "workdir": root, "prompt": "p"}),
+    )
+    .await
+    .unwrap();
+    let (out, _) = wait(&mut conn, &id).await;
+    assert_eq!(out, format!("{id}|a\n"));
+    running.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_workdir_must_stay_under_a_root() {
     let dir = TempDir::new();
     let root = dir.mkdir("root");

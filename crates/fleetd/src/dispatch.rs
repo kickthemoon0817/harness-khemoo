@@ -241,7 +241,8 @@ impl Sessions {
             labels: spec.labels,
         };
         let progress = Arc::new(watch::channel(0).0);
-        let spawned = create_log(&dir).and_then(|log| Ok((log, spawn(launch, &argv, &workdir)?)));
+        let spawned = create_log(&dir)
+            .and_then(|log| Ok((log, spawn(launch, &argv, &workdir, &id, &adapter.name)?)));
         let (log, (mut child, pgid)) = match spawned {
             Ok(ok) => ok,
             Err(e) => {
@@ -467,7 +468,13 @@ fn running_of(table: &HashMap<SessionId, Entry>, adapter: &AdapterName) -> u32 {
 
 /// Starts the agent in its own process group, with a cleared environment, in the
 /// canonical workdir, with stdin, stdout and stderr piped.
-fn spawn(launch: &Launch, argv: &[OsString], workdir: &Path) -> io::Result<(Child, Pid)> {
+fn spawn(
+    launch: &Launch,
+    argv: &[OsString],
+    workdir: &Path,
+    id: &SessionId,
+    adapter: &AdapterName,
+) -> io::Result<(Child, Pid)> {
     let mut cmd = Command::new(&launch.exe);
     cmd.args(argv)
         .current_dir(workdir)
@@ -485,6 +492,10 @@ fn spawn(launch: &Launch, argv: &[OsString], workdir: &Path) -> io::Result<(Chil
         }
     }
     cmd.envs(&launch.env);
+    // Set last, so no env table can forge them: the harness finds the process a session started
+    // (libexec/tick-pid.sh) and the agent its usage windows are read for (libexec/usage-ok.sh).
+    cmd.env("FLEET_SESSION", id.as_str())
+        .env("FLEET_ADAPTER", adapter.as_str());
     let mut child = cmd.spawn()?;
     let pgid = child
         .id()

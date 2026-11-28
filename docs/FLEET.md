@@ -1,6 +1,6 @@
 # Fleet: devices and agent sessions
 
-Fleet monitors devices and the coding-agent sessions on them (Claude Code, Codex, any agent
+Fleet monitors devices and the coding-agent sessions on them (Claude Code, Codex, Gemini, any agent
 CLI), and dispatches new agent sessions to them. It is part of the Cargo workspace at the repository root, under `crates/`:
 
 | Crate | Kind | Role |
@@ -9,7 +9,7 @@ CLI), and dispatches new agent sessions to them. It is part of the Cargo workspa
 | `fleetd` | binary and library | the device daemon, one per device |
 | `fleet` | binary and library | the hub: the client that the harness, the dashboard and people use |
 
-The harness can run its ticks through fleet instead of a local `claude -p`, and the dashboard can
+The harness can run its ticks through fleet instead of a local agent CLI, and the dashboard can
 show fleet's devices and sessions. Both are optional; without fleet the harness behaves as it does
 on one host.
 
@@ -399,8 +399,9 @@ A dispatch only selects among what the operator configured. For an adapter:
   roots, but the child has already started by then. A working directory is not a sandbox: the
   agent can read and write anything fleetd's user can.
 - The environment is cleared. The child gets `HOME` and `PATH` from fleetd's environment, plus
-  each name in `env_allow` that fleetd's environment sets, then the adapter's static `env` table.
-  Secrets therefore come from the device, never from the request.
+  each name in `env_allow` that fleetd's environment sets, then the adapter's static `env` table,
+  then `FLEET_SESSION` (the session id) and `FLEET_ADAPTER` (the adapter name), which no table
+  can override. Secrets therefore come from the device, never from the request.
 - At most `max_concurrent` dispatched sessions of the adapter run at once.
 - The effective timeout is the lesser of the request's `timeout_s` and the adapter's.
 - The child runs in its own process group. Its stdout and stderr are pipes that fleetd drains
@@ -616,7 +617,7 @@ without `exe` is discovery-only.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `preset` | `"claude"` or `"codex"` | none | fills every key below that the table leaves out, except `exe` and `workdir_roots` |
+| `preset` | `"claude"`, `"codex"` or `"gemini"` | none | fills every key below that the table leaves out, except `exe` and `workdir_roots` |
 | `exe` | path | none | the agent CLI. Must be an executable regular file at startup. Absent: discovery-only. |
 | `args` | array of strings | preset, else `[]` | the fixed argv after `exe`. `{model}` and `{workdir}` are replaced wherever they appear; any other `{` or `}` is a config error. |
 | `models` | array of model names | preset, else `[]` | the allowlist; `models[0]` is the default. Required non-empty when `args` uses `{model}`. A request naming a model not listed is `forbidden`. |
@@ -637,9 +638,11 @@ Presets:
 |---|---|---|---|---|---|
 | `claude` | `["-p", "--model", "{model}"]` | `["opus", "sonnet", "haiku"]` | `["claude"]` | 1 | 3600 |
 | `codex` | `["exec", "--model", "{model}", "-"]` | none: set `models` | `["codex"]` | 1 | 3600 |
+| `gemini` | `["--model", "{model}"]` | none: set `models` | `["gemini"]` | 1 | 3600 |
 
 A preset grants the agent no permissions of its own. An unattended agent usually needs a
-permission flag, and the operator adds it to `args` knowingly.
+permission flag, and the operator adds it to `args` knowingly. Every preset reads the prompt from
+stdin: gemini runs headless because its stdin is not a terminal.
 
 Example:
 

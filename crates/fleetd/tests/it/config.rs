@@ -109,6 +109,21 @@ preset = "codex"
 }
 
 #[test]
+fn the_gemini_preset_reads_its_prompt_from_stdin() {
+    let f = Fixture::new();
+    let cfg = f
+        .parse(
+            "[adapters.gemini]\npreset = \"gemini\"\nexe = \"{dir}/agent\"\nworkdir_roots = [\"{dir}/root\"]\nmodels = [\"gemini-3-pro\"]\n",
+        )
+        .unwrap();
+    let gemini = &cfg.adapters[0];
+    assert_eq!(gemini.match_exe, ["gemini"]);
+    let launch = gemini.launch.as_ref().unwrap();
+    let argv = launch.render(gemini.models.first(), &f.dir.join("root"));
+    assert_eq!(argv, ["--model", "gemini-3-pro"]);
+}
+
+#[test]
 fn match_exe_defaults_to_the_exe_base_name() {
     let f = Fixture::new();
     let cfg = f
