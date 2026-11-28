@@ -29,16 +29,17 @@ skipped.
 `tick.sh` also exports `TARGET_REPO`, `WORKTREE_ROOT`, the lint's `PUBLIC_RECORD_RULES`,
 `PUBLIC_RECORD_PR_SECTIONS` and `PUBLIC_RECORD_ISSUE_SECTIONS`, and the label keys (`ISSUE_LABEL`,
 `WIP_LABEL`, `READY_LABEL`, `SIGNOFF_LABEL`, `OPERATOR_LABEL`, `LONG_LABEL`, `FIRST_LABEL`, `LOW_LABEL`,
-`LANE_LABEL`). None of them is secret. No other config key reaches a tick's environment unless
+`LANE_LABEL`), and the fleet keys (`TICK_AGENT`, `TICK_AGENT_EXES`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
+`FLEET_CONFIG`). None of them is secret. No other config key reaches a tick's environment unless
 `TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
 `TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
 `worktree_gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
-command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`), split shell-style first,
+command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
 `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`), those two and `$HOME`. A path key from the environment wins over the file's. An
+`WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
 empty `GH_REPO` is derived through `bin/instance-lib.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
@@ -57,14 +58,54 @@ and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 The instance is usable when the required files are readable, `TARGET_REPO` is a git checkout,
 `WORKTREE_ROOT` exists or its nearest existing parent is a writable directory, `GH_REPO` is set or
 derivable, the first word of `QUEUE_DEPTH_CMD` is executable when that key is set, and `CLAUDE_BIN`
-resolves on the PATH. Until then the launcher starts nothing. It logs
+resolves on the PATH (`FLEET_BIN` instead with `FLEET_DISPATCH=1`, and `TICK_AGENT` other than
+`claude` only then). Until then the launcher starts nothing. It logs
 `instance incomplete: <first missing item>` to `$HARNESS_STATE/logs/allocator.log` at most once an
 hour. `bin/tick.sh check` prints the resolved paths, repository, queue command, `CLAUDE_BIN`, models,
-lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
+lane, the agent and where it runs, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
 `present but not readable (ignored)`), the hold state,
 and whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
-`bin/tick.sh`). It prints `missing: <item>` for each gap and exits 1, or prints `instance complete`
-and exits 0.
+`bin/tick.sh`). With `FLEET_DISPATCH=1` it also runs `fleet status --json` under
+`FLEET_CHECK_TIMEOUT_S` (default 60 s) and prints each device, reachable with its `TICK_AGENT`
+capacity or unreachable with fleet's error. It prints `missing: <item>` for each gap, including no
+reachable device that can take a tick (`FLEET_DEVICE`, when it names one), and exits 1, or prints
+`instance complete` and exits 0.
+
+## Fleet
+
+[`docs/FLEET.md`](FLEET.md) describes fleet. With `FLEET_DISPATCH=1` the runner runs each tick as
+
+```
+$FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto} --adapter $TICK_AGENT --workdir $TARGET_REPO \
+    --model <model> --wait --timeout <(LONG_TICK_BUDGET_MIN + 30) * 60> [--label tick=landing]
+```
+
+as an argv, with the composed prompt on stdin, instead of `$CLAUDE_BIN -p <prompt> $CLAUDE_FLAGS`.
+fleet writes the agent's output to the tick log and exits with its status, so the model order, the
+usage-limit cooldown, the exit trailer and chaining work as they do locally. The device's
+`fleetd.toml` fixes the agent's command line, so `CLAUDE_BIN` and `CLAUDE_FLAGS` do not apply;
+`templates/instance/fleetd.toml.example` lists what a device needs to take ticks: a harness checkout
+and its own instance, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and `TARGET_REPO` set in the
+adapter's `env` table, since fleetd gives a dispatched agent no environment of the hub's (see
+[`docs/FLEET.md`](FLEET.md)). The adapter's `timeout_s` caps the tick: a device whose `timeout_s` is
+under the `--timeout` above ends a tick before its budget does. The launcher counts
+a live tick by its `fleet dispatch` process, and a landing tick by its label, since its prompt is not
+in its argv.
+
+An adapter's `exe` may be a wrapper script, but it must stay inside the adapter's `workdir_roots`:
+on Linux, fleetd checks the child's working directory right after the spawn and kills its process
+group when it is outside the roots, so a wrapper that changes directory elsewhere before it execs
+the agent (to the harness checkout, say) has its tick killed. Pass such paths to the agent as
+environment or arguments instead of `cd`-ing to them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
+| `TICK_AGENT` | `claude` | the adapter a tick runs; another value needs `FLEET_DISPATCH=1`, or `check` fails and the launcher logs the instance as incomplete |
+| `TICK_AGENT_EXES` | `claude:-p claude-code:-p node:-p` | the agent processes a tick runs as, space-separated, each `exe` or `exe:arg`; `bin/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has base name `exe` and, with `:arg`, whose argv[1] is exactly `arg`. The argument keeps an operator's interactive `claude` from taking claims or the merge lock. Add `codex:exec` for codex ticks |
+| `FLEET_DEVICE` | `auto` | a device name from `fleet.toml`, or `auto` |
+| `FLEET_BIN` | `fleet` | the fleet CLI |
+| `FLEET_CONFIG` | `$HARNESS_INSTANCE_DIR/fleet.toml` | the device registry (`templates/instance/fleet.toml.example`) |
 
 ## Queue count
 
@@ -136,7 +177,7 @@ The prompt's first line tells the tick which issues it may claim:
 
 The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, and it needs `QUEUE_DEPTH_CMD`
 to count lane issues. The launcher and the dashboard recognise a landing tick by a prompt that starts with
-`This tick is the merge slot's landing tick`.
+`This tick is the merge slot's landing tick`; through fleet, the launcher recognises it by its label.
 
 ## Lint rules
 
@@ -186,11 +227,25 @@ Every source below is optional. While its keys are empty, its panel stays off th
 | `DEVICE_PROBE_CMD` | the device row of each machine, under a 5 s timeout. Split shell-style and run without a shell on this host. On each remote host ssh hands it to the remote user's shell, as one command whose words are each quoted, so that shell runs the same words and expands nothing in them. A probe that needs a shell names one: `sh -c '...'` |
 | `RUN_QUEUE_GLOB`, `RUN_QUEUE_HOLDER`, `RUN_QUEUE_STOP_WORDS`, `RUN_QUEUE_LOG` | run queues on the flow board |
 | `BUILD_LOCK_DIR`, `BUILD_LOCK_LOCAL`, `BUILD_LOCK_REMOTE`, `BUILD_LOCK_NAMES` | build lanes on the flow board |
+| `FLEET_STATUS_CMD` | Devices and Agent sessions, from `fleet status --json` (or `fleet sessions --json`, which gives the sessions only) every 30 s (`--fleet-interval`). Split shell-style and run without a shell, with `HARNESS_HOME`, `HARNESS_INSTANCE_DIR` and any `FLEET_CONFIG` in its environment as a tick's fleet has them, so a plain `fleet status --json` reads the instance's fleet.toml |
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has
 tab-separated `time host connect_s upload_mb_s load1 nproc gpu_util_pct gpu_mem_used_mb status`
 columns. `stalls.log` has `<UTC> STALL <kind> <key> <detail>` lines.
+
+### `FLEET_STATUS_CMD` output
+
+The document must carry `version` 1 and the fields [`docs/FLEET.md`](FLEET.md) gives, each of its
+type; anything else is a failed read, and the panels keep the last good one. fleet exits 1 when a
+device failed, with the document complete, so the document decides. The Devices panel shows each
+device's transport, reachability or error, CPU, load, memory, GPUs and each adapter's running and
+maximum dispatched sessions. The Agent sessions panel shows each session's device, adapter and
+model, pid (else id), state, age, workdir, and its issue: the `issue` label, else the worktree its
+workdir lies in. Every string from fleet goes through the dashboard's redaction. The command runs
+without any variable whose name holds `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`,
+`PRIVATE_KEY` or `CREDENTIAL`, in any case, and its stdout is capped at 8 MiB: past that it is
+killed and the read fails.
 
 ### `RESOURCE_STATUS_CMD` output
 

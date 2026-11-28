@@ -1,0 +1,26 @@
+# Copy to $HARNESS_INSTANCE_DIR/fleet.toml (or set FLEET_CONFIG): the devices `fleet` talks to, for
+# FLEET_DISPATCH and FLEET_STATUS_CMD. docs/FLEET.md gives every key. Relative paths resolve against
+# this file's directory.
+
+# The client identity for tls devices, made with `fleet pki` (docs/FLEET.md, Certificates).
+[tls]
+ca = "pki/ca.pem"
+cert = "pki/hub.pem"
+key = "pki/hub.key"
+
+# This host, through fleetd's unix socket.
+[devices.here]
+transport = "local"
+
+# A device on the LAN, through mutual TLS.
+[devices.dev-a]
+transport = "tls"
+address = "192.0.2.10:7443"
+
+# A device reached over ssh, whose authorized_keys pins `fleetd --stdio --role dispatch` for this key.
+# `auto = false` keeps `--device auto` from choosing it; a tick goes there only with FLEET_DEVICE=dev-b.
+[devices.dev-b]
+transport = "ssh"
+target = "dev@dev-b.example.com"
+ssh_options = ["Port=2222"]
+auto = false

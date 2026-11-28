@@ -76,6 +76,16 @@ the instance's devices, run queues and build locks when `harness.env` configures
 `bin/dashboard.sh status` prints the URL again, `bin/dashboard.sh stop` stops it, and
 `bin/dashboard.py --help` lists the options.
 
+## Fleet
+
+[Fleet](docs/FLEET.md) watches devices and the agent sessions on them, and runs agents there. It is
+optional. With `FLEET_DISPATCH=1` in `harness.env`, each tick runs through `fleet dispatch` on the
+device `FLEET_DEVICE` names (`auto` picks one) and with the agent `TICK_AGENT` (default `claude`),
+instead of a local `claude -p`. With `FLEET_STATUS_CMD="fleet status --json"`, the dashboard shows a
+Devices and an Agent sessions panel. Unset, the harness runs on one host as above.
+`templates/instance/fleet.toml.example` and `fleetd.toml.example` are starting points;
+[`docs/INSTANCE.md`](docs/INSTANCE.md#fleet) gives the keys.
+
 ## Tests
 
 ```bash
@@ -85,7 +95,8 @@ tests/run.sh
 It runs every `tests/test_*.sh` and `tests/test_*.py`, plus any suites under `instance/tests/`.
 The shell suites need Linux: bash 4+, `flock`, `setsid` and `lslocks` (util-linux), `pgrep`
 (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git` and `python3`. On another OS,
-run them in a container started with `--init`, so killed processes are reaped. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
+run them in a container started with `--init`, so killed processes are reaped.
+`tests/test_fleet_e2e.sh` also needs `cargo`, to build `fleet/`, and is skipped without it. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
 
 ## Safety posture
 

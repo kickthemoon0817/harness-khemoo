@@ -4,6 +4,8 @@ Gathers the dashboard's data on a cadence per source and assembles one JSON-read
 import json
 import logging
 import os
+import re
+import selectors
 import shlex
 import socket
 import subprocess
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from dashboard_lib.buildlocks import BuildLockReader
+from dashboard_lib.fleet import FleetParser, FleetReport
 from dashboard_lib.flow import FlowBuilder, FlowInputs
 from dashboard_lib.flowtrack import FlowTracker
 from dashboard_lib.github import GitHubClient, GitHubError
@@ -71,7 +74,9 @@ class DashboardConfig:
     issue's worktree. `run_queue_glob` names run folders, each with a `status` and a `run_queue_log`, live while a
     process whose first arguments hold `run_queue_holder` holds them.
     `build_lock_local` and `build_lock_remote` (with `{name}` for the host's BUILD_LOCK_NAMES name) are lock file
-    names under `build_lock_dir`.
+    names under `build_lock_dir`. `fleet_status_command` is an argv printing `fleet status --json` or
+    `fleet sessions --json` (docs/FLEET.md); `fleet_environment` is set for it, as a tick's fleet gets it, so fleet
+    finds the instance's fleet.toml; a variable whose name looks secret (SECRET_NAME_PATTERN) is left out.
     """
 
     harness_home: Path
@@ -120,6 +125,10 @@ class DashboardConfig:
     build_lock_local: str = ""
     build_lock_remote: str = ""
     done_window_s: float = 21600.0
+    fleet_status_command: tuple[str, ...] = ()
+    fleet_environment: tuple[tuple[str, str], ...] = ()
+    fleet_interval_s: float = 30.0
+    fleet_timeout_s: float = 45.0
     flow_animate_s: float = 20.0
     activity_ttl_s: float = 10.0
 
@@ -174,6 +183,12 @@ exit 0
         "gpu_mem_total_mb",
     )
     TAIL_BYTES: ClassVar[int] = 65536
+    # A status document of hundreds of devices is well under a megabyte; the cap keeps a runaway command from
+    # filling the dashboard's memory.
+    FLEET_OUTPUT_MAX_BYTES: ClassVar[int] = 8 * 1024 * 1024
+    STDERR_TAIL_BYTES: ClassVar[int] = 4096
+    SECRET_NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL", re.IGNORECASE)
     PID_LOOKUPS_PER_CYCLE: ClassVar[int] = 3
 
     def __init__(
@@ -250,6 +265,8 @@ exit 0
             ("github", self.config.github_interval_s, self.refresh_github_in_place),
             ("claimable_sh", self.config.claimable_interval_s, self.refresh_claimable_in_place),
         ]
+        if self.config.fleet_status_command:
+            periodic_sources.append(("fleet", self.config.fleet_interval_s, self.refresh_fleet_in_place))
         for name, interval_s, refresh in periodic_sources:
             if interval_s <= 0:
                 continue
@@ -490,13 +507,146 @@ exit 0
                 timeout=self.config.claimable_timeout_s, env=environment, stdin=subprocess.DEVNULL,
             )
             output: str = completed.stdout.strip()
-            if completed.returncode != 0 or not output.isdigit():
+            if completed.returncode != 0 or StateParsers._optional_int(output) is None:
                 raise RuntimeError(self.github.redact(f"queue count exit {completed.returncode}: "
                                                       f"{(completed.stderr or output).strip()[-200:]}"))
             self._store("claimable_sh", SourceResult(int(output), started, duration_s=self.clock() - started,
                                                      attempted_at=started))
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             self._store_failure("claimable_sh", self._describe_error(error), started)
+
+    def refresh_fleet_in_place(self) -> None:
+        """
+        Runs the fleet status command, as an argv with no shell, keeping the last good read on failure. fleet exits 1
+        when any device failed, its document still complete, so the document decides whether the read worked.
+        """
+        started: float = self.clock()
+        # fleet needs no credential of the dashboard's, and FLEET_STATUS_CMD may be any command the instance names.
+        # SSH_AUTH_SOCK stays: an ssh transport may authenticate through the agent.
+        environment: dict[str, str] = {name: value for name, value in os.environ.items()
+                                       if not self.SECRET_NAME_PATTERN.search(name)}
+        environment.update(self.config.fleet_environment)
+        try:
+            returncode, stdout, stderr = self._run_capped(list(self.config.fleet_status_command), environment,
+                                                          self.config.fleet_timeout_s, self.FLEET_OUTPUT_MAX_BYTES)
+            try:
+                report: FleetReport = FleetParser.parse(stdout)
+            except (ValueError, OverflowError) as error:
+                raise RuntimeError(CommandRedactor.redact(f"fleet exit {returncode}: {error}; "
+                                                          f"{stderr.strip()[-200:]}")) from error
+            self._store("fleet", SourceResult(report, started, duration_s=self.clock() - started,
+                                              attempted_at=started))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            self._store_failure("fleet", self._describe_error(error), started)
+
+    @staticmethod
+    def _run_capped(argv: list[str], environment: dict[str, str], timeout_s: float,
+                    max_bytes: int) -> tuple[int, str, str]:
+        """
+        Runs a command, as an argv with no shell, reading at most `max_bytes` of its stdout.
+
+        Args:
+            argv: The command.
+            environment: Its whole environment.
+            timeout_s: How long it may run.
+            max_bytes: The most stdout kept; more kills it.
+
+        Returns:
+            Its exit status, stdout, and the last STDERR_TAIL_BYTES of its stderr.
+
+        Raises:
+            OSError: It could not start.
+            RuntimeError: Its stdout passed `max_bytes`.
+            subprocess.TimeoutExpired: It ran past `timeout_s`.
+        """
+        deadline: float = time.monotonic() + timeout_s
+        stdout: bytearray = bytearray()
+        stderr: bytearray = bytearray()
+        with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=environment) as process:
+            assert process.stdout is not None and process.stderr is not None
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ, stdout)
+                selector.register(process.stderr, selectors.EVENT_READ, stderr)
+                while selector.get_map():
+                    remaining: float = deadline - time.monotonic()
+                    if remaining <= 0:
+                        process.kill()
+                        raise subprocess.TimeoutExpired(argv, timeout_s)
+                    for key, _ in selector.select(remaining):
+                        chunk: bytes = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        buffer: bytearray = key.data
+                        buffer += chunk
+                        if buffer is stderr:
+                            del buffer[:-Collector.STDERR_TAIL_BYTES]
+                        elif len(buffer) > max_bytes:
+                            process.kill()
+                            raise RuntimeError(f"output passed {max_bytes} bytes")
+            try:
+                returncode: int = process.wait(max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
+        return returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+
+    def _fleet_view(self, issue_titles: dict[int, tuple[str, str]], now: float) -> JsonDict:
+        """
+        Shapes the last fleet read for the Devices and Agent sessions panels, every device string redacted.
+
+        Args:
+            issue_titles: Open issues' titles and URLs, for each session's issue.
+            now: The current epoch.
+
+        Returns:
+            Devices (None for a sessions document), sessions, the devices fleet could not ask, and the read's age.
+        """
+        result: SourceResult | None = self._result("fleet")
+        report: FleetReport | None = result.data if result else None
+        redact: Callable[[str | None], str | None] = \
+            lambda text: CommandRedactor.redact(text) if text is not None else None
+        devices: list[JsonDict] | None = None
+        if report is not None and report.devices is not None:
+            devices = [
+                dict(asdict(device), name=redact(device.name), error=redact(device.error),
+                     hostname=redact(device.hostname), os=redact(device.os),
+                     gpus=[dict(asdict(gpu), name=redact(gpu.name)) for gpu in device.gpus],
+                     adapters=[dict(asdict(adapter), name=redact(adapter.name),
+                                    models=[redact(model) for model in adapter.models])
+                               for adapter in device.adapters])
+                for device in report.devices
+            ]
+        sessions: list[JsonDict] = []
+        for session in report.sessions if report else ():
+            labels: dict[str, str] = dict(session.labels)
+            issue: int | None = int(labels["issue"]) if "issue" in labels else None
+            issue_source: str = "label" if issue is not None else ""
+            if issue is None and session.cwd:
+                issue = StateParsers.issue_from_path(session.cwd, self.config.worktree_root)
+                issue_source = "worktree" if issue is not None else ""
+            sessions.append({
+                "device": redact(session.device), "adapter": redact(session.adapter), "id": redact(session.id),
+                "origin": session.origin, "state": redact(session.state), "running": session.running,
+                "pid": session.pid, "model": redact(session.model), "summary": redact(session.summary),
+                "cwd": redact(session.cwd),
+                "age_s": self._age(session.started_at, now if session.ended_at is None else session.ended_at),
+                "issue": issue, "issue_source": issue_source,
+                "title": issue_titles.get(issue, ("", ""))[0] if issue is not None else "",
+                "url": issue_titles.get(issue, ("", ""))[1] if issue is not None else "",
+                "labels": {redact(key): redact(value) for key, value in labels.items()},
+            })
+        return {
+            "available": report is not None,
+            "error": result.error if result else "not read yet",
+            "fetched_at": self._iso(result.fetched_at) if result and result.fetched_at else None,
+            "age_s": self._age(result.fetched_at if result else None, now),
+            "devices": devices,
+            "sessions": sessions,
+            "errors": [redact(error) for error in report.errors] if report else [],
+            "truncated": [redact(name) for name in report.truncated] if report else [],
+        }
 
     def _assemble_snapshot(self, now: float) -> JsonDict:
         """
@@ -572,8 +722,8 @@ exit 0
         paused_result: SourceResult | None = self._result("paused")
         paused_state: JsonDict = paused_result.data if paused_result else {"paused": False, "reason": ""}
         live_standard_ticks: int = sum(1 for tick in ticks if tick.lane != "landing")
-        last_allowed: int | None = int(last_allocator.fields["allowed"]) \
-            if last_allocator and last_allocator.fields.get("allowed", "").isdigit() else None
+        last_allowed: int | None = StateParsers._optional_int(last_allocator.fields.get("allowed", "")) \
+            if last_allocator else None
         work_waiting: bool = (waiting_count > 0 and last_allowed is not None and live_standard_ticks < last_allowed
                               and not paused_state.get("paused") and usage.get("allowed_band") != "none")
 
@@ -637,6 +787,7 @@ exit 0
                 if stalls_path.exists() else None,
                 "allocator": allocator_views,
             },
+            "fleet": self._fleet_view(issue_titles, now) if self.config.fleet_status_command else None,
             "flow": flow,
             "sources": self._sources_view(now),
         }
@@ -926,6 +1077,8 @@ exit 0
             intervals["lease"] = self.config.fast_ttl_s
         if self.config.run_queue_glob or self.config.build_locks_enabled:
             intervals["activity"] = self.config.activity_ttl_s
+        if self.config.fleet_status_command:
+            intervals["fleet"] = self.config.fleet_interval_s
         view: JsonDict = {}
         for name, interval_s in intervals.items():
             result: SourceResult | None = self._result(name)

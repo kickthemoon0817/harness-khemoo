@@ -32,6 +32,7 @@ from unittest.mock import patch
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 FIXTURES: Path = REPO_ROOT / "tests" / "fixtures" / "dashboard"
+FLEET_FIXTURES: Path = REPO_ROOT / "tests" / "fixtures" / "fleet"
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 
 import dashboard  # noqa: E402
@@ -39,6 +40,7 @@ from dashboard_lib.collector import Collector, DashboardConfig  # noqa: E402
 from dashboard_lib.github import GitHubClient  # noqa: E402
 from dashboard_lib.harness_env import HarnessEnvReader  # noqa: E402
 from dashboard_lib.buildlocks import BuildLockReader  # noqa: E402
+from dashboard_lib.fleet import FleetParser  # noqa: E402
 from dashboard_lib.flow import FlowBuilder, FlowInputs  # noqa: E402
 from dashboard_lib.flowtrack import FlowTracker  # noqa: E402
 from dashboard_lib.models import (  # noqa: E402
@@ -1264,7 +1266,7 @@ class HttpServerTest(unittest.TestCase):
             "LANE_LABEL", "FIRST_LABEL", "LOW_LABEL", "LANE_MODEL", "DASHBOARD_TITLE", "RESOURCE_STATUS_CMD",
             "DEVICE_PROBE_CMD", "QUEUE_DEPTH_CMD", "HARNESS_STATE", "USAGE_CACHE", "WORKTREE_ROOT",
             "RUN_QUEUE_GLOB", "RUN_QUEUE_HOLDER", "RUN_QUEUE_STOP_WORDS", "RUN_QUEUE_LOG", "BUILD_LOCK_DIR",
-            "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES"}))
+            "BUILD_LOCK_LOCAL", "BUILD_LOCK_REMOTE", "BUILD_LOCK_NAMES", "FLEET_STATUS_CMD", "FLEET_CONFIG"}))
 
     @linux_only
     def test_start_script_runs_it_detached_and_stops_it(self) -> None:
@@ -1672,8 +1674,9 @@ class BareInstanceTest(unittest.TestCase):
         for name in ("local", "paused", "remote"):
             self.assertIsNone(snapshot["sources"][name]["error"], name)
         page: str = HtmlRenderer().render(snapshot, 30)
+        self.assertIsNone(snapshot["fleet"])
         for absent in ("Resource slots", "Stalls", "Device", "lease:", "<th>Leases", "compile lane", "▾",
-                       "no slot held", '"grid split"'):
+                       "no slot held", '"grid split"', "Agent sessions"):
             self.assertNotIn(absent, page)
         self.assertIn("<title>Harness status</title>", page)
 
@@ -1776,6 +1779,7 @@ class InstanceConfigTest(unittest.TestCase):
             RESOURCE_STATUS_CMD="$HARNESS_HOME/bin/resource-status status '$HOME' \\$PATH"
             DEVICE_PROBE_CMD="${HARNESS_INSTANCE_DIR}/bin/probe --name=$HARNESS_HOMEX"
             QUEUE_DEPTH_CMD=$HARNESS_INSTANCE_DIR/bin/count
+            FLEET_STATUS_CMD="fleet --config '$HARNESS_INSTANCE_DIR/fleet.toml' status --json"
         """))
         with patch.dict(os.environ, {"HARNESS_INSTANCE_DIR": str(harness.home / "instance")}):
             os.environ.pop("HARNESS_ENV", None)
@@ -1786,8 +1790,28 @@ class InstanceConfigTest(unittest.TestCase):
         self.assertEqual(config.device_probe_command,
                          (str(harness.home / "instance" / "bin" / "probe"), "--name=$HARNESS_HOMEX"))
         self.assertEqual(config.queue_depth_command, (str(harness.home / "instance" / "bin" / "count"),))
+        self.assertEqual(config.fleet_status_command,
+                         ("fleet", "--config", str(harness.home / "instance" / "fleet.toml"), "status", "--json"))
         self.assertEqual(config.worktree_root, str(harness.home / "trees"))
         self.assertEqual(config.run_queue_log, "queue.log")
+
+    def test_fleet_runs_with_the_instance_a_tick_gives_it(self) -> None:
+        harness: FixtureHarness = FixtureHarness()
+        self.addCleanup(harness.close)
+        env_file: Path = harness.home / "instance" / "harness.env"
+        with patch.dict(os.environ):
+            for key in ("HARNESS_ENV", "HARNESS_INSTANCE_DIR", "FLEET_CONFIG"):
+                os.environ.pop(key, None)
+            bare = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                ["--harness-home", str(harness.home)])).config
+            env_file.write_text(env_file.read_text() + "FLEET_CONFIG=$HARNESS_INSTANCE_DIR/fleets/lab.toml\n")
+            configured = dashboard.DashboardApp(dashboard.DashboardApp.parse_options(
+                ["--harness-home", str(harness.home)])).config
+        instance: tuple[tuple[str, str], ...] = (("HARNESS_HOME", str(harness.home)),
+                                                 ("HARNESS_INSTANCE_DIR", str(harness.home / "instance")))
+        self.assertEqual(bare.fleet_environment, instance)
+        self.assertEqual(configured.fleet_environment,
+                         (*instance, ("FLEET_CONFIG", str(harness.home / "instance" / "fleets" / "lab.toml"))))
 
     def test_state_and_usage_cache_come_from_the_env_file_and_the_environment_wins(self) -> None:
         harness: FixtureHarness = FixtureHarness()
@@ -1836,6 +1860,209 @@ class InstanceConfigTest(unittest.TestCase):
         self.assertEqual(collector._result("claimable_sh").data, 5)
         self.assertIn("count label=ai:plan", harness.calls())
         self.assertFalse(any(call.startswith("claimable.sh") for call in harness.calls()))
+
+
+class FleetPanelTest(unittest.TestCase):
+    """
+    FLEET_STATUS_CMD feeds the Devices and Agent sessions panels; a fake fleet prints a fixture document.
+    """
+
+    SECRET_TOKEN: ClassVar[str] = "ghp_FLEETsecretFLEETsecretFLEETsecret0123"
+    SECRET_KEY: ClassVar[str] = "sk-FLEETsecretFLEETsecretFLEET01"
+
+    def setUp(self) -> None:
+        directory: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.home: Path = Path(directory.name)
+        (self.home / "state" / "logs").mkdir(parents=True)
+        self.document: Path = self.home / "fleet.json"
+        self.exit_code: Path = self.home / "fleet.rc"
+        shutil.copy(FLEET_FIXTURES / "status.json", self.document)
+        self.exit_code.write_text("0")
+        fake_fleet: str = ("import sys; sys.stdout.write(open(sys.argv[1]).read()); "
+                           "sys.stderr.write('fleet: dev-b: unreachable: ssh exited 255'); "
+                           "sys.exit(int(open(sys.argv[2]).read()))")
+        config = DashboardConfig(harness_home=self.home, data_dir=self.home / "data", repo=None, remote_interval_s=0,
+                                 usage_cache=self.home / "usage-cache.json", crontab_command=("true",),
+                                 worktree_root="/srv/work",
+                                 fleet_status_command=(sys.executable, "-c", fake_fleet, str(self.document),
+                                                       str(self.exit_code)))
+        self.collector: Collector = Collector(config, None, clock=lambda: FixtureHarness.PINNED_EPOCH)
+
+    def read(self, document: str | None = None, exit_code: int = 0) -> JsonDict:
+        if document is not None:
+            self.document.write_text(document)
+        self.exit_code.write_text(str(exit_code))
+        self.collector.refresh_fleet_in_place()
+        return self.collector.snapshot()
+
+    def collector_running(self, script: str, timeout_s: float = 45.0) -> Collector:
+        """
+        A collector whose fleet command is `script`, run by this Python with the fixture document's path as argv[1].
+        """
+        config = DashboardConfig(harness_home=self.home, data_dir=self.home / "data", repo=None, remote_interval_s=0,
+                                 usage_cache=self.home / "usage-cache.json", crontab_command=("true",),
+                                 fleet_status_command=(sys.executable, "-c", script, str(self.document)),
+                                 fleet_timeout_s=timeout_s)
+        return Collector(config, None, clock=lambda: FixtureHarness.PINNED_EPOCH)
+
+    def test_parses_the_status_document(self) -> None:
+        report = FleetParser.parse((FLEET_FIXTURES / "status.json").read_text())
+        self.assertEqual([(device.name, device.transport, device.error) for device in report.devices],
+                         [("dev-a", "tls", None), ("dev-b", "ssh", "unreachable: ssh exited 255")])
+        dev_a = report.devices[0]
+        self.assertEqual((dev_a.cpus, dev_a.load[0], dev_a.mem_used_bytes, dev_a.gpus[0].util_pct),
+                         (16, 4.0, 17179869184, 50.0))
+        self.assertEqual([(adapter.name, adapter.running, adapter.max_concurrent) for adapter in dev_a.adapters],
+                         [("claude", 1, 2), ("aider", 0, 0)])
+        self.assertEqual([(session.state, session.pid, dict(session.labels)) for session in report.sessions],
+                         [("running", 4242, {"issue": "42"}), ("running", 5151, {}), ("exited 3", None, {})])
+        self.assertEqual(report.errors, ("dev-b: unreachable: ssh exited 255",))
+
+    def test_both_panels_render_from_the_command(self) -> None:
+        snapshot: JsonDict = self.read()
+        fleet: JsonDict = snapshot["fleet"]
+        self.assertTrue(fleet["available"])
+        self.assertIsNone(fleet["error"])
+        self.assertEqual([(session["issue"], session["issue_source"], session["age_s"]) for session in fleet["sessions"]],
+                         [(42, "label", 1200), (77, "worktree", 7200), (None, "", 3600)])
+        self.assertEqual(snapshot["sources"]["fleet"]["interval_s"], 30.0)
+        page: str = HtmlRenderer().render(snapshot, 30)
+        for present in ("<h2>Devices <span class=\"sub\">1 of 2 reachable", "dev-a.example.com", "claude 1/2",
+                        "aider watch only", "Example GPU 50 %", "16.0 / 64.0 GB", "unreachable: ssh exited 255",
+                        "<h2>Agent sessions <span class=\"sub\">2 running", "pid 4242", "#42", "#77",
+                        "d-1795640000-9f8e7d6c", "exited 3", "/srv/work/app-77/sub"):
+            self.assertIn(present, page)
+
+    def test_device_strings_are_redacted_and_escaped(self) -> None:
+        document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        device: JsonDict = document["devices"][0]
+        device["status"]["device"]["hostname"] = "<script>alert(1)</script>"
+        device["sessions"][0]["cwd"] = f"/srv/work/{self.SECRET_TOKEN}"
+        device["sessions"][1]["summary"] = f"aider --api-key={self.SECRET_KEY}"
+        snapshot: JsonDict = self.read(json.dumps(document))
+        page: str = HtmlRenderer().render(snapshot, 30)
+        for surface in (json.dumps(snapshot), page):
+            self.assertNotIn(self.SECRET_TOKEN, surface)
+            self.assertNotIn(self.SECRET_KEY, surface)
+        self.assertNotIn("<script>alert", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn("/srv/work/[redacted]", page)
+
+    def test_a_bad_version_or_bad_json_is_a_source_error_that_keeps_the_last_read(self) -> None:
+        self.read()
+        document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        for text, exit_code, expected in ((json.dumps(dict(document, version=2)), 0, "version 2, expected 1"),
+                                          ("not json", 0, "fleet exit 0"),
+                                          ("", 2, "fleet exit 2"),
+                                          (json.dumps(dict(document, generated_at="soon")), 0, "generated_at")):
+            snapshot: JsonDict = self.read(text, exit_code)
+            fleet: JsonDict = snapshot["fleet"]
+            self.assertIn(expected, fleet["error"])
+            self.assertEqual(fleet["error"], snapshot["sources"]["fleet"]["error"])
+            self.assertEqual(len(fleet["devices"]), 2, "the last good read stays")
+            self.assertIn("last read failed", HtmlRenderer().render(snapshot, 30))
+        broken: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        broken["devices"][0]["sessions"][0]["state"] = {"kind": f"paused {FleetPanelTest.SECRET_TOKEN}"}
+        error: str = self.read(json.dumps(broken))["fleet"]["error"]
+        self.assertIn("state.kind", error)
+        self.assertNotIn(FleetPanelTest.SECRET_TOKEN, error)
+        broken["devices"][0]["sessions"][0]["state"] = {"kind": "running"}
+        broken["devices"][0]["status"]["metrics"]["cpu_percent"] = float("nan")
+        self.assertIn("cpu_percent", self.read(json.dumps(broken))["fleet"]["error"])
+
+    def test_numbers_outside_fleets_range_are_a_source_error(self) -> None:
+        self.read()
+        cases: tuple[tuple[tuple[str, ...], Any, str], ...] = (
+            (("status", "metrics", "load"), [10**400, 0, 0], "load is not three numbers"),
+            (("status", "metrics", "load"), [-1, 0, 0], "load is not three numbers"),
+            (("status", "metrics", "cpu_percent"), 1e301, "cpu_percent"),
+            (("status", "metrics", "cpu_percent"), 2**63, "cpu_percent"),
+            (("status", "device", "cpus"), 10**400, "cpus"),
+        )
+        for keys, value, expected in cases:
+            document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+            target: JsonDict = document["devices"][0]
+            for key in keys[:-1]:
+                target = target[key]
+            target[keys[-1]] = value
+            text: str = json.dumps(document)
+            with self.assertRaises(ValueError, msg=keys):
+                FleetParser.parse(text)
+            snapshot: JsonDict = self.read(text)
+            self.assertIn(expected, snapshot["fleet"]["error"])
+            self.assertEqual(len(snapshot["fleet"]["devices"]), 2, "the last good read stays")
+        fixture: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        self.assertIsNotNone(FleetParser.parse(json.dumps(dict(fixture, generated_at=2**63 - 1))))
+
+    def test_fleet_runs_without_the_dashboards_tokens(self) -> None:
+        seen: Path = self.home / "environment"
+        collector: Collector = self.collector_running(
+            "import os, sys; "
+            f"open({str(seen)!r}, 'w').write(' '.join(sorted(os.environ))); "
+            "sys.stdout.write(open(sys.argv[1]).read())")
+        secrets: dict[str, str] = {name: "x" for name in (
+            "GH_TOKEN", "GITHUB_TOKEN", "my_api_token", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD", "MYSQL_PASSWD",
+            "OPENAI_API_KEY", "Deploy_Private_Key", "GOOGLE_APPLICATION_CREDENTIALS")}
+        kept: dict[str, str] = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "HOME": "/home/x", "PATH": os.environ["PATH"],
+                                "KEYBOARD": "kept"}
+        with patch.dict(os.environ, dict(secrets, **kept)):
+            collector.refresh_fleet_in_place()
+        self.assertIsNone(collector.snapshot()["fleet"]["error"])
+        names: set[str] = set(seen.read_text().split())
+        self.assertEqual(names & set(secrets), set())
+        self.assertLessEqual(set(kept), names)
+
+    def test_output_past_the_cap_kills_fleet_and_is_a_source_error(self) -> None:
+        collector: Collector = self.collector_running(
+            "import sys\nwhile True: sys.stdout.write('x' * 65536)", timeout_s=30)
+        started: float = time.monotonic()
+        collector.refresh_fleet_in_place()
+        self.assertLess(time.monotonic() - started, 20, "killed at the cap, not at the timeout")
+        self.assertIn(f"output passed {Collector.FLEET_OUTPUT_MAX_BYTES} bytes", collector.snapshot()["fleet"]["error"])
+
+    def test_a_fleet_that_hangs_is_stopped_at_the_timeout(self) -> None:
+        collector: Collector = self.collector_running("import time; time.sleep(30)", timeout_s=0.5)
+        started: float = time.monotonic()
+        collector.refresh_fleet_in_place()
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("TimeoutExpired", collector.snapshot()["fleet"]["error"])
+
+    def test_an_issue_label_that_is_not_a_short_ascii_number_is_a_source_error(self) -> None:
+        self.read()
+        document: JsonDict = json.loads((FLEET_FIXTURES / "status.json").read_text())
+        for label in ("\u00b2", "9" * 5000, "1234567890"):
+            document["devices"][0]["sessions"][0]["labels"] = {"issue": label}
+            snapshot: JsonDict = self.read(json.dumps(document))
+            self.assertIn("labels.issue is not an issue number", snapshot["fleet"]["error"])
+            self.assertEqual(snapshot["fleet"]["sessions"][0]["issue"], 42, "the last good read stays")
+            HtmlRenderer().render(snapshot, 30)
+
+    def test_huge_numbers_in_paths_and_state_files_read_as_no_number(self) -> None:
+        huge: str = "9" * 5000
+        self.assertIsNone(StateParsers.issue_from_path(f"/srv/work/app-{huge}", "/srv/work"))
+        self.assertIsNone(StateParsers.issue_from_path(f"/x/2026-11-26-{huge}-slug/runs", ""))
+        self.assertIsNone(StateParsers.parse_claim(f"claim.{huge}", f"1 2 2026-11-26T00:00:00Z"))
+        self.assertEqual(StateParsers.parse_streaks(f"h ok {huge} 1 1\n"), {})
+        self.assertEqual(IssueQueue.parse_dependencies(f"Depends on: #{huge}"), ())
+        self.assertEqual(StateParsers.parse_lease_status(f"slot 1 HELD {huge} 7 2026-11-26T00:00:00Z (alive)\n")
+                         .slots[0].issue, None)
+
+    def test_a_partial_result_shows_each_device_error(self) -> None:
+        snapshot: JsonDict = self.read(exit_code=1)
+        self.assertIsNone(snapshot["fleet"]["error"])
+        self.assertEqual([device["error"] for device in snapshot["fleet"]["devices"]],
+                         [None, "unreachable: ssh exited 255"])
+        snapshot = self.read((FLEET_FIXTURES / "sessions.json").read_text(), exit_code=1)
+        fleet: JsonDict = snapshot["fleet"]
+        self.assertIsNone(fleet["devices"])
+        self.assertEqual(fleet["errors"], ["dev-b: timeout: no answer in 30s"])
+        self.assertEqual([(session["adapter"], session["issue"]) for session in fleet["sessions"]], [("codex", 7)])
+        page: str = HtmlRenderer().render(snapshot, 30)
+        self.assertNotIn("<h2>Devices", page)
+        self.assertIn("dev-b: timeout: no answer in 30s", page)
+        self.assertIn("dev-a: more sessions than one answer holds", page)
+
 
 if __name__ == "__main__":
     unittest.main()

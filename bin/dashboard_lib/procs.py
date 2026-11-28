@@ -27,15 +27,16 @@ class ProcessScanner:
     """
     Reads the process table and recognises harness ticks.
 
-    A tick is a process whose argv[0] is the claude binary and argv[1] is `-p` (bin/tick-pid.sh's rule) and whose
-    stdout is a `state/logs/tick-*.log` of this harness home, as tick.sh's runner redirects it; a `claude -p` of
-    another harness home or outside any harness is left out. Its issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its pid, then from a lease it
-    holds, then from a cached GitHub claim-comment lookup the caller supplies.
+    A tick is a process whose argv[0] base name is claude, claude-code or node and argv[1] is `-p`, the local
+    ticks tick.sh runs and bin/tick-pid.sh's default TICK_AGENT_EXES, and whose stdout is a `state/logs/tick-*.log`
+    of this harness home, as tick.sh's runner redirects it; a `claude -p` of another harness home or outside any
+    harness is left out. Its issue comes, cheapest first, from the newest `state/locks/claim.<issue>` naming its
+    pid, then from a lease it holds, then from a cached GitHub claim-comment lookup the caller supplies.
     """
 
     CLAUDE_BINARIES: ClassVar[frozenset[str]] = frozenset({"claude", "claude-code", "node"})
     LANDING_MARK: ClassVar[str] = "This tick is the merge slot's landing tick"
-    SLOT_LOCK_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"/locks/slot(\d+)\.lock$")
+    SLOT_LOCK_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"/locks/slot([0-9]{1,9})\.lock$")
     TOOL_COMMAND_MAX_CHARS: ClassVar[int] = 160
 
     def __init__(self, harness_state_dir: Path, proc_root: Path = Path("/proc")) -> None:

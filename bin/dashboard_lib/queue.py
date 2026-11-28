@@ -130,7 +130,7 @@ class IssueQueue:
         return tuple(
             int(number)
             for line in IssueQueue.DEPENDS_LINE_PATTERN.findall(body)
-            for number in re.findall(r"#(\d+)", line)
+            for number in re.findall(r"#([0-9]{1,9})\b", line)
         )
 
     def _apply_first_gate(self, candidates: list[QueueIssue],

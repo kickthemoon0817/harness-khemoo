@@ -34,15 +34,15 @@ class StateParsers:
 
     HOST_HEALTH_COLUMNS: ClassVar[int] = 9
     REMOTE_CARD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^remote (?:device|card|host): (\S+) \(slots (\d+)-(\d+)\)$")
+        r"^remote (?:device|card|host): (\S+) \(slots ([0-9]{1,9})-([0-9]{1,9})\)$")
     LOCAL_OFF_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^local (?:device|card|host): off\b")
     HARNESS_ONLY_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^harness ticks: (.*?) only\b")
-    SLOT_FREE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^slot (\d+) free$")
+    SLOT_FREE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^slot ([0-9]{1,9}) free$")
     SLOT_HELD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^(?:slot (\d+)|device) (HELD|ORPHAN) (\S+) (\d+) (\S+)((?: \S+)*?) \((alive|pid dead)\)$"
+        r"^(?:slot ([0-9]{1,9})|device) (HELD|ORPHAN) (\S+) ([0-9]{1,9}) (\S+)((?: \S+)*?) \((alive|pid dead)\)$"
     )
     WAIT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"^wait (whole-device|whole-card|whole-pool|single-slot) issue (\d+) for (-?\d+) min(?: \((.*)\))?$"
+        r"^wait (whole-device|whole-card|whole-pool|single-slot) issue ([0-9]{1,9}) for (-?[0-9]{1,9}) min(?: \((.*)\))?$"
     )
     STALL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\S+) STALL (\S+) (\S+) ?(.*)$")
     ALLOCATOR_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^(\d{8}T\d{6}Z) (.*)$")
@@ -50,7 +50,7 @@ class StateParsers:
     MODEL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
     TOOL_EVAL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"\beval '(.*)' < /dev/null", re.DOTALL)
     DOCKER_CGROUP_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"docker[-/]([0-9a-f]{12})")
-    PACKET_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|/)\d{4}-\d{2}-\d{2}-(\d+)-[^/]*(?:/|$)")
+    PACKET_ISSUE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"(?:^|/)\d{4}-\d{2}-\d{2}-([0-9]{1,9})-[^/]*(?:/|$)")
 
     @staticmethod
     def parse_iso_epoch(iso_text: str) -> float:
@@ -123,9 +123,10 @@ class StateParsers:
             if len(parts) < 5 or line.startswith("#"):
                 continue
             host, state, bad_text, good_text, since_text = parts[:5]
-            if not (bad_text.isdigit() and good_text.isdigit() and since_text.isdigit()):
+            bad, good, since = (StateParsers._optional_int(text) for text in (bad_text, good_text, since_text))
+            if bad is None or good is None or since is None:
                 continue
-            streaks[host] = HostStreak(host, state, int(bad_text), int(good_text), int(since_text))
+            streaks[host] = HostStreak(host, state, bad, good, since)
         return streaks
 
     @staticmethod
@@ -290,9 +291,9 @@ class StateParsers:
         Returns:
             The claim, or None when the name or contents do not match the format.
         """
-        name_match: re.Match[str] | None = re.fullmatch(r"claim\.(\d+)", file_name)
+        name_match: re.Match[str] | None = re.fullmatch(r"claim\.([0-9]{1,9})", file_name)
         parts: list[str] = text.split()
-        if name_match is None or len(parts) < 3 or not parts[1].isdigit():
+        if name_match is None or len(parts) < 3 or StateParsers._optional_int(parts[1]) is None:
             return None
         return ClaimRecord(issue=int(name_match.group(1)), pid=int(parts[1]), since=parts[2])
 
@@ -327,7 +328,8 @@ class StateParsers:
                 if parts[0] == "load" and len(parts) >= 3:
                     load1 = StateParsers._optional_float(parts[1])
                     nproc = StateParsers._optional_int(parts[2])
-                elif parts[0] in ("MemTotal:", "MemAvailable:") and len(parts) >= 2 and parts[1].isdigit():
+                elif parts[0] in ("MemTotal:", "MemAvailable:") and len(parts) >= 2 \
+                        and re.fullmatch(r"[0-9]{1,15}", parts[1]):
                     meminfo_kb[parts[0].rstrip(":")] = int(parts[1])
             elif section == "device" and gpu is None:
                 gpu_columns: list[str] = [column.strip() for column in line.split(",")]
@@ -340,13 +342,13 @@ class StateParsers:
                     )
             elif section == "processes":
                 app_columns: list[str] = [column.strip() for column in line.split(",", 2)]
-                if len(app_columns) == 3 and app_columns[0].isdigit():
+                if len(app_columns) == 3 and StateParsers._optional_int(app_columns[0]) is not None:
                     app_rows.append((int(app_columns[0]), StateParsers._optional_float(app_columns[1]),
                                      app_columns[2]))
             elif section == "cgroup":
                 pid_text, _, cgroup_text = line.partition(" ")
                 cgroup_match: re.Match[str] | None = StateParsers.DOCKER_CGROUP_PATTERN.search(cgroup_text)
-                if pid_text.isdigit() and cgroup_match:
+                if StateParsers._optional_int(pid_text) is not None and cgroup_match:
                     container_by_pid[int(pid_text)] = cgroup_match.group(1)
             elif section == "docker":
                 docker_columns: list[str] = line.split("\t")
@@ -387,7 +389,7 @@ class StateParsers:
         """
         root: str = worktree_root.rstrip("/")
         worktree_match: re.Match[str] | None = re.search(
-            re.escape(root) + r"/[A-Za-z][A-Za-z0-9-]*-(\d+)(?:/|$)", path) if root else None
+            re.escape(root) + r"/[A-Za-z][A-Za-z0-9-]*-([0-9]{1,9})(?:/|$)", path) if root else None
         match: re.Match[str] | None = worktree_match or StateParsers.PACKET_ISSUE_PATTERN.search(path)
         return int(match.group(1)) if match else None
 
@@ -457,7 +459,7 @@ class StateParsers:
             slot=held_slot,
             state="held" if held_match.group(2) == "HELD" else "orphan",
             holder=holder,
-            issue=int(holder) if holder.isdigit() else None,
+            issue=StateParsers._optional_int(holder),
             pid=int(held_match.group(4)),
             since=held_match.group(5),
             domain=domain,
@@ -501,7 +503,8 @@ class StateParsers:
     @staticmethod
     def _optional_int(text: str) -> int | None:
         """
-        Reads an integer, non-integers reading None.
+        Reads a count, pid, issue or epoch of at most twelve ASCII digits, anything else reading None: int()
+        refuses a string past 4300 digits, and a non-ASCII digit isdigit() accepts.
 
         Args:
             text: The field.
@@ -510,7 +513,7 @@ class StateParsers:
             The integer, or None.
         """
         stripped: str = text.strip()
-        return int(stripped) if stripped.isdigit() else None
+        return int(stripped) if re.fullmatch(r"[0-9]{1,12}", stripped) else None
 
     @staticmethod
     def _number_or_none(value: object) -> float | None:

@@ -35,6 +35,13 @@ harness_load
 : "${CLAUDE_BIN:=claude}"
 # Set, but possibly empty: an explicit `CLAUDE_FLAGS=` means "pass no flags".
 [ -z "${CLAUDE_FLAGS+x}" ] && CLAUDE_FLAGS="--dangerously-skip-permissions"
+# The agent a tick runs: an adapter name in fleet's sense. Only claude runs locally; any agent can
+# run through `fleet dispatch` when FLEET_DISPATCH=1 (docs/FLEET.md).
+: "${TICK_AGENT:=claude}"
+: "${FLEET_BIN:=fleet}"
+fleet=""; [ "${FLEET_DISPATCH:-}" = 1 ] && fleet=1
+# fleet reads $FLEET_CONFIG before its default, so an empty one must not reach it as set.
+[ -n "${FLEET_CONFIG:-}" ] || unset FLEET_CONFIG
 # Cron gives a bare PATH; the instance's bin/ stays first, as harness_load put it.
 export PATH="$HARNESS_INSTANCE_DIR/bin:${HARNESS_PATH:-$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 
@@ -71,7 +78,13 @@ instance_missing() {
             read -r -a argv <<<"$QUEUE_DEPTH_CMD"
             type -P -- "${argv[0]}" >/dev/null || echo "an executable QUEUE_DEPTH_CMD (${argv[0]})"
         fi
-        type -P -- "$CLAUDE_BIN" >/dev/null || echo "an executable CLAUDE_BIN ($CLAUDE_BIN)"
+        if [ -n "$fleet" ]; then
+            type -P -- "$FLEET_BIN" >/dev/null || echo "an executable FLEET_BIN ($FLEET_BIN)"
+        else
+            [ "$TICK_AGENT" = claude ] \
+                || echo "$HARNESS_ENV_FILE: TICK_AGENT=$TICK_AGENT needs FLEET_DISPATCH=1; only claude runs locally"
+            type -P -- "$CLAUDE_BIN" >/dev/null || echo "an executable CLAUDE_BIN ($CLAUDE_BIN)"
+        fi
     fi
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
@@ -85,7 +98,8 @@ fi
 # What the core prompt, the lint and a tick's gh calls read; none of it is secret. GH_TOKEN never
 # reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
 export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
-    ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL
+    ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
+    TICK_AGENT TICK_AGENT_EXES FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG
 export -n GH_TOKEN
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
@@ -102,7 +116,7 @@ compute_want() {
     # A tick needs a few minutes to read the queue and write its claim; a tick younger
     # than that is assumed to be about to claim one of the counted issues.
     young=0
-    for pid in $(pgrep -f '^[^ ]*claude -p' 2>/dev/null); do
+    for pid in $(pgrep -f "$tick_re" 2>/dev/null); do
         age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young=$(( young + 1 ))
     done
@@ -201,7 +215,7 @@ lane_wanted() {  # true when this tick should run on the model lane
     [ "$want_l" -gt 0 ] || return 1
     # The count excludes issues a live tick holds, so only a lane tick young enough
     # to be still choosing its issue stands for one of them (compute_want's rule).
-    for pid in $(pgrep -f -- "claude -p .*--model $LANE_MODEL" 2>/dev/null); do
+    for pid in $(pgrep -f -- "$lane_re$LANE_MODEL" 2>/dev/null); do
         age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -n "$age" ] && [ "$age" -lt "${CLAIM_GRACE_S:-360}" ] && young_l=$(( young_l + 1 ))
     done
@@ -212,6 +226,17 @@ lane_wanted() {  # true when this tick should run on the model lane
 # claims nothing but an issue waiting for the slot and never chains.
 LANDING_MARK="This tick is the merge slot's landing tick"
 LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
+# How a live tick shows in the process table. Through fleet it is the `fleet dispatch` waiting on
+# it, whose argv carries no prompt, so a landing tick is told by its label.
+if [ -n "$fleet" ]; then
+    tick_re="^[^ ]*${FLEET_BIN##*/} dispatch "
+    lane_re="${FLEET_BIN##*/} dispatch .*--model "
+    landing_re="${FLEET_BIN##*/} dispatch .*--label tick=landing"
+else
+    tick_re='^[^ ]*claude -p'
+    lane_re='claude -p .*--model '
+    landing_re="claude -p $LANDING_MARK"
+fi
 
 # The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
 # the key's value through a sed escape, never eval, so a value cannot run as code.
@@ -228,6 +253,41 @@ compose_prompt() {  # $1 = the lane line
     sed "${subst[@]}" "$INSTANCE_PROMPT"
 }
 
+# Prints each device `fleet status --json` reports; fails unless a reachable one offers TICK_AGENT
+# for dispatch (and is FLEET_DEVICE, when that names one). fleet exits 1 when any device failed, with
+# the document complete, so only the document decides.
+fleet_check() {
+    local script
+    script=$(cat <<'EOF'
+import json, sys
+agent, wanted = sys.argv[1:3]
+usable = 0
+try:
+    document = json.load(sys.stdin)
+    if document["version"] != 1:
+        raise ValueError(f"version {document['version']}, not 1")
+    for device in document["devices"]:
+        if not device["ok"]:
+            error = device["error"]
+            print(f"fleet device:  {device['name']} ({device['transport']}) unreachable: "
+                  f"{error['code']}: {error['message']}")
+            continue
+        adapter = next((a for a in device["status"]["adapters"] if a["name"] == agent), None)
+        offer = f"{agent} {adapter['running']}/{adapter['max_concurrent']} running" if adapter \
+            else f"no {agent} adapter"
+        print(f"fleet device:  {device['name']} ({device['transport']}) reachable, {offer}")
+        if adapter and adapter["max_concurrent"] > 0 and wanted in ("auto", device["name"]):
+            usable += 1
+except (ValueError, KeyError, TypeError) as error:
+    print(f"fleet:         fleet status --json gave no status document ({type(error).__name__}: {error})")
+    sys.exit(1)
+sys.exit(0 if usable else 1)
+EOF
+)
+    timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null \
+        | python3 -c "$script" "$TICK_AGENT" "${FLEET_DEVICE:-auto}"
+}
+
 # ----------------------------------------------------------------- check mode
 if [ "${1:-}" = check ]; then
     echo "harness home:  $HARNESS_HOME"
@@ -239,6 +299,12 @@ if [ "${1:-}" = check ]; then
     echo "repository:    ${GH_REPO:-(unset)}"
     echo "queue:         ${QUEUE_DEPTH_CMD:-gh issue list --label $ISSUE_LABEL, in the target repo}"
     echo "claude:        $CLAUDE_BIN"
+    echo "agent:         $TICK_AGENT"
+    if [ -n "$fleet" ]; then
+        echo "dispatch:      fleet: $FLEET_BIN dispatch --device ${FLEET_DEVICE:-auto}, config ${FLEET_CONFIG:-$HARNESS_INSTANCE_DIR/fleet.toml}"
+    else
+        echo "dispatch:      local"
+    fi
     echo "models:        $(model_list)"
     if lane_on; then echo "model lane:    $LANE_MODEL for \`$LANE_LABEL\`"; else echo "model lane:    off"; fi
     # harness_hook sources a *.sh hook and executes any other, so each is usable only in that form.
@@ -259,6 +325,9 @@ if [ "${1:-}" = check ]; then
     elif ! cron_active; then echo "paused:        yes, no active crontab line runs bin/tick.sh"
     else echo "paused:        no"; fi
     missing=$(instance_missing)
+    if [ -n "$fleet" ] && type -P -- "$FLEET_BIN" >/dev/null; then
+        fleet_check || missing+="${missing:+$'\n'}a fleet device that can take a $TICK_AGENT tick"
+    fi
     if [ -n "$missing" ]; then
         printf '%s\n' "$missing" | sed 's/^/missing: /'
         exit 1
@@ -333,8 +402,19 @@ if [ "${1:-}" = "runner" ]; then
             run_s=$(date +%s)
             # Only this attempt's output may decide its fate: the log also holds earlier attempts.
             log_from=$(( $(stat -c %s "$log" 2>/dev/null || echo 0) + 1 ))
-            "$CLAUDE_BIN" -p "$(compose_prompt "$lane")" $flags >>"$log" 2>&1
-            rc=$?
+            if [ -n "$fleet" ]; then
+                # The prompt goes on stdin, never into argv, which ps shows. fleet exits with the
+                # agent's status and writes its output here, so what follows reads it as a local run's.
+                # The timeout allows the longest budget and half an hour to wrap up.
+                dispatch=("$FLEET_BIN" dispatch --device "${FLEET_DEVICE:-auto}" --adapter "$TICK_AGENT"
+                    --workdir "$TARGET_REPO" --model "$model" --wait --timeout $(( (LONG_TICK_BUDGET_MIN + 30) * 60 )))
+                [ -n "$landing" ] && dispatch+=(--label tick=landing)
+                compose_prompt "$lane" | "${dispatch[@]}" >>"$log" 2>&1
+                rc=$?
+            else
+                "$CLAUDE_BIN" -p "$(compose_prompt "$lane")" $flags >>"$log" 2>&1
+                rc=$?
+            fi
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s model=$model" >>"$log"
             if [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] \
@@ -417,7 +497,7 @@ spawn=$(( allowed - busy ))
 # claim, one landing tick starts past the width for an issue waiting for the slot.
 if [ "$spawn" -eq 0 ] && [ "$allowed" -gt 0 ] && [ "$busy" -ge "$allowed" ] && [ "$free" -gt 0 ] \
     && [ "$young" -eq 0 ] && [ -n "${QUEUE_DEPTH_CMD:-}" ] \
-    && ! pgrep -f -- "claude -p $LANDING_MARK" >/dev/null 2>&1; then
+    && ! pgrep -f -- "$landing_re" >/dev/null 2>&1; then
     ready=0
     if queue_depth "$READY_LABEL"; then ready=$queue_n
     else log_changed "ERROR ready queue count failed ($queue_error); no landing tick"; fi

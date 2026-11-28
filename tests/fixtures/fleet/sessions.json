@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "generated_at": 1795657200,
+  "sessions": [
+    {"device": "dev-a", "session": {"id": "p-5151-1795650000", "adapter": "codex",
+     "origin": "discovered", "state": {"kind": "running"}, "pid": 5151,
+     "started_at": 1795650000, "ended_at": null, "cwd": "/srv/work/app-7",
+     "exe": "/usr/local/bin/codex", "model": null, "summary": "codex", "labels": {}}}
+  ],
+  "errors": [
+    {"device": "dev-b", "error": {"code": "timeout", "message": "no answer in 30s"}}
+  ],
+  "truncated": ["dev-a"]
+}

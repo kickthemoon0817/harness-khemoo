@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exercises bin/tick.sh against an instance overlay in a scratch harness home: the instance's
-# required files, its hooks, the composed prompt, the queue count and `tick.sh check`. A fake claude
-# records its prompt and environment; a fake queue command answers per label.
+# required files, its hooks, the composed prompt, the queue count, dispatch through fleet and
+# `tick.sh check`. A fake claude records its prompt and environment; a fake fleet follows the CLI
+# contract in docs/FLEET.md; a fake queue command answers per label.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -27,6 +28,37 @@ cat > "$H/fakebin/queue" <<'EOF'
 [ -e "$FAKE_QUEUE_FAILS" ] && { echo "queue service unreachable" >&2; exit 1; }
 printf '%s\n' "argv=$(tr '\0' ' ' < /proc/$$/cmdline)" "token=${GH_TOKEN:-unset}" > "$FAKE_QUEUE_SEEN"
 case "$ISSUE_LABEL" in ai:lane) cat "$FAKE_LANE" 2>/dev/null || echo 0 ;; ai:ready) echo 0 ;; *) echo 1 ;; esac
+EOF
+# docs/FLEET.md's CLI: status exits 1 when any device failed, its document complete; dispatch reads
+# the prompt from stdin, refuses an empty one, and with --wait writes the output and exits with the
+# agent's status.
+cat > "$H/fakebin/fleet" <<'EOF'
+#!/usr/bin/env bash
+cmd=$1; shift
+case "$cmd" in
+status)
+    [ "$*" = --json ] || exit 2
+    [ -e "$FAKE_FLEET_DOWN" ] && { echo "fleet: fleet.toml: no such file" >&2; exit 2; }
+    cat "$FAKE_FLEET_STATUS"; exit 1 ;;
+dispatch)
+    printf '%s\n' "$cmd $*" >> "$FAKE_FLEET_ARGV"
+    model=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --model) model=$2; shift 2 ;;
+            --device|--adapter|--workdir|--timeout|--label) [ $# -ge 2 ] || exit 2; shift 2 ;;
+            --wait|--json) shift ;;
+            *) echo "fleet: unknown argument $1" >&2; exit 2 ;;
+        esac
+    done
+    prompt=$(cat)
+    [ -n "$prompt" ] || { echo "fleet: empty prompt" >&2; exit 125; }
+    printf '%s' "$prompt" > "$FAKE_FLEET_STDIN"
+    [ "$model" = "$(cat "$FAKE_FLEET_LIMIT" 2>/dev/null)" ] && { echo "You've hit your usage limit · resets 5pm"; exit 1; }
+    echo "agent output on $model"
+    exit "$(cat "$FAKE_FLEET_RC" 2>/dev/null || echo 0)" ;;
+*) exit 2 ;;
+esac
 EOF
 # ssh -G prints the host an alias resolves to, and an unknown name as itself.
 cat > "$H/fakebin/ssh" <<'EOF'
@@ -61,13 +93,15 @@ EOF
 }
 export HARNESS_HOME="$H" HARNESS_PATH="$H/fakebin:$PATH" FAKE_PROMPT="$H/prompt.txt" FAKE_ENV="$H/env.txt" \
     FAKE_ARGS="$H/args.txt" FAKE_LANE="$H/lane.txt" FAKE_LINT_ENV="$H/lint-env.txt" \
-    PATH="$H/fakebin:$PATH" FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron"
+    PATH="$H/fakebin:$PATH" FAKE_QUEUE_FAILS="$H/queue-fails" FAKE_QUEUE_SEEN="$H/queue-seen.txt" FAKE_NO_CRON="$H/no-cron" \
+    FAKE_FLEET_STATUS="$here/tests/fixtures/fleet/status.json" FAKE_FLEET_DOWN="$H/fleet-down" FAKE_FLEET_ARGV="$H/fleet-argv.txt" \
+    FAKE_FLEET_STDIN="$H/fleet-stdin.txt" FAKE_FLEET_LIMIT="$H/fleet-limit" FAKE_FLEET_RC="$H/fleet-rc"
 LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 launch() {  # run the launcher once and wait for the runner it may start
-    rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS"; : > "$LOG"
+    rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log; : > "$LOG"
     rm -f "$H/state/locks/heartbeat.stamp"
     "$H/bin/tick.sh"
     sleep 2
@@ -223,6 +257,60 @@ write_env "HOLD_TIMEOUT_S=1"
 start=$(date +%s); launch; sleep 2; took=$(( $(date +%s) - start ))
 check "a hold hook that hangs past HOLD_TIMEOUT_S holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG" && [ "$took" -lt 10 ]' "took=${took}s log=$(cat "$LOG")"
 rm -f "$I/hooks/hold"
+
+# Through fleet: the runner dispatches with the prompt on stdin and reads the output as a local run's.
+check "the default path runs claude, not fleet" '[ -s "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ]' "prompt=$(cat "$FAKE_PROMPT" 2>/dev/null)"
+fleet_env() { write_env "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet" "LONG_TICK_BUDGET_MIN=90" "$@"; }
+fleet_env
+launch
+check "FLEET_DISPATCH runs fleet dispatch with the argv the contract gives, and not claude" \
+    '[ "$(cat "$FAKE_FLEET_ARGV")" = "dispatch --device auto --adapter claude --workdir $H/target --model fake-model --wait --timeout 7200" ] && [ ! -e "$FAKE_PROMPT" ]' \
+    "argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null) log=$(cat "$LOG")"
+check "the prompt goes on stdin, never into argv" \
+    '[ "$(head -1 "$FAKE_FLEET_STDIN")" = "This tick runs on fake-model." ] && grep -q "^Core rules for" "$FAKE_FLEET_STDIN" && ! grep -q "Core rules" "$FAKE_FLEET_ARGV"' \
+    "stdin=$(cat "$FAKE_FLEET_STDIN" 2>/dev/null)"
+echo 7 > "$FAKE_FLEET_RC"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "the dispatched agent's exit code and output reach the tick log" \
+    'grep -q "^agent output on fake-model$" "$tick_log" && grep -q "^\[tick.sh\] exit=7 duration=.*model=fake-model$" "$tick_log"' \
+    "$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_FLEET_RC"
+fleet_env "TICK_MODELS='model-a model-b'"; echo model-a > "$FAKE_FLEET_LIMIT"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "a usage limit in the dispatched output cools the model and the tick re-runs on the next" \
+    '[ -e "$H/state/model-cooldown/model-a" ] && grep -q "model-a hit its usage limit" "$LOG" && [ "$(grep -o -- "--model [^ ]*" "$FAKE_FLEET_ARGV" | tr "\n" " ")" = "--model model-a --model model-b " ] && grep -q "^\[tick.sh\] exit=0 .*model=model-b$" "$tick_log"' \
+    "argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null) log=$(cat "$LOG")"
+rm -rf "$FAKE_FLEET_LIMIT" "$H/state/model-cooldown"
+fleet_env "TICK_AGENT=codex" "FLEET_DEVICE=dev-a"
+launch
+check "TICK_AGENT and FLEET_DEVICE reach the dispatch" 'grep -q -- "^dispatch --device dev-a --adapter codex " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
+fleet_env
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check reports fleet's devices and passes with one that can take a tick" \
+    '[ "$rc" -eq 0 ] && grep -q "^dispatch:      fleet: $H/fakebin/fleet dispatch --device auto" "$H/check.txt" && grep -qx "fleet device:  dev-a (tls) reachable, claude 1/2 running" "$H/check.txt" && grep -qx "fleet device:  dev-b (ssh) unreachable: unreachable: ssh exited 255" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+touch "$FAKE_FLEET_DOWN"
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check fails when fleet status fails" \
+    '[ "$rc" -eq 1 ] && grep -q "gave no status document" "$H/check.txt" && grep -qx "missing: a fleet device that can take a claude tick" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -f "$FAKE_FLEET_DOWN"
+fleet_env "FLEET_DEVICE=dev-b"
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check fails when FLEET_DEVICE names a device that cannot be reached" '[ "$rc" -eq 1 ]' "rc=$rc $(cat "$H/check.txt")"
+fleet_env "FLEET_BIN=no-such-fleet"
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check fails when FLEET_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable FLEET_BIN (no-such-fleet)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+write_env "TICK_AGENT=codex"
+"$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
+check "check fails when TICK_AGENT is not claude without fleet" \
+    '[ "$rc" -eq 1 ] && grep -q "TICK_AGENT=codex needs FLEET_DISPATCH=1" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+rm -f "$H/state/locks/instance-incomplete.stamp"
+launch
+check "the launcher refuses TICK_AGENT=codex without fleet and logs why" \
+    '[ ! -e "$FAKE_PROMPT" ] && [ ! -e "$FAKE_FLEET_ARGV" ] && grep -q "instance incomplete: .*TICK_AGENT=codex needs FLEET_DISPATCH=1" "$LOG"' "log=$(cat "$LOG")"
+write_env
 
 # HARNESS_INSTANCE_DIR moves the whole instance.
 mv "$I" "$H/elsewhere"

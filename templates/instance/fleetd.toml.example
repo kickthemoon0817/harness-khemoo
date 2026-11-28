@@ -1,0 +1,28 @@
+# Not read by the harness: the policy of each device's fleetd, at ~/.config/fleetd/fleetd.toml there.
+# docs/FLEET.md (fleetd.toml) gives every key. A device that takes harness ticks needs:
+#
+# - a harness checkout and its own instance, whose harness.env names this device's TARGET_REPO
+#   and WORKTREE_ROOT; the adapter's `env` table points a tick at them, because fleetd gives a
+#   dispatched agent none of the hub's environment;
+# - an adapter named as TICK_AGENT, whose `models` include every model in TICK_MODELS and LANE_MODEL
+#   (a tick asks for one by name, and one not listed is refused);
+# - `workdir_roots` holding TARGET_REPO, the directory a tick starts in;
+# - `timeout_s` of at least (LONG_TICK_BUDGET_MIN + 30) * 60, the timeout each tick asks for; a lower
+#   one ends a tick before its budget does;
+# - the permission flag CLAUDE_FLAGS gives a local tick, in `args`, since a tick cannot answer prompts.
+
+device = "dev-a"
+
+[adapters.claude]
+preset = "claude"
+exe = "/usr/local/bin/claude"
+args = ["-p", "--model", "{model}", "--dangerously-skip-permissions"]
+models = ["claude-opus-5-5"]
+workdir_roots = ["/srv/checkout"]
+max_concurrent = 2
+timeout_s = 9000
+
+[adapters.claude.env]
+HARNESS_HOME = "/srv/harness"
+HARNESS_INSTANCE_DIR = "/srv/harness/instance"
+TARGET_REPO = "/srv/checkout"

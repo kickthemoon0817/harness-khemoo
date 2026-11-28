@@ -15,7 +15,7 @@ if [ "$cmd" = status ]; then
   pid=""
 elif [ -x "$H/bin/tick-pid.sh" ]; then
   pid=$("$H/bin/tick-pid.sh" 2>/dev/null) || {
-    echo "ERROR: no claude -p tick above this shell; call claim.sh from the tick's own shell" >&2
+    echo "ERROR: no tick (an ancestor in TICK_AGENT_EXES) above this shell; call claim.sh from the tick's own shell" >&2
     exit 2
   }
 else
