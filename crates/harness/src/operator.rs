@@ -1,14 +1,18 @@
 //! Which GitHub comments are an operator's. Anyone can comment on a public repository, so a comment
 //! that starts with `Operator` counts only when its author is one: a login `OPERATOR_LOGINS` names
 //! when that is set, else the repository's owner, a member or a collaborator, as GitHub's
-//! `author_association` says. The supervisor's wake event and the health snapshot both read
-//! comments through [`operator_comments`].
+//! `author_association` says. A tick's operator notes (`harness operator notes`, which
+//! libexec/usage-ok.sh runs), the supervisor's wake event and the health snapshot all read comments
+//! through [`operator_comments`].
+
+use std::io::Read;
+use std::process::ExitCode;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dashboard::text::clip;
-use crate::supervisor::epoch_of;
+use crate::supervisor::{epoch_of, iso_of};
 use crate::usage::Lookup;
 
 const TRUSTED_ASSOCIATIONS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
@@ -102,6 +106,77 @@ pub fn operator_comments(
         .collect();
     found.sort_by_key(|comment| comment.at);
     found
+}
+
+/// The most read on stdin. usage-ok.sh cuts each comment to its first line before this reads it,
+/// so this holds over a thousand; input cut short loses only its newest comments, which GitHub
+/// lists last. The next run reads past them only once an operator comment before the cut is named.
+const INPUT_LIMIT: u64 = 4 << 20;
+
+#[derive(clap::Args)]
+pub struct Args {
+    #[command(subcommand)]
+    command: Sub,
+}
+
+#[derive(clap::Subcommand)]
+enum Sub {
+    /// Read an issue's comments (GitHub's REST objects, as arrays or one after another) on stdin, and
+    /// print each operator's `Operator` comment made after --since, oldest first, as
+    /// `<time> @<login>: <first line>`.
+    Notes {
+        /// An ISO-8601 UTC time, such as a tick's claim.
+        #[arg(long)]
+        since: String,
+    },
+}
+
+pub fn run(args: &Args) -> ExitCode {
+    let Sub::Notes { since } = &args.command;
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let mut input = Vec::new();
+    if let Err(error) = std::io::stdin().take(INPUT_LIMIT).read_to_end(&mut input) {
+        eprintln!("harness operator notes: {error}");
+        return ExitCode::from(2);
+    }
+    // The limit may cut a character in two; only the comment it falls in is lost.
+    match notes(&String::from_utf8_lossy(&input), &env, since) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("harness operator notes: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn notes(input: &str, env: Lookup, since: &str) -> Result<Vec<String>, String> {
+    let authors = Authors::from_env(env)?;
+    let since = epoch_of(since).ok_or_else(|| format!("--since {since:?} is not an ISO time"))?;
+    // What parses up to the first fault counts: a stream cut short at the limit keeps its oldest.
+    let mut comments = Vec::new();
+    for value in serde_json::Deserializer::from_str(input).into_iter::<Value>() {
+        match value {
+            Ok(Value::Array(page)) => comments.extend(page),
+            Ok(comment) => comments.push(comment),
+            Err(_) => break,
+        }
+    }
+    Ok(operator_comments(&comments, &authors, since)
+        .iter()
+        .map(|comment| {
+            format!(
+                "{} @{}: {}",
+                iso_of(comment.at),
+                comment.author,
+                comment.line
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -211,5 +286,45 @@ mod tests {
         );
         let found = operator_comments(&[long], &Authors::Associated, 0);
         assert!(found[0].line.chars().count() <= LINE_CHARS + 1);
+    }
+    #[test]
+    fn notes_print_each_operator_comment_with_its_time_and_author() {
+        let input = serde_json::to_string(&comments()).unwrap();
+        let unset = |_: &str| None;
+        assert_eq!(
+            notes(&input, &unset, "2026-11-01T00:00:00Z").unwrap(),
+            [
+                "2026-11-02T00:00:00Z @owner-a: Operator: stop after the fix.",
+                "2026-11-04T00:00:00Z @helper-b: Operator: use the slow set."
+            ]
+        );
+    }
+
+    #[test]
+    fn notes_refuse_bad_logins_and_a_bad_time() {
+        let input = serde_json::to_string(&comments()).unwrap();
+        let unset = |_: &str| None;
+        let injected =
+            |key: &str| (key == "OPERATOR_LOGINS").then(|| "x\") or true or (\"".to_owned());
+        assert!(notes(&input, &injected, "2026-11-01T00:00:00Z").is_err());
+        assert!(notes(&input, &unset, "yesterday").is_err());
+    }
+
+    #[test]
+    fn notes_read_comments_one_after_another_and_keep_what_parses_before_a_fault() {
+        let unset = |_: &str| None;
+        let since = "2026-11-01T00:00:00Z";
+        let stream: String = comments()
+            .iter()
+            .map(|comment| serde_json::to_string(comment).unwrap() + "\n")
+            .collect();
+        assert_eq!(notes(&stream, &unset, since).unwrap().len(), 2);
+        let cut = &stream[..stream.find("helper-b").unwrap()];
+        assert_eq!(
+            notes(cut, &unset, since).unwrap(),
+            ["2026-11-02T00:00:00Z @owner-a: Operator: stop after the fix."]
+        );
+        let error = "{\"message\": \"Not Found\"}";
+        assert!(notes(error, &unset, since).unwrap().is_empty());
     }
 }

@@ -24,21 +24,26 @@ find_claim() {
     return 1
 }
 
-# A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue
-# this tick claimed that is newer than the claim, once per tick. Silent, and never fatal, when no
-# token or no answer is found.
+# A ruling posted after a tick's claim binds that tick, so name each operator's Operator comment on
+# the issue this tick claimed that is newer than the claim, once per tick. Anyone can comment on a
+# public repository: `harness operator notes` keeps only an operator's (docs/INSTANCE.md,
+# OPERATOR_LOGINS). Never fatal; silent when no token or no answer is found.
 operator_notes() {
-    local state="$HARNESS_STATE" seen since filter out
+    local state="$HARNESS_STATE" seen since page out
     [ -n "${GH_REPO:-}" ] || return 0
     seen="$state/operator-seen/$iss.$cpid"
     since=$ctime
     [ -s "$seen" ] && since=$(cat "$seen")
     [[ "$iss" =~ ^[0-9]+$ ]] && [[ "$since" =~ ^[0-9T:Z-]+$ ]] || return 0
-    filter="[.[] | select((.body|startswith(\"Operator\")) and .created_at > \"$since\")] | sort_by(.created_at) | .[] | \"\(.created_at) \(.body|split(\"\n\")[0]|.[0:180])\""
-    out=$(GH_TOKEN="${GH_TOKEN:-}" timeout 15 gh api "repos/$GH_REPO/issues/$iss/comments?since=$since&per_page=100" -q "$filter" 2>/dev/null < /dev/null) || return 0
+    # Every page: a run of comments from anyone must not push a ruling off the first. Each comment is
+    # cut to its first line here, so huge ones cannot crowd the others out of what is read.
+    page=$(GH_TOKEN="${GH_TOKEN:-}" timeout 15 gh api --paginate "repos/$GH_REPO/issues/$iss/comments?since=$since&per_page=100" \
+        -q '.[] | {created_at, author_association, issue_url, user: {login: .user.login}, body: ((.body // "") | split("\n")[0] | .[0:400])}' \
+        2>/dev/null < /dev/null) || return 0
+    out=$(printf '%s' "$page" | OPERATOR_LOGINS="${OPERATOR_LOGINS:-}" "$HARNESS_BIN" operator notes --since "$since") || return 0
     [ -n "$out" ] || return 0
     mkdir -p "$state/operator-seen" && printf '%s\n' "$out" | tail -1 | cut -d' ' -f1 > "$seen"
-    printf 'OPERATOR: new on #%s since %s; read the issue comments before you start:\n' "$iss" "$since"
+    printf 'OPERATOR: new on #%s since %s; read these comments on the issue before you start:\n' "$iss" "$since"
     printf '%s\n' "$out" | sed 's/^/  /'
 }
 

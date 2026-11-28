@@ -8,7 +8,7 @@ mod gh;
 pub mod health;
 mod home;
 pub mod lint;
-mod operator;
+pub mod operator;
 mod regular;
 pub mod supervisor;
 pub mod ticks;
