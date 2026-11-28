@@ -18,7 +18,7 @@ infrastructure live in an instance directory that you own.
 - The runner composes the prompt (a lane line, `prompts/tick-core.md`, then the instance's
   `prompts/tick.md`) and runs `claude -p` on the best model that is not cooling down.
 - The tick claims an issue (`libexec/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
-  worktree under `WORKTREE_ROOT`, lints every body with `libexec/public-record-lint.py` before posting
+  worktree under `WORKTREE_ROOT`, lints every body with `"$HARNESS_BIN" lint` before posting
   it, and ends with a summary. It stays inside its budget and the usage ceiling (`libexec/usage-ok.sh`).
 - A ready PR lands under `libexec/merge-lock.sh`, one at a time.
 - When a tick ends with work still queued, the runner starts the next tick at once on a fresh

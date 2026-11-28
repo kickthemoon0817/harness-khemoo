@@ -10,6 +10,13 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+regex = "1.13.2"
+# The engines under regex: anchored searches over a span, for the lint's look-around.
+regex-automata = "0.4.19"
+regex-syntax = "0.8.12"
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
