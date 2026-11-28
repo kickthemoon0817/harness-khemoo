@@ -27,10 +27,14 @@ LOG="$DATA/dashboard.log"
 # The pid file's process, when it is alive and still a dashboard, its first argument `dashboard`: a
 # reused pid is not ours.
 running_pid() {
-  local p
+  local p arg
   p=$(awk '{print $1}' "$PIDFILE" 2>/dev/null)
-  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null \
-    | sed -n 2p | grep -qx 'dashboard' && echo "$p"
+  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 1
+  # /proc keeps arguments apart; macOS has none, and ps splits on spaces, so a binary path with a space
+  # in it reads as not ours there.
+  if [ -r "/proc/$p/cmdline" ]; then arg=$(tr '\0' '\n' < "/proc/$p/cmdline" | sed -n 2p)
+  else arg=$(ps -o args= -p "$p" 2>/dev/null | awk '{print $2}'); fi
+  [ "$arg" = dashboard ] && echo "$p"
 }
 running_url() { cat "$URLFILE" 2>/dev/null || echo "http://127.0.0.1:$(awk '{print $2}' "$PIDFILE")/ (URL file missing)"; }
 
@@ -64,7 +68,10 @@ mkdir -p "$DATA" || exit 1
 [ ! -L "$DATA" ] && [ -d "$DATA" ] && [ -O "$DATA" ] || { echo "dashboard.sh: $DATA is not a directory of this user's" >&2; exit 1; }
 chmod 700 "$DATA" || exit 1
 rm -f "$URLFILE"
-setsid nohup "$HARNESS_BIN" dashboard --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
+# A session of its own keeps the server out of the terminal's signals; macOS has no setsid, and there
+# nohup alone keeps it past the shell's hangup.
+detach=(nohup); command -v setsid >/dev/null && detach=(setsid nohup)
+"${detach[@]}" "$HARNESS_BIN" dashboard --harness-home "$H" --data-dir "$DATA" --port "$PORT" "$@" \
   >> "$LOG" 2>&1 < /dev/null &
 pid=$!
 echo "$pid $PORT" > "$PIDFILE"
