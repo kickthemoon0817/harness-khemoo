@@ -236,6 +236,24 @@ async fn wait_for_file(path: &Path) -> String {
     }
 }
 
+/// The id of the one running session. The agent can start writing before fleetd lists its session,
+/// so the list is polled rather than read once.
+async fn running_session_id(config: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let running =
+            json(&run_fleet(config, &["sessions", "--json", "--running"], b"", &[]).await);
+        if let Some(id) = running["sessions"][0]["session"]["id"].as_str() {
+            return id.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no running session was listed: {running}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid.trim()])
@@ -461,11 +479,7 @@ async fn cancel_kills_the_session_and_ends_the_wait() {
     let pid = wait_for_file(&work.join("agent.pid")).await;
     assert!(alive(&pid));
 
-    let running = json(&run_fleet(&config, &["sessions", "--json", "--running"], b"", &[]).await);
-    let id = running["sessions"][0]["session"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let id = running_session_id(&config).await;
     let cancel = run_fleet(&config, &["cancel", "dev-a", &id, "--json"], b"", &[]).await;
     assert_eq!(cancel.code, 0, "{}", cancel.stderr);
     assert_eq!(
