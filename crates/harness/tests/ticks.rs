@@ -1,8 +1,9 @@
 //! `harness::ticks::scan` against real processes that carry the runner's marker.
 #![cfg(target_os = "linux")]
 
+use std::fs::File;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -12,10 +13,12 @@ use harness::ticks::{Kind, Tick, scan};
 struct Procs(Vec<Child>);
 
 impl Procs {
-    fn spawn(&mut self, command: &mut Command) -> u32 {
+    /// Starts `command` holding `lock` open, as a tick holds its slot's lock, or holding none.
+    fn spawn(&mut self, command: &mut Command, lock: Option<&Path>) -> u32 {
+        let stdout = lock.map_or_else(Stdio::null, |lock| Stdio::from(File::create(lock).unwrap()));
         let child = command
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::null())
             .process_group(0)
             .spawn()
@@ -38,10 +41,15 @@ impl Drop for Procs {
     }
 }
 
-/// A state directory no other test or installation names.
+/// A state directory, with its locks directory, that no other test or installation names.
 fn unique_state(name: &str) -> String {
     let dir = std::env::temp_dir().join(format!("ticks-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("state/locks")).unwrap();
     dir.join("state").to_string_lossy().into_owned()
+}
+
+fn slot_lock(state: &str, slot: u32) -> PathBuf {
+    Path::new(state).join(format!("locks/slot{slot}.lock"))
 }
 
 fn marker(state: &str, slot: u32, agent: &str, kind: &str) -> String {
@@ -96,6 +104,7 @@ fn a_marked_process_is_a_tick_with_its_fields() {
         Command::new("sleep")
             .arg("30")
             .env("HARNESS_TICK", marker(&state, 2, "codex", "landing")),
+        Some(&slot_lock(&state, 2)),
     );
     let ticks = until(&state, |ticks| !ticks.is_empty());
     assert_eq!(
@@ -121,11 +130,13 @@ fn another_state_directory_is_never_counted() {
         Command::new("sleep")
             .arg("30")
             .env("HARNESS_TICK", marker(&ours, 1, "claude", "work")),
+        Some(&slot_lock(&ours, 1)),
     );
     let other = procs.spawn(
         Command::new("sleep")
             .arg("30")
             .env("HARNESS_TICK", marker(&theirs, 1, "claude", "work")),
+        Some(&slot_lock(&theirs, 1)),
     );
     assert_eq!(pids(&until(&ours, |ticks| !ticks.is_empty())), [mine]);
     assert_eq!(pids(&until(&theirs, |ticks| !ticks.is_empty())), [other]);
@@ -143,6 +154,7 @@ fn the_topmost_marked_process_is_the_tick_and_its_children_are_not() {
         Command::new("sh")
             .args(["-c", "sh -c 'sleep 30 & wait' & wait"])
             .env("HARNESS_TICK", marker(&state, 1, "claude", "work")),
+        Some(&slot_lock(&state, 1)),
     );
     let ticks = until(&state, |ticks| !ticks.is_empty());
     // Read again once the grandchildren run: they must not show.
@@ -166,6 +178,7 @@ fn a_node_shim_resolves_to_the_shim_not_its_native_agent() {
             .arg0("node")
             .arg(&script)
             .env("HARNESS_TICK", marker(&state, 4, "gemini", "work")),
+        Some(&slot_lock(&state, 4)),
     );
     let ticks = until(&state, |ticks| !ticks.is_empty());
     wait_for_group(shim, 2);
@@ -182,16 +195,45 @@ fn a_child_whose_marked_parent_is_another_installation_is_a_tick() {
     let theirs = unique_state("nested-theirs");
     let mut procs = Procs(Vec::new());
     let inner = format!(
-        "HARNESS_TICK='{}' sleep 30 & wait",
-        marker(&ours, 1, "claude", "work")
+        "HARNESS_TICK='{}' sleep 30 >'{}' & wait",
+        marker(&ours, 1, "claude", "work"),
+        slot_lock(&ours, 1).display()
     );
     let outer = procs.spawn(
         Command::new("sh")
             .args(["-c", &inner])
             .env("HARNESS_TICK", marker(&theirs, 1, "claude", "work")),
+        Some(&slot_lock(&theirs, 1)),
     );
     let ticks = until(&ours, |ticks| !ticks.is_empty());
     assert_eq!(ticks.len(), 1);
     assert_ne!(ticks[0].pid, outer);
     assert_eq!(pids(&scan(&theirs).unwrap()), [outer]);
+}
+
+#[test]
+fn a_marked_process_without_its_slot_lock_is_not_a_tick() {
+    let state = unique_state("daemon");
+    let mut procs = Procs(Vec::new());
+    // A daemon a tick left behind: it kept the marker and closed the descriptors it started with.
+    procs.spawn(
+        Command::new("sleep")
+            .arg("30")
+            .env("HARNESS_TICK", marker(&state, 1, "claude", "landing")),
+        None,
+    );
+    // Another slot's lock is not its own.
+    procs.spawn(
+        Command::new("sleep")
+            .arg("30")
+            .env("HARNESS_TICK", marker(&state, 2, "claude", "work")),
+        Some(&slot_lock(&state, 3)),
+    );
+    let tick = procs.spawn(
+        Command::new("sleep")
+            .arg("30")
+            .env("HARNESS_TICK", marker(&state, 3, "claude", "work")),
+        Some(&slot_lock(&state, 3)),
+    );
+    assert_eq!(pids(&until(&state, |ticks| !ticks.is_empty())), [tick]);
 }

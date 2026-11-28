@@ -6,6 +6,10 @@
 //! tick starts inherits the variable, a node shim's native agent and every tool shell alike, so each
 //! resolves to the process the runner started. Only this user's processes are read, and only markers
 //! naming this state directory count, so two installations on one host never count each other's.
+//!
+//! A daemon a tick leaves behind (an ssh master, a gpg or build agent) keeps the marker once its
+//! parent is gone, so a tick must also hold its slot's lock open, as the descriptor the runner's
+//! process inherits does; a daemon closes the descriptors it was started with.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,6 +27,8 @@ use crate::home::{env_nonempty, harness_home};
 const ENVIRON_LIMIT: u64 = 4 << 20;
 const STAT_LIMIT: u64 = 4 << 10;
 const MARKER: &[u8] = b"HARNESS_TICK=";
+/// How many of a process's open descriptors are looked at for its slot lock.
+const FD_LIMIT: usize = 4096;
 
 #[derive(clap::Args)]
 #[command(after_help = "\
@@ -204,6 +210,8 @@ fn scan_in(proc_root: &Path, state: &str) -> io::Result<Vec<Tick>> {
             },
         );
     }
+    let locks = Path::new(state).join("locks");
+    let locks = std::fs::canonicalize(&locks).unwrap_or(locks);
     let mut ticks: Vec<Tick> = processes
         .iter()
         .filter_map(|(pid, process)| {
@@ -211,7 +219,8 @@ fn scan_in(proc_root: &Path, state: &str) -> io::Result<Vec<Tick>> {
             let parent_marked = processes
                 .get(&process.ppid)
                 .is_some_and(|parent| parent.marker.is_some());
-            if parent_marked {
+            let lock = locks.join(format!("slot{}.lock", marker.slot));
+            if parent_marked || !holds(proc_root, *pid, &lock) {
                 return None;
             }
             #[allow(clippy::cast_precision_loss)]
@@ -230,6 +239,17 @@ fn scan_in(proc_root: &Path, state: &str) -> io::Result<Vec<Tick>> {
         .collect();
     ticks.sort_by(|a, b| b.age_s.cmp(&a.age_s).then(a.pid.cmp(&b.pid)));
     Ok(ticks)
+}
+
+/// Whether process `pid` has `lock` open.
+fn holds(proc_root: &Path, pid: u32, lock: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc_root.join(pid.to_string()).join("fd")) else {
+        return false;
+    };
+    entries
+        .take(FD_LIMIT)
+        .flatten()
+        .any(|entry| std::fs::read_link(entry.path()).is_ok_and(|target| target == lock))
 }
 
 fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {

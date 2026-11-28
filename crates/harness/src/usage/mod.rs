@@ -282,10 +282,9 @@ impl AgentSource {
         };
         let fetch = match (env(&format!("USAGE_FETCH_{agent}")), agent) {
             (Some(path), _) => Some(PathBuf::from(path)),
-            (None, "claude") => Some(match env("USAGE_FETCH") {
-                Some(path) => PathBuf::from(path),
-                None => need_home()?.join(".claude/scripts/usage-fetch.sh"),
-            }),
+            (None, "claude") => env("USAGE_FETCH")
+                .map(PathBuf::from)
+                .or_else(|| home().map(|home| home.join(".claude/scripts/usage-fetch.sh"))),
             (None, _) => None,
         };
         Ok(Self {
@@ -462,12 +461,18 @@ fn run_fetch(fetch: &Path) {
     }
 }
 
-fn agent_usage(env: Lookup, settings: &Settings, agent: &str) -> Result<AgentUsage, String> {
+/// One agent's windows now, refreshed first through its fetch command when `refresh` is set.
+pub fn agent_usage(
+    env: Lookup,
+    settings: &Settings,
+    agent: &str,
+    refresh: bool,
+) -> Result<AgentUsage, String> {
     let source = AgentSource::from_env(env, agent)?;
-    let reading = if source.source == Source::None {
-        Err(String::new())
-    } else {
-        read_refreshed(settings, &source)
+    let reading = match source.source {
+        Source::None => Err(String::new()),
+        _ if refresh => read_refreshed(settings, &source),
+        _ => sources::read(&source.source),
     };
     assess(env, settings, &source, reading, now_ms())
 }
@@ -483,25 +488,63 @@ fn agents_of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<String> {
     agents
 }
 
-#[derive(Serialize)]
-struct Report {
-    width: u32,
-    pool_cap: u32,
-    agents: Vec<AgentUsage>,
+/// Every agent of the model list and the lane, with its windows, and the pool's cap.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Pool {
+    pub width: u32,
+    pub pool_cap: u32,
+    pub agents: Vec<AgentUsage>,
+    /// The agents each of whose entries cools down on its usage limit.
+    pub cooling: Vec<String>,
+}
+
+/// The pool as the settings in `env` read now; `refresh` runs each stale agent's fetch command first.
+/// An agent each of whose entries cools down adds nothing to the pool's cap: no runner could pick it.
+pub fn pool(env: Lookup, refresh: bool) -> Result<Pool, String> {
+    let settings = Settings::from_env(env)?;
+    let (entries, lane) = model_entries(env)?;
+    let entries: Vec<Entry> = entries.into_iter().chain(lane).collect();
+    let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
+    let state = state_dir(env);
+    let agents = agents_of(&entries)
+        .iter()
+        .map(|agent| agent_usage(env, &settings, agent, refresh))
+        .collect::<Result<Vec<_>, _>>()?;
+    let cooling: Vec<String> = agents
+        .iter()
+        .map(|usage| usage.agent.clone())
+        .filter(|agent| {
+            state.as_ref().is_some_and(|state| {
+                entries
+                    .iter()
+                    .filter(|entry| &entry.agent == agent)
+                    .all(|entry| cooling(state, entry, cooldown))
+            })
+        })
+        .collect();
+    Ok(Pool {
+        width: settings.width,
+        pool_cap: pool_cap(
+            settings.width,
+            agents
+                .iter()
+                .filter(|usage| !cooling.contains(&usage.agent))
+                .map(|usage| usage.cap),
+        ),
+        agents,
+        cooling,
+    })
+}
+
+/// `HARNESS_STATE`, else the checkout's `state/`.
+fn state_dir(env: Lookup) -> Option<PathBuf> {
+    env("HARNESS_STATE")
+        .map(PathBuf::from)
+        .or_else(|| harness_home().map(|home| home.join("state")))
 }
 
 fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
-    let settings = Settings::from_env(env)?;
-    let (entries, lane) = model_entries(env)?;
-    let agents = agents_of(entries.iter().chain(lane.iter()))
-        .iter()
-        .map(|agent| agent_usage(env, &settings, agent))
-        .collect::<Result<Vec<_>, _>>()?;
-    let report = Report {
-        width: settings.width,
-        pool_cap: pool_cap(settings.width, agents.iter().map(|a| a.cap)),
-        agents,
-    };
+    let report = pool(env, true)?;
     if json {
         println!(
             "{}",
@@ -516,8 +559,13 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
             Freshness::Unreadable(message) => format!(": no reading ({message})"),
             Freshness::Unmetered => ": no windows".to_owned(),
         };
+        let cooling = if report.cooling.contains(&agent.agent) {
+            ", every entry cooling down"
+        } else {
+            ""
+        };
         println!(
-            "{}: cap {} of {}, {}{state}",
+            "{}: cap {} of {}{cooling}, {}{state}",
             agent.agent, agent.cap, report.width, agent.source
         );
         for window in &agent.windows {
@@ -567,7 +615,7 @@ fn check(env: Lookup, agent: &str) -> Result<ExitCode, String> {
         ));
     }
     let settings = Settings::from_env(env)?;
-    let usage = agent_usage(env, &settings, agent)?;
+    let usage = agent_usage(env, &settings, agent, true)?;
     let windows: Vec<String> = usage
         .windows
         .iter()
@@ -653,10 +701,7 @@ fn pick_command(
     };
     let tried =
         Entry::list(tried, &default_agent).map_err(|message| format!("--tried: {message}"))?;
-    let state = env("HARNESS_STATE")
-        .map(PathBuf::from)
-        .or_else(|| harness_home().map(|home| home.join("state")))
-        .ok_or("no state directory: set HARNESS_STATE")?;
+    let state = state_dir(env).ok_or("no state directory: set HARNESS_STATE")?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     let mut running: HashMap<String, u32> = HashMap::new();
     for tick in crate::ticks::scan(&state.to_string_lossy())
@@ -666,7 +711,10 @@ fn pick_command(
     }
     let mut caps = BTreeMap::new();
     for agent in agents_of(&entries) {
-        caps.insert(agent.clone(), agent_usage(env, &settings, &agent)?.cap);
+        caps.insert(
+            agent.clone(),
+            agent_usage(env, &settings, &agent, true)?.cap,
+        );
     }
     let candidates: Vec<Candidate> = entries
         .into_iter()
@@ -690,7 +738,7 @@ fn pick_command(
 mod tests {
     use super::*;
 
-    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
         let map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -1120,6 +1168,38 @@ mod tests {
         );
         assert_eq!(pick(&full, &[], false), None);
         assert_eq!(pick(&[], &[], false), None);
+    }
+
+    #[test]
+    fn an_agent_whose_every_entry_cools_adds_nothing_to_the_pool() {
+        let dir = std::env::temp_dir().join(format!("usage-pool-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("state/model-cooldown")).unwrap();
+        let reading = format!(
+            r#"{{"timestamp": {}, "windows": [{{"name": "h", "used_pct": 75, "window_minutes": 60}}]}}"#,
+            now_ms()
+        );
+        std::fs::write(dir.join("u.json"), reading).unwrap();
+        let source = format!("json:{}", dir.join("u.json").display());
+        let state = dir.join("state").display().to_string();
+        let env = env_of(&[
+            ("TICK_MODELS", "claude:a codex:b codex:c"),
+            ("USAGE_SOURCE_claude", &source),
+            ("USAGE_SOURCE_codex", &source),
+            ("HARNESS_STATE", &state),
+            ("MAX_SLOTS", "4"),
+        ]);
+        let both = pool(&env, false).unwrap();
+        std::fs::write(dir.join("state/model-cooldown/codex:b"), "").unwrap();
+        let one_cooling = pool(&env, false).unwrap();
+        std::fs::write(dir.join("state/model-cooldown/codex:c"), "").unwrap();
+        let all_cooling = pool(&env, false).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!((both.pool_cap, both.cooling.len()), (2, 0));
+        assert_eq!(one_cooling.pool_cap, 2, "codex:c can still run");
+        assert_eq!(
+            (all_cooling.pool_cap, all_cooling.cooling),
+            (1, vec!["codex".to_owned()])
+        );
     }
 
     #[test]
