@@ -26,14 +26,17 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use super::shlex;
-use super::text::{basename, clean, is_word_char};
+use super::text::{basename, clean, joins_glyphs};
 
 pub const MASK: &str = "[redacted]";
 pub const MAX_SCRIPT_DEPTH: usize = 4;
 
-const SECRET_WORDS: &str = "(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED|COOKIE|SESSION)";
+// Written out for the dotted and dotless i, which simple case folding does not join to `i`.
+const SECRET_WORDS: &str = "(?:TOKEN|KEY|SECRET|PASS|AUTH|CRED|COOK[iIıİ]E|SESS[iIıİ]ON)";
+const AUTH_SCHEME: &str = "(?:bearer|token|bas[iIıİ]c|d[iIıİ]gest)";
+/// The longest text the redactor reads; past it the text is cut at a word and the cut marked.
+pub const MAX_REDACT_CHARS: usize = 8192;
 const ESCAPED_OR_QUOTED_VALUE: &str = r#"\\"[^"]*?\\"|\\'[^']*?\\'|"[^"]*"|'[^']*'"#;
-const AUTH_SCHEMES: [&str; 4] = ["bearer", "token", "basic", "digest"];
 const SCRIPT_CHARACTERS: &str = " \t\n'\"\\;|&";
 const PREAMBLE_COMMANDS: [&str; 19] = [
     "cd", "export", "source", ".", "set", "unset", "true", "false", ":", "local", "umask", "shopt",
@@ -76,7 +79,13 @@ static NAME: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"^(?:[A-Za-z_][A-Za-z0-9_]*|--?[A-Za-z0-9][A-Za-z0-9-]*)\n?$"));
 static SECRET_ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex(&format!(
-        r"(?i)([A-Za-z0-9_]*{SECRET_WORDS}[A-Za-z0-9_]*)=({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|]+)"
+        r"(?i)([A-Za-z0-9_]*{SECRET_WORDS}[A-Za-z0-9_]*)=(?:{AUTH_SCHEME}\s+)?({ESCAPED_OR_QUOTED_VALUE}|[^\s;&|]+)"
+    ))
+});
+// A quoted name and value, as JSON and YAML write them: `"token": "x"`, `password: 'x'`.
+static QUOTED_SECRET: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex(&format!(
+        r#"(?i)(["']?[A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*')"#
     ))
 });
 // The look-around of the patterns below is checked in code (see `replace_checked`), so every
@@ -95,9 +104,11 @@ static SECRET_FLAG_START: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 static SECRET_HEADER: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex(&format!(
-        r#"(?i)([A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*\s*:\s*)((?:bearer|token|basic|digest)\s+)?([^\s'"]+)"#
+        r#"(?i)([A-Za-z0-9_-]*{SECRET_WORDS}[A-Za-z0-9_-]*\s*:\s*)({AUTH_SCHEME}\s+)?([^\s'"]+)"#
     ))
 });
+static AUTH_SCHEME_WORD: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex(&format!("(?i)^{AUTH_SCHEME}$")));
 static CURL_USER: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"(curl()[^;&|]*?\s(?:-u\s*|--user(?:=|\s+))[^\s:;&|]+:)[^\s;&|]+"));
 static PASSWORD_FLAG: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -111,6 +122,9 @@ static FLAG_WORD: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"^--?[A-Za-z][A-Za-z0-9_-]*(?:=.*)?\n?$"));
 static BEARER: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"));
+// A GitHub token's prefix marks one, whatever its length: a cut one is masked too.
+static GITHUB_TOKEN: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*"));
 static URL_PASSWORD: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r#"(?i)([a-z][a-z0-9+.-]*://)[^/\s@:'"]+:[^/\s@'"]*@"#));
 static HTTP_USERINFO: LazyLock<regex::Regex> =
@@ -127,116 +141,206 @@ static SUBSTITUTION: LazyLock<regex::Regex> =
     LazyLock::new(|| regex(r"\$\(\([^()]*\)\)|\$\([^()]*\)|`[^`]*`"));
 static ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| regex(r"^[A-Za-z_][A-Za-z0-9_]*="));
 
+/// What `replace_checked`'s check makes of a match.
+enum Checked {
+    /// Replaced up to this end.
+    Replace(usize, String),
+    /// Refused; the search goes on one character after the match's start.
+    Refuse,
+    /// Refused, and so is every start up to this position: they are inside the same word.
+    RefuseUpTo(usize),
+}
+
 /// Replaces the matches of `pattern` that `accept` takes, as a backtracking engine with
-/// look-around would: `accept` gets a match and returns its end and replacement, or refuses it,
-/// and the search then goes on one character after where the refused match started.
+/// look-around would. A refusal of a match glued to the word before it skips the whole word, so
+/// the search stays linear in the text.
 fn replace_checked(
     pattern: &regex::Regex,
     text: &str,
-    accept: impl Fn(&regex::Captures<'_>) -> Option<(usize, String)>,
+    accept: impl Fn(&regex::Captures<'_>) -> Checked,
 ) -> String {
     let mut output = String::with_capacity(text.len());
     let mut last = 0;
     let mut position = 0;
-    while let Some(found) = pattern.captures_at(text, position) {
+    while position <= text.len()
+        && let Some(found) = pattern.captures_at(text, position)
+    {
         let Some(whole) = found.get(0) else { break };
-        if let Some((end, replacement)) = accept(&found) {
-            output.push_str(&text[last..whole.start()]);
-            output.push_str(&replacement);
-            last = end;
-            position = end;
-        } else {
-            let Some(next) = text[whole.start()..].chars().next() else {
-                break;
-            };
-            position = whole.start() + next.len_utf8();
-        }
-        if position > text.len() {
-            break;
+        let next_start = || {
+            whole.start()
+                + text[whole.start()..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8)
+        };
+        match accept(&found) {
+            Checked::Replace(end, replacement) => {
+                output.push_str(&text[last..whole.start()]);
+                output.push_str(&replacement);
+                last = end;
+                position = end.max(next_start());
+            }
+            Checked::Refuse => position = next_start(),
+            Checked::RefuseUpTo(end) => position = end.max(next_start()),
         }
     }
     output.push_str(&text[last..]);
     output
 }
 
-/// True when the character before `index` is not one of those `excluded` names: the
-/// look-behind `(?<![...])`.
-fn preceded_by_none(text: &str, index: usize, excluded: impl Fn(char) -> bool) -> bool {
-    !text[..index].chars().next_back().is_some_and(excluded)
+/// The look-behind `(?<![...])`: a match at `start` is taken only when the character before it
+/// is not `excluded`; when it is, so is every start in the run of `excluded` characters there.
+fn boundary_before(
+    text: &str,
+    start: usize,
+    excluded: impl Fn(char) -> bool,
+) -> Result<(), Checked> {
+    if !text[..start].chars().next_back().is_some_and(&excluded) {
+        return Ok(());
+    }
+    let run = text[start..]
+        .find(|character: char| !excluded(character))
+        .map_or(text.len(), |length| start + length);
+    Err(Checked::RefuseUpTo(run))
 }
 
-fn word_or_dash(character: char) -> bool {
-    is_word_char(character) || character == '-'
+/// A name's characters: ASCII letters, digits and `_`. A letter of another script before a name
+/// does not join it, so `éPASSWORD=x` is still a password.
+fn name_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
 }
 
-fn word_dot_or_dash(character: char) -> bool {
-    word_or_dash(character) || character == '.'
+fn name_or_dash(character: char) -> bool {
+    name_char(character) || character == '-'
+}
+
+fn name_dot_or_dash(character: char) -> bool {
+    name_or_dash(character) || character == '.'
+}
+
+fn checked(outcome: Result<Checked, Checked>) -> Checked {
+    outcome.unwrap_or_else(|refusal| refusal)
 }
 
 fn group<'t>(captures: &regex::Captures<'t>, index: usize) -> &'t str {
     captures.get(index).map_or("", |found| found.as_str())
 }
 
+/// Text cut to [`MAX_REDACT_CHARS`] at its last whitespace, the cut marked; a longer text
+/// with no whitespace to cut at is masked whole, since a cut could halve a secret.
+pub fn clip(text: &str) -> std::borrow::Cow<'_, str> {
+    let Some((cut, _)) = text.char_indices().nth(MAX_REDACT_CHARS) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    match text[..cut].rfind(char::is_whitespace) {
+        Some(space) => std::borrow::Cow::Owned(format!("{} \u{2026}", &text[..space])),
+        None => std::borrow::Cow::Borrowed(MASK),
+    }
+}
+
 /// Masks every secret-looking value in free text shown as it is, quotes and escapes included,
-/// and replaces control, bidi and invisible characters.
+/// and replaces control, bidi and invisible characters; a long text is clipped first.
 pub fn redact(text: &str) -> String {
-    let text = clean(text);
+    mask(&clip(text))
+}
+
+/// [`redact`] without the clip. The zero-width joiners and variation selectors go: they show
+/// nothing, and inside a secret they would hide it from every pattern.
+#[allow(clippy::too_many_lines)]
+fn mask(text: &str) -> String {
+    let text: String = clean(text)
+        .chars()
+        .filter(|character| !joins_glyphs(*character))
+        .collect();
     let masked = replace_checked(&SECRET_ASSIGNMENT, &text, |found| {
-        let whole = found.get(0)?;
-        preceded_by_none(&text, whole.start(), is_word_char)
-            .then(|| (whole.end(), format!("{}={MASK}", group(found, 1))))
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            boundary_before(&text, whole.start(), name_char)?;
+            Ok(Checked::Replace(
+                whole.end(),
+                format!("{}={MASK}", group(found, 1)),
+            ))
+        })())
+    });
+    let masked = replace_checked(&QUOTED_SECRET, &masked, |found| {
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            boundary_before(&masked, whole.start(), name_or_dash)?;
+            let quote = group(found, 2).chars().next().unwrap_or('"');
+            Ok(Checked::Replace(
+                whole.end(),
+                format!("{}{quote}{MASK}{quote}", group(found, 1)),
+            ))
+        })())
     });
     let masked = replace_checked(&SECRET_FLAG, &masked, |found| {
-        let whole = found.get(0)?;
-        let value = found.get(3)?;
-        // The value is a word that is no secret flag itself, unless it is a quoted value.
-        let quoted = ESCAPED_OR_QUOTED_START.is_match(value.as_str());
-        let accepted = preceded_by_none(&masked, whole.start(), word_or_dash)
-            && (quoted || !SECRET_FLAG_START.is_match(&masked[value.start()..]));
-        accepted.then(|| {
-            (
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            let value = found.get(3).ok_or(Checked::Refuse)?;
+            boundary_before(&masked, whole.start(), name_or_dash)?;
+            // The value is a word that is no secret flag itself, unless it is a quoted value.
+            let quoted = ESCAPED_OR_QUOTED_START.is_match(value.as_str());
+            if !quoted && SECRET_FLAG_START.is_match(&masked[value.start()..]) {
+                return Err(Checked::Refuse);
+            }
+            Ok(Checked::Replace(
                 whole.end(),
                 format!("{}{}{MASK}", group(found, 1), group(found, 2)),
-            )
-        })
+            ))
+        })())
     });
     // The empty groups mark where the command's name ends, which must be a word boundary.
     let command_flag = |text: &str, found: &regex::Captures<'_>| {
-        let whole = found.get(0)?;
-        let name_end = (2..found.len()).find_map(|index| found.get(index))?.end();
-        let bounded = !text[name_end..].chars().next().is_some_and(is_word_char);
-        (bounded && preceded_by_none(text, whole.start(), word_dot_or_dash))
-            .then(|| (whole.end(), format!("{}{MASK}", group(found, 1))))
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            boundary_before(text, whole.start(), name_dot_or_dash)?;
+            let name_end = (2..found.len())
+                .find_map(|index| found.get(index))
+                .ok_or(Checked::Refuse)?
+                .end();
+            if text[name_end..].chars().next().is_some_and(name_char) {
+                return Err(Checked::Refuse);
+            }
+            Ok(Checked::Replace(
+                whole.end(),
+                format!("{}{MASK}", group(found, 1)),
+            ))
+        })())
     };
     let masked = replace_checked(&CURL_USER, &masked, |found| command_flag(&masked, found));
     let masked = replace_checked(&PASSWORD_FLAG, &masked, |found| {
         command_flag(&masked, found)
     });
     let masked = replace_checked(&SECRET_HEADER, &masked, |found| {
-        let whole = found.get(0)?;
-        let name = found.get(1)?;
-        if !preceded_by_none(&masked, whole.start(), word_or_dash) {
-            return None;
-        }
-        let replacement = format!("{}{MASK}", name.as_str());
-        if !group(found, 3).starts_with("//") {
-            return Some((whole.end(), replacement));
-        }
-        // A value that is a URL path is not one: without the auth scheme, the scheme word is
-        // the value instead.
-        found.get(2)?;
-        let rest = &masked[name.end()..];
-        let length = rest
-            .find(|character: char| {
-                character.is_whitespace() || character == '\'' || character == '"'
-            })
-            .unwrap_or(rest.len());
-        Some((name.end() + length, replacement))
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            let name = found.get(1).ok_or(Checked::Refuse)?;
+            boundary_before(&masked, whole.start(), name_or_dash)?;
+            let replacement = format!("{}{MASK}", name.as_str());
+            if !group(found, 3).starts_with("//") {
+                return Ok(Checked::Replace(whole.end(), replacement));
+            }
+            // A value that is a URL path is not one: without the auth scheme, the scheme word is
+            // the value instead.
+            found.get(2).ok_or(Checked::Refuse)?;
+            let rest = &masked[name.end()..];
+            let length = rest
+                .find(|character: char| {
+                    character.is_whitespace() || character == '\'' || character == '"'
+                })
+                .unwrap_or(rest.len());
+            Ok(Checked::Replace(name.end() + length, replacement))
+        })())
     });
     let at_word_start = |text: &str, found: &regex::Captures<'_>, suffix: &str| {
-        let whole = found.get(0)?;
-        preceded_by_none(text, whole.start(), is_word_char)
-            .then(|| (whole.end(), format!("{}{MASK}{suffix}", group(found, 1))))
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            boundary_before(text, whole.start(), name_char)?;
+            Ok(Checked::Replace(
+                whole.end(),
+                format!("{}{MASK}{suffix}", group(found, 1)),
+            ))
+        })())
     };
     let masked = replace_checked(&BEARER, &masked, |found| at_word_start(&masked, found, ""));
     let masked = replace_checked(&URL_PASSWORD, &masked, |found| {
@@ -246,6 +350,13 @@ pub fn redact(text: &str) -> String {
         at_word_start(&masked, found, "@")
     });
     let masked = TOKEN_SHAPE.replace_all(&masked, MASK);
+    let masked = replace_checked(&GITHUB_TOKEN, &masked, |found| {
+        checked((|| {
+            let whole = found.get(0).ok_or(Checked::Refuse)?;
+            boundary_before(&masked, whole.start(), name_char)?;
+            Ok(Checked::Replace(whole.end(), MASK.to_owned()))
+        })())
+    });
     let masked = ALNUM_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
         let run = group(found, 0);
         if run.len() >= 32 && run.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -280,7 +391,18 @@ pub fn summarize(command: &str, max_arguments: usize, max_argument_chars: usize)
 /// Summarises a process's argv the same way; a script run by an interpreter is named by the
 /// script.
 pub fn summarize_argv<S: AsRef<str>>(argv: &[S], max_arguments: usize) -> String {
-    let mut words: Vec<String> = argv.iter().map(|word| word.as_ref().to_owned()).collect();
+    // As much of the argv as the redactor reads, the cut marked.
+    let mut words: Vec<String> = Vec::new();
+    let mut total = 0;
+    for word in argv {
+        let word = word.as_ref();
+        total += word.chars().count() + 1;
+        if total > MAX_REDACT_CHARS {
+            words.push("\u{2026}".to_owned());
+            break;
+        }
+        words.push(word.to_owned());
+    }
     if words.len() > 1
         && ["bash", "sh", "python3", "python"].contains(&basename(&words[0]))
         && !words[1].starts_with('-')
@@ -293,7 +415,7 @@ pub fn summarize_argv<S: AsRef<str>>(argv: &[S], max_arguments: usize) -> String
 /// Tokenizes a command line as the shell would and masks each dequoted word; MASK stands for
 /// everything from a quoting failure on.
 pub fn redact_command(command: &str, depth: usize) -> Vec<String> {
-    let mut collapsed = command.to_owned();
+    let mut collapsed = clip(command).into_owned();
     loop {
         let replaced = SUBSTITUTION
             .replace_all(&collapsed, SUBSTITUTION_PLACEHOLDER)
@@ -380,7 +502,7 @@ fn redact_words(words: &[String], depth: usize) -> Vec<String> {
                 FLAG_WORD.is_match(word)
             };
             if !taken_as_flag {
-                if scheme_may_follow && AUTH_SCHEMES.contains(&word.to_lowercase().as_str()) {
+                if scheme_may_follow && AUTH_SCHEME_WORD.is_match(word) {
                     redacted.push(word.clone());
                 } else {
                     redacted.push(MASK.to_owned());
@@ -423,7 +545,7 @@ fn redact_words(words: &[String], depth: usize) -> Vec<String> {
                     redacted.push(word.clone());
                     scheme_may_follow = true;
                     value_owed = true;
-                } else if AUTH_SCHEMES.contains(&value.to_lowercase().as_str()) {
+                } else if AUTH_SCHEME_WORD.is_match(value) {
                     redacted.push(word.clone());
                     value_owed = true;
                 } else {
@@ -911,19 +1033,95 @@ mod tests {
     }
 
     #[test]
-    fn a_word_character_before_a_name_is_no_boundary() {
-        assert_eq!(redact("éTOKEN=abc"), "éTOKEN=abc");
-        assert_eq!(redact("Ŝbearer abc"), "Ŝbearer abc");
+    fn a_letter_of_another_script_before_a_name_is_a_boundary() {
+        assert_eq!(redact("éTOKEN=abc"), "éTOKEN=[redacted]");
+        assert_eq!(redact("éPASSWORD=x"), "éPASSWORD=[redacted]");
+        assert_eq!(redact("Ŝbearer abc"), "Ŝbearer [redacted]");
+        assert_eq!(redact("Ŝ--token abc"), "Ŝ--token [redacted]");
+        assert_eq!(redact("étoken: abc"), "étoken: [redacted]");
+        assert!(!redact("xTOKEN=abc").contains("abc"));
         assert_eq!(redact("mysqlx -pabc"), "mysqlx -pabc");
         assert_eq!(redact("mysqldump -pabc"), "mysqldump -p[redacted]");
-    }
-
-    #[test]
-    fn lookbehind_sees_a_multibyte_character_before_the_match() {
         assert_eq!(redact("é--token=abc"), "é--token=[redacted]");
         assert_eq!(redact("x --token abc"), "x --token [redacted]");
         assert_eq!(redact("ä0123456789abcdef0123456789abcdef"), "ä[redacted]");
-        assert_eq!(redact("Ŝ--token abc"), "Ŝ--token abc");
-        assert_eq!(redact("étoken: abc"), "étoken: abc");
+    }
+
+    #[test]
+    fn quoted_values_and_schemes_after_a_name_are_masked() {
+        for (text, secret) in [
+            (r#"{"token": "s3cret value"}"#, "s3cret"),
+            ("token: 's3cret'", "s3cret"),
+            (r#"password: "s3cret""#, "s3cret"),
+            (r"{'api_key':'s3cret'}", "s3cret"),
+            ("authorization=Bearer s3cret", "s3cret"),
+            ("Authorization=basic s3cret", "s3cret"),
+        ] {
+            let masked = redact(text);
+            assert!(!masked.contains(secret), "{text}: {masked}");
+            assert!(masked.contains(MASK), "{text}: {masked}");
+        }
+        assert_eq!(
+            redact(r#"{"token": "x", "name": "kept"}"#),
+            r#"{"token": "[redacted]", "name": "kept"}"#
+        );
+    }
+
+    #[test]
+    fn the_dotted_and_dotless_i_fold_into_secret_words() {
+        for text in [
+            "COOKıE=s3cret",
+            "COOKİE=s3cret",
+            "SESSıON=s3cret",
+            "--sessİon s3cret",
+            "Authorization: Basıc s3cret",
+        ] {
+            assert!(!redact(text).contains("s3cret"), "{text}: {}", redact(text));
+        }
+    }
+
+    #[test]
+    fn a_cut_github_token_is_still_masked() {
+        for text in [
+            "error ghp_FAKEf",
+            "x gho_ab y",
+            "github_pat_1",
+            "token ghs_x.",
+        ] {
+            let masked = redact(text);
+            assert!(masked.contains(MASK), "{text}: {masked}");
+            assert!(
+                !masked.contains("gh") || masked.starts_with('x'),
+                "{text}: {masked}"
+            );
+        }
+        assert_eq!(redact("prefixghp_x"), "prefixghp_x");
+    }
+
+    #[test]
+    fn a_long_text_is_clipped_at_a_word_and_never_halves_a_secret() {
+        let text = format!("{} ghp_{}", "word ".repeat(2000), "A".repeat(100));
+        let masked = redact(&text);
+        assert!(masked.chars().count() <= MAX_REDACT_CHARS + 2);
+        assert!(!masked.contains("ghp_"));
+        assert_eq!(redact(&"A".repeat(MAX_REDACT_CHARS + 1)), MASK);
+    }
+
+    #[test]
+    fn redaction_stays_linear_on_a_word_glued_to_its_name() {
+        let started = std::time::Instant::now();
+        let glued = format!("中{}KEY=v", "A".repeat(200_000));
+        let masked = mask(&glued);
+        assert!(masked.ends_with("KEY=[redacted]") || masked.contains(MASK));
+        let flags = format!("中{}--token v", "a-".repeat(100_000));
+        mask(&flags);
+        let words: Vec<String> = (0..20_000).map(|index| format!("w{index}")).collect();
+        summarize_argv(&words, 4);
+        summarize(&format!("中{} x", "A".repeat(200_000)), 4, 32);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
