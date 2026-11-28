@@ -2995,10 +2995,10 @@ fn every_agents_windows_are_weighed_into_the_pool() {
     config.usage_settings = vec![
         (
             "TICK_MODELS".to_owned(),
-            "claude:claude-opus-5-5 codex:gpt-5.5 gemini:gemini-2.5-pro".to_owned(),
+            "claude:claude-opus-5-5 codex:gpt-5.5 agy:model-flash".to_owned(),
         ),
         ("MAX_SLOTS".to_owned(), "6".to_owned()),
-        ("USAGE_SOURCE_gemini".to_owned(), "none".to_owned()),
+        ("USAGE_SOURCE_agy".to_owned(), "none".to_owned()),
         (
             "USAGE_SOURCE_codex".to_owned(),
             format!(
@@ -3027,7 +3027,7 @@ fn every_agents_windows_are_weighed_into_the_pool() {
         [
             (json!("claude"), json!("fresh"), json!(3)),
             (json!("codex"), json!("fresh"), json!(3)),
-            (json!("gemini"), json!("unmetered"), json!(6)),
+            (json!("agy"), json!("unmetered"), json!(6)),
         ]
     );
     assert_eq!(usage["agents"][1]["windows"][0]["name"], "primary");
@@ -3037,11 +3037,7 @@ fn every_agents_windows_are_weighed_into_the_pool() {
     );
     assert_eq!(
         snapshot["harness"]["tick_models"],
-        json!([
-            "claude:claude-opus-5-5",
-            "codex:gpt-5.5",
-            "gemini:gemini-2.5-pro"
-        ])
+        json!(["claude:claude-opus-5-5", "codex:gpt-5.5", "agy:model-flash"])
     );
     let rendered = page(&snapshot);
     for text in [
@@ -3079,8 +3075,7 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
     let mut harness = FixtureHarness::new();
     let work = harness.start_marked_tick(2464, 1, "sleep 30", "claude", "claude-opus-5-5", "work");
     let lane = harness.start_marked_tick(2490, 2, "sleep 30", "codex", "gpt-5.5", "lane");
-    let landing =
-        harness.start_marked_tick(2201, 3, "sleep 30", "gemini", "gemini-2.5-pro", "landing");
+    let landing = harness.start_marked_tick(2201, 3, "sleep 30", "agy", "model-flash", "landing");
     // Not ticks: a process carrying this state directory's marker that no slot file records, and
     // one whose slot file records a start time it does not have, as a reused pid would.
     let unrecorded = Command::new("sleep")
@@ -3144,7 +3139,7 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
     );
     assert_eq!(
         ticks[&landing],
-        (json!("gemini"), json!("landing"), json!(3), json!(2201))
+        (json!("agy"), json!("landing"), json!(3), json!(2201))
     );
     for decoy in decoys {
         assert!(!ticks.contains_key(&decoy));
@@ -3164,7 +3159,7 @@ fn marked_ticks_of_any_agent_show_with_their_kind() {
     let rendered = page(&snapshot);
     for text in [
         "codex gpt-5.5 lane",
-        "gemini gemini-2.5-pro landing",
+        "agy model-flash landing",
         "claude Opus 5.5",
     ] {
         assert!(rendered.contains(text), "{text}");
@@ -3213,7 +3208,7 @@ fn the_model_list_and_usage_keys_come_from_the_env_file_expanded() {
     assert!((config.model_cooldown_s - 600.0).abs() < f64::EPSILON);
     for key in [
         "USAGE_FETCH_codex",
-        "AGENT_BIN_gemini",
+        "AGENT_BIN_agy",
         "TICK_MODELS",
         "MODEL_COOLDOWN_S",
         "GH_TOKEN",
