@@ -295,32 +295,40 @@ pub fn head_chars(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
-/// Bidi controls and invisible characters: they can make text read in another order than it is,
-/// or hide a difference between two names; tag characters can carry hidden text.
-fn hides_text(character: char) -> bool {
+/// Bidi controls and the invisible characters that join nothing: they can make text read in
+/// another order than it is, hide a difference between two names, or, as tag characters do,
+/// carry hidden text. The zero-width joiners and variation selectors are not among them: emoji
+/// and scripts such as Persian need them.
+pub fn invisible(character: char) -> bool {
     matches!(
         character,
         '\u{00AD}'
             | '\u{061C}'
             | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
+            | '\u{200B}'
+            | '\u{200E}'
+            | '\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{3164}'
-            | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
             | '\u{E0000}'..='\u{E007F}'
     )
 }
 
+/// Joiners and selectors that change how text looks but not what it says.
+pub fn joins_glyphs(character: char) -> bool {
+    matches!(character, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}')
+}
+
 /// Text from a state file, a command or GitHub, made safe to show: every control character but
-/// tab and line breaks, every bidi control and every invisible character becomes U+FFFD, so no
-/// text can carry a terminal escape or read differently from what it is.
+/// tab and line breaks, every bidi control and every invisible character that joins nothing
+/// becomes U+FFFD, so no text can carry a terminal escape or read differently from what it is.
 pub fn clean(text: &str) -> std::borrow::Cow<'_, str> {
     let replaced = |character: char| {
-        (character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
-            || hides_text(character)
+        (character.is_control() && !matches!(character, '\t' | '\n' | '\r')) || invisible(character)
     };
     if !text.chars().any(replaced) {
         return std::borrow::Cow::Borrowed(text);
@@ -378,6 +386,16 @@ mod tests {
         assert_eq!(optional_int(&"9".repeat(5000)), None);
         assert_eq!(optional_int(" 42 "), Some(42));
         assert_eq!(optional_int("\u{b2}"), None);
+    }
+
+    #[test]
+    fn clean_keeps_emoji_and_joined_scripts() {
+        let title = "\u{26a0}\u{fe0f} Fix the \u{1f469}\u{200d}\u{1f4bb} page; \u{646}\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        assert_eq!(clean(title), title);
+        assert_eq!(
+            clean("a\u{200b}b\u{feff}c\u{2066}d"),
+            "a\u{fffd}b\u{fffd}c\u{fffd}d"
+        );
     }
 
     #[test]

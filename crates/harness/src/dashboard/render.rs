@@ -88,6 +88,11 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
+/// A value as text, escaped for the page.
+fn t(value: &Value) -> String {
+    escape(&text_of(value))
+}
+
 /// A snapshot value, escaped; none reads as an empty string.
 fn e(value: &Value) -> String {
     if value.is_null() {
@@ -117,7 +122,8 @@ fn issue_link(number: &Value, url: &Value) -> String {
     if number.is_null() {
         return String::new();
     }
-    if truthy(url) {
+    // Only an https URL becomes a link: a `javascript:` or `data:` one must not run on a click.
+    if url.as_str().is_some_and(|url| url.starts_with("https://")) {
         return format!(
             r#"<a href="{}" target="_blank" rel="noopener noreferrer">#{}</a>"#,
             e(url),
@@ -372,13 +378,13 @@ fn header(snapshot: &Value) -> String {
     };
     let mut width_text = format!(
         "{} ticks live",
-        text_of(or(&harness["live_ticks"], &Value::from(0)))
+        t(or(&harness["live_ticks"], &Value::from(0)))
     );
     if !harness["last_allowed"].is_null() {
         write!(
             width_text,
             " &middot; allocator allowed {} at {}",
-            text_of(&harness["last_allowed"]),
+            t(&harness["last_allowed"]),
             clock(&harness["last_allowed_at"], false)
         )
         .ok();
@@ -388,7 +394,7 @@ fn header(snapshot: &Value) -> String {
     } else {
         ""
     };
-    let waiting = text_of(&harness["waiting_count"]);
+    let waiting = t(&harness["waiting_count"]);
     let waiting_pill = if truthy(&harness["work_waiting"]) {
         pill(
             "warning",
@@ -507,7 +513,7 @@ fn usage_block(usage: &Value) -> String {
         };
         let fill_width = usage[percent_key].as_f64().unwrap_or(0.0).min(100.0);
         let fill = format!(r#"<b class="{severity}" style="width:{fill_width:.0}%"></b>"#);
-        let cut_text: Vec<String> = cuts.iter().map(|cut| text_of(cut)).collect();
+        let cut_text: Vec<String> = cuts.iter().map(|cut| t(cut)).collect();
         let resets = &usage[resets_key];
         let resets_text = if truthy(resets) {
             format!(" &middot; resets {}", clock(resets, false))
@@ -522,7 +528,7 @@ fn usage_block(usage: &Value) -> String {
             ),
             label = label,
             cuts = cut_text.join(", "),
-            ceiling = text_of(&thresholds["ceiling_pct"]),
+            ceiling = t(&thresholds["ceiling_pct"]),
             fill = fill,
             ticks = ticks,
             percent = percent(&usage[percent_key]),
@@ -606,19 +612,19 @@ fn machine_card(machine: &Value, snapshot: &Value) -> String {
     if truthy(&machine["preferred_rank"]) {
         facts.push(format!(
             "harness preference #{}",
-            text_of(&machine["preferred_rank"])
+            t(&machine["preferred_rank"])
         ));
     }
     if truthy(&machine["card_note"]) {
         facts.push(e(&machine["card_note"]));
     }
     if truthy(&machine["slot_count"]) {
-        facts.push(format!("{} slots", text_of(&machine["slot_count"])));
+        facts.push(format!("{} slots", t(&machine["slot_count"])));
     }
     let load1 = &machine["load1"];
     let nproc = &machine["nproc"];
     let cores = if truthy(nproc) {
-        text_of(nproc)
+        t(nproc)
     } else {
         "?".to_owned()
     };
@@ -723,7 +729,7 @@ fn machine_card(machine: &Value, snapshot: &Value) -> String {
             let tags: Vec<String> = list(&slot["tags"]).iter().map(text_of).collect();
             format!(
                 r#"<span class="chip strong">slot {} {}{}{}</span>"#,
-                text_of(&slot["slot"]),
+                t(&slot["slot"]),
                 issue_ref(&slot["issue"], &slot["holder"]),
                 if tags.is_empty() {
                     String::new()
@@ -755,7 +761,7 @@ fn machine_card(machine: &Value, snapshot: &Value) -> String {
             format!(
                 "{} pid {} {} GB",
                 e(name),
-                text_of(&process["pid"]),
+                t(&process["pid"]),
                 gb(&process["used_mb"])
             )
         })
@@ -1058,7 +1064,7 @@ fn ticks_panel(snapshot: &Value) -> String {
         let leases = if with_leases {
             let slots: Vec<String> = list(&tick["lease_slots"])
                 .iter()
-                .map(|slot| format!("#{}", text_of(slot)))
+                .map(|slot| format!("#{}", t(slot)))
                 .collect();
             format!(
                 "<td>{}</td>",
@@ -1072,7 +1078,7 @@ fn ticks_panel(snapshot: &Value) -> String {
             String::new()
         };
         let slot = if truthy(&tick["slot"]) {
-            text_of(&tick["slot"])
+            t(&tick["slot"])
         } else {
             "-".to_owned()
         };
@@ -1086,7 +1092,7 @@ fn ticks_panel(snapshot: &Value) -> String {
             r#"<tr><td>{issue_cell}</td><td>{}</td><td>{slot}</td><td>{}</td>{leases}<td>{doing_cell}</td><td class="sub">{} <span class="chip">{source}</span></td></tr>"#,
             pill(lane_level, &model_text),
             duration(&tick["age_s"]),
-            text_of(&tick["pid"])
+            t(&tick["pid"])
         )
         .ok();
     }
@@ -1148,7 +1154,7 @@ fn leases_panel(snapshot: &Value) -> String {
                 r#"<td title="{kind_title}">{kind} {chips}</td><td>{held}</td></tr>"#
             ),
             dim = if free { "dim" } else { "" },
-            slot = text_of(&slot["slot"]),
+            slot = t(&slot["slot"]),
             host = e(&slot["host"]),
             short = escape(short_host(s(&slot["host"]))),
             state = pill(status_level(state).unwrap_or("idle"), state),
@@ -1175,7 +1181,7 @@ fn leases_panel(snapshot: &Value) -> String {
         } else {
             "holds"
         };
-        let slots: Vec<String> = list(&hold["slots"]).iter().map(text_of).collect();
+        let slots: Vec<String> = list(&hold["slots"]).iter().map(t).collect();
         notes.push(format!(
             "<li>{} {} {verb} {} (slots {}) for {}, holder {}</li>",
             pill("info", "whole device"),
@@ -1227,7 +1233,7 @@ fn leases_panel(snapshot: &Value) -> String {
             pill("warning", "waiting"),
             issue_ref(&wait["issue"], &Value::Null),
             e(&wait["kind"]),
-            text_of(&wait["minutes"])
+            t(&wait["minutes"])
         ));
     }
     let preferred: Vec<String> = list(&leases["harness_only_hosts"])
@@ -1311,8 +1317,8 @@ fn fleet_devices_panel(snapshot: &Value) -> String {
                     let capacity = if truthy(&adapter["max_concurrent"]) {
                         format!(
                             "{}/{}",
-                            text_of(&adapter["running"]),
-                            text_of(&adapter["max_concurrent"])
+                            t(&adapter["running"]),
+                            t(&adapter["max_concurrent"])
                         )
                     } else {
                         "watch only".to_owned()
@@ -1325,7 +1331,7 @@ fn fleet_devices_panel(snapshot: &Value) -> String {
                 })
                 .collect();
             let cpus = if truthy(&device["cpus"]) {
-                text_of(&device["cpus"])
+                t(&device["cpus"])
             } else {
                 "?".to_owned()
             };
@@ -1407,7 +1413,7 @@ fn fleet_sessions_panel(snapshot: &Value) -> String {
         let who = if session["pid"].is_null() {
             e(&session["id"])
         } else {
-            format!("pid {}", text_of(&session["pid"]))
+            format!("pid {}", t(&session["pid"]))
         };
         let model = if truthy(&session["model"]) {
             format!(r#" <span class="sub">{}</span>"#, e(&session["model"]))
@@ -1568,7 +1574,7 @@ fn claimable_counts(queue: &Value, queue_label: &str) -> String {
         write!(
             text,
             " &middot; queue count {}, {}{}",
-            text_of(&claimable["value"]),
+            t(&claimable["value"]),
             sample_time(&claimable["fetched_at"]),
             if truthy(&claimable["unverified"]) {
                 format!(" {unverified}")
@@ -1805,19 +1811,19 @@ fn flow_section(snapshot: &Value) -> String {
         parts.push(format!(
             r#"<div class="fcol" data-key="col-{}" style="left:{}px;top:{}px;width:{}px">{} <span class="sub">{}</span></div>"#,
             e(&column["key"]),
-            text_of(&column["x"]),
-            text_of(&column["y"]),
-            text_of(&column["w"]),
+            t(&column["x"]),
+            t(&column["y"]),
+            t(&column["w"]),
             e(&column["title"]),
-            text_of(&column["count"])
+            t(&column["count"])
         ));
         if truthy(&column["hidden"]) {
             parts.push(format!(
                 r#"<div class="fmore" data-key="more-{}" style="left:{}px;top:{}px">+{} more</div>"#,
                 e(&column["key"]),
                 column["x"].as_i64().unwrap_or(0) + 4,
-                text_of(&column["more_y"]),
-                text_of(&column["hidden"])
+                t(&column["more_y"]),
+                t(&column["hidden"])
             ));
         }
     }
@@ -1833,7 +1839,8 @@ fn flow_section(snapshot: &Value) -> String {
             write!(
                 legend,
                 r#"<span><svg width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" class="fedge {lane} {kind}"/></svg> {} {lane_name}</span>"#,
-                kind.replace("waits", "waits for")
+                kind.replace("waits", "waits for"),
+                lane = escape(lane),
             )
             .ok();
         }
@@ -1892,7 +1899,7 @@ fn flow_device(device: &Value) -> String {
         status_text.unwrap_or("unknown"),
     );
     let cores = if truthy(&device["nproc"]) {
-        text_of(&device["nproc"])
+        t(&device["nproc"])
     } else {
         "?".to_owned()
     };
@@ -1956,10 +1963,10 @@ fn flow_device(device: &Value) -> String {
         ),
         flagged = if flagged { " flagged" } else { "" },
         key = e(&device["key"]),
-        x = text_of(&device["x"]),
-        y = text_of(&device["y"]),
-        w = text_of(&device["w"]),
-        h = text_of(&device["h"]),
+        x = t(&device["x"]),
+        y = t(&device["y"]),
+        w = t(&device["w"]),
+        h = t(&device["h"]),
         tag = e(&device["tag"]),
         name = e(&device["name"]),
         flag = flag,
@@ -1995,7 +2002,7 @@ fn flow_card(card: &Value) -> String {
         .collect();
     let hover = format!(
         "#{} {}: {}",
-        text_of(&card["issue"]),
+        t(&card["issue"]),
         s(&card["title"]),
         s(&card["detail"])
     );
@@ -2006,10 +2013,10 @@ fn flow_card(card: &Value) -> String {
         ),
         classes = classes,
         issue = card["issue"].as_i64().unwrap_or(0),
-        x = text_of(&card["x"]),
-        y = text_of(&card["y"]),
-        w = text_of(&card["w"]),
-        h = text_of(&card["h"]),
+        x = t(&card["x"]),
+        y = t(&card["y"]),
+        w = t(&card["w"]),
+        h = t(&card["h"]),
         motion = motion,
         hover = escape(&hover),
         link = issue_link(&card["issue"], &card["url"]),
@@ -2048,7 +2055,7 @@ fn sources_footer(snapshot: &Value, token_query: &str) -> String {
         let took = if source["duration_s"].is_null() {
             String::new()
         } else {
-            format!("{} s", text_of(&source["duration_s"]))
+            format!("{} s", t(&source["duration_s"]))
         };
         let error_class = if truthy(&source["error"]) { "err" } else { "" };
         write!(
@@ -2097,6 +2104,37 @@ mod tests {
         );
         assert!(page.contains("<li><span class=\"line\" title=\"sim:1\">dev-run-4</span>"));
         assert!(!page.contains("dev-run-4 <span class=\"sub\">Up 8 minutes</span>; "));
+    }
+
+    #[test]
+    fn every_value_is_escaped_and_only_https_links() {
+        let snapshot = json!({"generated_epoch": 0, "leases": {"available": true, "slots": [], "waits": [
+            {"issue": 1, "kind": "single-slot", "minutes": "<img src=x>", "tag": ""}]},
+            "ticks": [{"issue": 7, "url": "javascript:alert(1)", "title": "t", "pid": "<b>pid</b>", "slot": "<q>"}],
+            "machines": [{"key": "local", "name": "box", "kind": "local", "status": "ok", "history": {}, "slots": [],
+                          "slot_count": "<script>", "nproc": "<u>"}],
+            "flow": {"width": 10, "height": 10, "lanes": ["<x>"], "cards": [], "edges": [], "devices": [], "columns": []}});
+        let page = render(&snapshot, 30, "");
+        for raw in [
+            "<img src=x>",
+            "<b>pid</b>",
+            "<q>",
+            "<script> slots",
+            "<u> cores",
+            "class=\"fedge <x>",
+        ] {
+            assert!(!page.contains(raw), "{raw}");
+        }
+        assert!(!page.contains("javascript:"));
+        assert!(page.contains("#7 "));
+        assert_eq!(
+            issue_link(&json!(1), &json!("https://example.com/i/1")),
+            r#"<a href="https://example.com/i/1" target="_blank" rel="noopener noreferrer">#1</a>"#
+        );
+        assert_eq!(
+            issue_link(&json!(1), &json!("http://example.com/i/1")),
+            "#1"
+        );
     }
 
     #[test]

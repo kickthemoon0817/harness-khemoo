@@ -79,29 +79,6 @@ pub struct FleetReport {
 
 type Object = Map<String, Value>;
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Str,
-    Int,
-    Float,
-    Bool,
-    List,
-    Dict,
-}
-
-impl Kind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Str => "str",
-            Self::Int => "int",
-            Self::Float => "float",
-            Self::Bool => "bool",
-            Self::List => "list",
-            Self::Dict => "dict",
-        }
-    }
-}
-
 fn where_of(path: &str, key: &str) -> String {
     if path.is_empty() {
         key.to_owned()
@@ -110,88 +87,83 @@ fn where_of(path: &str, key: &str) -> String {
     }
 }
 
+fn not_a(path: &str, key: &str, kind: &str) -> String {
+    format!("fleet output: {} is not a {kind}", where_of(path, key))
+}
+
 /// A JSON number in the range fleet reports: an integer in 0..2^63, or a finite float of
-/// magnitude at most 1e300.
-fn is_number(value: &Value) -> bool {
-    match value {
-        Value::Number(number) if number.is_i64() || number.is_u64() => {
-            number.as_i64().is_some_and(|value| value >= 0)
-        }
-        Value::Number(number) => number
-            .as_f64()
-            .is_some_and(|value| value.is_finite() && value.abs() <= FLOAT_LIMIT),
-        _ => false,
-    }
-}
-
-fn get<'d>(
-    entry: &'d Object,
-    key: &str,
-    kind: Kind,
-    path: &str,
-    nullable: bool,
-) -> Result<Option<&'d Value>, String> {
-    let place = where_of(path, key);
-    let value = entry
-        .get(key)
-        .ok_or_else(|| format!("fleet output: {place} is missing"))?;
-    if value.is_null() && nullable {
-        return Ok(None);
-    }
-    let valid = match kind {
-        Kind::Float => is_number(value),
-        Kind::Int => value.as_i64().is_some(),
-        Kind::Str => value.is_string(),
-        Kind::Bool => value.is_boolean(),
-        Kind::List => value.is_array(),
-        Kind::Dict => value.is_object(),
+/// magnitude at most 1e300. A whole number past 2^63 is out of range however it is written:
+/// the JSON reader gives a long integer as a float, so the two cannot be told apart.
+fn number(value: &Value) -> Option<f64> {
+    const INT_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    let Value::Number(number) = value else {
+        return None;
     };
-    if !valid {
-        return Err(format!("fleet output: {place} is not a {}", kind.name()));
+    if number.is_i64() || number.is_u64() {
+        #[allow(clippy::cast_precision_loss)]
+        return number
+            .as_i64()
+            .filter(|value| *value >= 0)
+            .map(|value| value as f64);
     }
-    Ok(Some(value))
+    number
+        .as_f64()
+        .filter(|value| value.is_finite() && value.abs() <= FLOAT_LIMIT)
+        .filter(|value| !(value.fract() == 0.0 && value.abs() >= INT_LIMIT))
 }
 
-fn required<'d>(entry: &'d Object, key: &str, kind: Kind, path: &str) -> Result<&'d Value, String> {
-    get(entry, key, kind, path, false)?
+fn field<'d>(entry: &'d Object, key: &str, path: &str) -> Result<&'d Value, String> {
+    entry
+        .get(key)
         .ok_or_else(|| format!("fleet output: {} is missing", where_of(path, key)))
 }
 
 fn string(entry: &Object, key: &str, path: &str) -> Result<String, String> {
-    Ok(required(entry, key, Kind::Str, path)?
-        .as_str()
-        .unwrap_or_default()
-        .to_owned())
+    match field(entry, key, path)? {
+        Value::String(text) => Ok(text.clone()),
+        _ => Err(not_a(path, key, "str")),
+    }
 }
 
 fn int(entry: &Object, key: &str, path: &str) -> Result<i64, String> {
-    Ok(required(entry, key, Kind::Int, path)?
+    field(entry, key, path)?
         .as_i64()
-        .unwrap_or_default())
+        .ok_or_else(|| not_a(path, key, "int"))
 }
 
 fn float(entry: &Object, key: &str, path: &str) -> Result<f64, String> {
-    Ok(required(entry, key, Kind::Float, path)?
-        .as_f64()
-        .unwrap_or_default())
+    number(field(entry, key, path)?).ok_or_else(|| not_a(path, key, "float"))
 }
 
 fn boolean(entry: &Object, key: &str, path: &str) -> Result<bool, String> {
-    Ok(required(entry, key, Kind::Bool, path)?
+    field(entry, key, path)?
         .as_bool()
-        .unwrap_or_default())
+        .ok_or_else(|| not_a(path, key, "bool"))
 }
 
 fn list<'d>(entry: &'d Object, key: &str, path: &str) -> Result<&'d Vec<Value>, String> {
-    required(entry, key, Kind::List, path)?
+    field(entry, key, path)?
         .as_array()
-        .ok_or_else(|| format!("fleet output: {} is not a list", where_of(path, key)))
+        .ok_or_else(|| not_a(path, key, "list"))
 }
 
 fn dict<'d>(entry: &'d Object, key: &str, path: &str) -> Result<&'d Object, String> {
-    required(entry, key, Kind::Dict, path)?
+    field(entry, key, path)?
         .as_object()
-        .ok_or_else(|| format!("fleet output: {} is not a dict", where_of(path, key)))
+        .ok_or_else(|| not_a(path, key, "dict"))
+}
+
+/// A field that may be `null`, read with `read` otherwise.
+fn nullable<T>(
+    entry: &Object,
+    key: &str,
+    path: &str,
+    read: impl Fn(&Object, &str, &str) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    if field(entry, key, path)?.is_null() {
+        return Ok(None);
+    }
+    read(entry, key, path).map(Some)
 }
 
 fn object<'d>(value: &'d Value, path: &str) -> Result<&'d Object, String> {
@@ -322,8 +294,9 @@ fn parse_device(entry: &Object, path: &str) -> Result<(FleetDevice, Vec<FleetSes
     let metrics_path = format!("{status_path}.metrics");
     let metrics = dict(status, "metrics", &status_path)?;
     let memory = dict(metrics, "memory", &metrics_path)?;
-    let load = list(metrics, "load", &metrics_path)?;
-    if load.len() != 3 || !load.iter().all(is_number) {
+    let listed = list(metrics, "load", &metrics_path)?;
+    let load: Vec<f64> = listed.iter().map_while(number).collect();
+    if listed.len() != 3 || load.len() != 3 {
         return Err(format!(
             "fleet output: {metrics_path}.load is not three numbers"
         ));
@@ -334,12 +307,9 @@ fn parse_device(entry: &Object, path: &str) -> Result<(FleetDevice, Vec<FleetSes
         let gpu = object(item, &gpu_path)?;
         gpus.push(FleetGpu {
             name: string(gpu, "name", &gpu_path)?,
-            util_pct: get(gpu, "util_percent", Kind::Float, &gpu_path, true)?
-                .and_then(Value::as_f64),
-            mem_used_bytes: get(gpu, "memory_used_bytes", Kind::Int, &gpu_path, true)?
-                .and_then(Value::as_i64),
-            mem_total_bytes: get(gpu, "memory_total_bytes", Kind::Int, &gpu_path, true)?
-                .and_then(Value::as_i64),
+            util_pct: nullable(gpu, "util_percent", &gpu_path, float)?,
+            mem_used_bytes: nullable(gpu, "memory_used_bytes", &gpu_path, int)?,
+            mem_total_bytes: nullable(gpu, "memory_total_bytes", &gpu_path, int)?,
         });
     }
     let mut adapters = Vec::new();
@@ -366,7 +336,7 @@ fn parse_device(entry: &Object, path: &str) -> Result<(FleetDevice, Vec<FleetSes
             hostname: string(info, "hostname", &device_path)?,
             os: string(info, "os", &device_path)?,
             cpus: Some(int(info, "cpus", &device_path)?),
-            load: load.iter().filter_map(Value::as_f64).collect(),
+            load,
             cpu_percent: Some(float(metrics, "cpu_percent", &metrics_path)?),
             mem_used_bytes: Some(int(memory, "used_bytes", &memory_path)?),
             mem_total_bytes: Some(int(memory, "total_bytes", &memory_path)?),
@@ -418,15 +388,11 @@ fn parse_session(device: &str, entry: &Object, path: &str) -> Result<FleetSessio
         origin,
         running: kind == "running",
         state: state_text,
-        pid: get(entry, "pid", Kind::Int, path, true)?.and_then(Value::as_i64),
+        pid: nullable(entry, "pid", path, int)?,
         started_at: int(entry, "started_at", path)?,
-        ended_at: get(entry, "ended_at", Kind::Int, path, true)?.and_then(Value::as_i64),
-        cwd: get(entry, "cwd", Kind::Str, path, true)?
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        model: get(entry, "model", Kind::Str, path, true)?
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        ended_at: nullable(entry, "ended_at", path, int)?,
+        cwd: nullable(entry, "cwd", path, string)?,
+        model: nullable(entry, "model", path, string)?,
         summary: string(entry, "summary", path)?,
         labels: label_pairs,
     })

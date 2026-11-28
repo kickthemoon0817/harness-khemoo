@@ -79,6 +79,50 @@ pub fn read_tail(path: &Path, bytes: u64) -> String {
     text
 }
 
+/// A small file owned by this user: a lock file under a shared directory such as `/tmp` is
+/// read only when no other user could have planted it.
+pub fn read_owned_text(path: &Path, limit: u64) -> io::Result<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let file = open_regular(path)?;
+    if file.metadata()?.uid() != rustix::process::geteuid().as_raw() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is another user's", path.display()),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Creates the dashboard's own directory, owner-only, and refuses one another user owns or
+/// others could write to: everything the dashboard writes lives there.
+pub fn prepare_private_dir(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::create_dir_all(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    // The directory itself, not where a symlink planted in its place points.
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "{} is a symlink or not a directory",
+            path.display()
+        ));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err(format!("{} is not owned by this user", path.display()));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("{}: cannot make it owner-only: {error}", path.display()))?;
+    let mode = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .mode();
+    if mode & 0o022 != 0 {
+        return Err(format!("{} is writable by other users", path.display()));
+    }
+    Ok(())
+}
+
 /// Writes a file only its owner can read, never through a symlink planted at its path.
 pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
     let mut file = OpenOptions::new()
@@ -92,15 +136,21 @@ pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
     file.write_all(text.as_bytes())
 }
 
-/// Replaces a file of the dashboard's own whole: written beside it, then renamed over it.
+/// Replaces a file of the dashboard's own whole, owner-only: written beside it to a file this
+/// write creates, never one already there or a symlink, then renamed over it.
 pub fn write_replacing(path: &Path, text: &str) -> io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".new");
     let temporary = Path::new(&temporary);
+    // A write that died leaves its file; removing it removes a planted symlink, not its target.
+    match std::fs::remove_file(temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
+        .mode(0o600)
         .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
         .open(temporary)?;
     file.write_all(text.as_bytes())?;
@@ -108,11 +158,12 @@ pub fn write_replacing(path: &Path, text: &str) -> io::Result<()> {
     std::fs::rename(temporary, path)
 }
 
-/// Appends text to a file of the dashboard's own.
+/// Appends text to a file of the dashboard's own, created owner-only.
 pub fn append(path: &Path, text: &str) -> io::Result<()> {
     OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(0o600)
         .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
         .open(path)?
         .write_all(text.as_bytes())
@@ -122,6 +173,62 @@ pub fn append(path: &Path, text: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::dashboard::testkit::TempDir;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn the_dashboards_files_are_created_owner_only() {
+        let directory = TempDir::new();
+        let data = directory.path().join("data");
+        std::fs::create_dir_all(&data).ok();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o777)).ok();
+        prepare_private_dir(&data).expect("an owned directory");
+        assert_eq!(mode(&data), 0o700);
+        let history = data.join("local_history.tsv");
+        append(&history, "x\n").expect("appends");
+        assert_eq!(mode(&history), 0o600);
+        let cache = data.join("github_cache.json");
+        write_replacing(&cache, "{}").expect("writes");
+        assert_eq!(mode(&cache), 0o600);
+    }
+
+    #[test]
+    fn a_symlinked_data_directory_is_refused() {
+        let directory = TempDir::new();
+        let real = directory.path().join("real");
+        std::fs::create_dir_all(&real).ok();
+        let link = directory.path().join("data");
+        std::os::unix::fs::symlink(&real, &link).ok();
+        assert!(prepare_private_dir(&link).is_err());
+    }
+
+    #[test]
+    fn a_planted_temporary_file_is_replaced_not_followed() {
+        let directory = TempDir::new();
+        let target = directory.path().join("elsewhere");
+        std::fs::write(&target, "keep").ok();
+        let path = directory.path().join("flow_state.json");
+        std::os::unix::fs::symlink(&target, directory.path().join("flow_state.json.new")).ok();
+        write_replacing(&path, "new").expect("writes");
+        assert_eq!(
+            std::fs::read_to_string(&target).ok().as_deref(),
+            Some("keep")
+        );
+        assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn an_owned_file_is_read_up_to_its_cap() {
+        let directory = TempDir::new();
+        let path = directory.path().join("lock");
+        std::fs::write(&path, "pid 1, /t, x").ok();
+        assert_eq!(read_owned_text(&path, 5).ok().as_deref(), Some("pid 1"));
+        assert!(read_owned_text(Path::new("/dev/null"), 5).is_err());
+    }
 
     #[test]
     fn private_file_is_owner_only_and_never_follows_a_symlink() {

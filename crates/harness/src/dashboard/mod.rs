@@ -237,18 +237,17 @@ fn harness_bin(harness_home: &Path, from_file: Option<&str>, lookup: Lookup<'_>)
 /// the launcher derives it; empty when none is derived or the loader fails. The library is
 /// sourced by bash, the one place the dashboard runs a shell, with a fixed script.
 fn derived_repo(harness_home: &Path, lookup: Lookup<'_>) -> String {
-    // The harness home's library, else that of the checkout the binary sits in or was built in.
-    let build_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let library = [
-        Some(harness_home.to_path_buf()),
-        checkout_of_binary(),
-        Some(build_checkout),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|checkout| checkout.join("lib").join("instance.sh"))
-    .find(|library| library.is_file())
-    .unwrap_or_else(|| harness_home.join("lib").join("instance.sh"));
+    // The checkout holding the binary, else the harness home: an installed binary, or one built
+    // under CARGO_TARGET_DIR, sits in no checkout.
+    let Some(library) = [checkout_of_binary(), Some(harness_home.to_path_buf())]
+        .into_iter()
+        .flatten()
+        .map(|checkout| checkout.join("lib").join("instance.sh"))
+        .find(|library| library.is_file())
+    else {
+        eprintln!("harness dashboard: no lib/instance.sh to derive GH_REPO with");
+        return String::new();
+    };
     let argv = [
         "bash".to_owned(),
         "-c".to_owned(),
@@ -300,6 +299,14 @@ pub struct App {
 }
 
 impl App {
+    /// Every value no response may carry: harness.env's GitHub token and the environment's.
+    pub fn secret_values(&self) -> Vec<String> {
+        std::iter::once(self.github_token.clone())
+            .chain(github::environment_secrets())
+            .filter(|secret| !secret.is_empty())
+            .collect()
+    }
+
     pub fn new(args: &Args, lookup: Lookup<'_>) -> Result<Self, String> {
         let harness_home = args
             .harness_home
@@ -316,7 +323,14 @@ impl App {
             ("HARNESS_HOME", harness_home.display().to_string()),
             ("HARNESS_INSTANCE_DIR", instance.display().to_string()),
         ];
-        let bin_from_file = env::expand(value("HARNESS_BIN"), &command_placeholders);
+        let mut bin_placeholders = command_placeholders.clone();
+        bin_placeholders.push(("HOME", lookup("HOME").unwrap_or_default()));
+        let bin_text = env::expand(value("HARNESS_BIN"), &bin_placeholders);
+        let bin_from_file = if bin_text.is_empty() {
+            bin_text
+        } else {
+            expand_user(&bin_text, lookup).display().to_string()
+        };
         let bin = harness_bin(&harness_home, Some(&bin_from_file), lookup);
         let fleet_base = command_placeholders.clone();
         command_placeholders.push(("HARNESS_BIN", bin.clone()));
@@ -334,7 +348,7 @@ impl App {
         };
         let state_setting = path_setting("HARNESS_STATE");
         let harness_state = if state_setting.is_empty() {
-            harness_home.join("state")
+            resolve(&harness_home.join("state"))
         } else {
             resolve(&expand_user(&state_setting, lookup))
         };
@@ -477,8 +491,7 @@ fn run_app(args: &Args) -> Result<(), String> {
     }
     let collector = app.collector(&args.gh)?;
     if args.once {
-        std::fs::create_dir_all(&collector.config.data_dir)
-            .map_err(|error| format!("{}: {error}", collector.config.data_dir.display()))?;
+        files::prepare_private_dir(&collector.config.data_dir)?;
         collector.refresh_local_sample_in_place();
         if collector.config.remote_interval_s > 0.0 {
             collector.refresh_remote_probes_in_place();
@@ -490,15 +503,11 @@ fn run_app(args: &Args) -> Result<(), String> {
         if !collector.config.fleet_status_command.is_empty() {
             collector.refresh_fleet_in_place();
         }
-        let body = pretty(&collector.snapshot());
-        println!(
-            "{}",
-            if app.github_token.is_empty() {
-                body
-            } else {
-                body.replace(&app.github_token, "[redacted]")
-            }
-        );
+        let mut body = pretty(&collector.snapshot());
+        for secret in app.secret_values() {
+            body = body.replace(&secret, "[redacted]");
+        }
+        println!("{body}");
         return Ok(());
     }
     let port = match args.port {
@@ -508,7 +517,19 @@ fn run_app(args: &Args) -> Result<(), String> {
                 .map_err(|_| format!("DASHBOARD_PORT {port:?} is not a port"))
         })?,
     };
-    serve(Arc::new(collector), port, args.refresh, &app.github_token)
+    serve(
+        Arc::new(collector),
+        port,
+        args.refresh,
+        &app.secret_values(),
+    )
+}
+
+/// A listener on 127.0.0.1 only: the dashboard is never reachable from another host.
+pub fn bind_loopback(port: u16) -> std::io::Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 /// The snapshot as `--once` prints it: one space an indent level.
@@ -529,15 +550,15 @@ fn serve(
     collector: Arc<Collector>,
     port: u16,
     refresh_s: u64,
-    github_token: &str,
+    secret_values: &[String],
 ) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
+        let listener = bind_loopback(port)
+            .and_then(tokio::net::TcpListener::from_std)
             .map_err(|error| format!("cannot listen on 127.0.0.1:{port}: {error}"))?;
         let bound = listener
             .local_addr()
@@ -548,7 +569,7 @@ fn serve(
         let server = Arc::new(Server::new(
             Arc::clone(&collector),
             refresh_s,
-            &[github_token.to_owned()],
+            secret_values,
             token,
             bound,
         ));
@@ -558,14 +579,14 @@ fn serve(
         collector.start(
             Some(Box::new(move || publisher.publish_in_place())),
             interval,
-        );
+        )?;
         let url_path = collector.config.data_dir.join(URL_FILE_NAME);
         files::write_private(&url_path, &format!("{}\n", server.url()))
             .map_err(|error| format!("{}: {error}", url_path.display()))?;
         let config = &collector.config;
         eprintln!(
             "harness dashboard on {} (home {}, data {}, repo {}, queue label {})",
-            server.url(),
+            server.url().replace(&server.access_token, "[token]"),
             config.harness_home.display(),
             config.data_dir.display(),
             config.repo.as_deref().unwrap_or("unset"),

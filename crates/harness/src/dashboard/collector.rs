@@ -32,7 +32,6 @@ use super::models::{
 use super::parsers::{self, model_label, parse_claim};
 use super::procs::{ProcessScanner, ProcessTable, TickCandidate, map_pids_to_issues};
 use super::queue::{IssueNode, IssueQueue, QueueLabels, parse_dependencies};
-use super::redact::redact;
 use super::runqueue::{RunQueueReader, StopWords};
 use super::shlex;
 use super::text::{basename, float_g, iso, optional_int, parse_iso, split_lines, tail_chars};
@@ -71,12 +70,60 @@ pub const FLEET_OUTPUT_MAX_BYTES: usize = 8 * 1024 * 1024;
 const PID_LOOKUPS_PER_CYCLE: usize = 3;
 const SMALL_FILE_BYTES: u64 = 1024 * 1024;
 
-/// Variables fleet never gets: it needs no credential of the dashboard's, and `FLEET_STATUS_CMD`
-/// may be any command the instance names.
-static SECRET_VARIABLE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new("(?i)TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL")
+/// A URL carrying userinfo or a query string, where credentials ride.
+static URL_WITH_CREDENTIALS: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^/\s@]*@|[^\s?#]*\?)")
         .expect("a constant pattern compiles")
 });
+
+/// Name parts that mark a secret, matched whole or as a part's end (`APIKEY`, `MYTOKEN`).
+const SECRET_PART_ENDS: [&str; 18] = [
+    "KEY",
+    "AUTH",
+    "PASS",
+    "PASSWORD",
+    "PASSWD",
+    "PASSPHRASE",
+    "COOKIE",
+    "SESSION",
+    "TOKEN",
+    "SECRET",
+    "CRED",
+    "CREDS",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "PAT",
+    "DSN",
+    "BEARER",
+    "WEBHOOK",
+];
+/// Name parts that mark a secret at a part's start too (`SESSIONID`); short words such as `KEY`
+/// and `PAT` only whole, so `KEYBOARD` and `PATH` stay.
+const SECRET_PART_STARTS: [&str; 6] = [
+    "TOKEN",
+    "SECRET",
+    "SESSION",
+    "PASSWORD",
+    "COOKIE",
+    "CREDENTIAL",
+];
+
+/// True for a variable fleet never gets: it needs no credential of the dashboard's, and
+/// `FLEET_STATUS_CMD` may be any command the instance names. `SSH_AUTH_SOCK` stays: an ssh
+/// transport may authenticate through the agent.
+fn secret_variable(name: &str, value: &str) -> bool {
+    if name == "SSH_AUTH_SOCK" {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    let secret_name = upper
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| {
+            SECRET_PART_ENDS.iter().any(|word| part.ends_with(word))
+                || SECRET_PART_STARTS.iter().any(|word| part.starts_with(word))
+        });
+    secret_name || URL_WITH_CREDENTIALS.is_match(value)
+}
 
 /// Where each usage window cuts the pool (lib/usage.sh defaults).
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -468,6 +515,12 @@ pub struct Collector {
     pub local_history_path: PathBuf,
     pub github_cache_path: PathBuf,
     pub remote_probe_script: String,
+    /// Every command this collector ran, from any of its threads.
+    #[cfg(test)]
+    pub recorded: Mutex<Vec<Vec<String>>>,
+    /// Every error it logged.
+    #[cfg(test)]
+    pub logged: Mutex<Vec<String>>,
 }
 
 impl Collector {
@@ -541,6 +594,10 @@ impl Collector {
             local_history_path: config.data_dir.join("local_history.tsv"),
             github_cache_path: config.data_dir.join("github_cache.json"),
             remote_probe_script: format!("{MEMORY_PROBE}{remote_device}{CONTAINER_PROBE}"),
+            #[cfg(test)]
+            recorded: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            logged: Mutex::new(Vec::new()),
             config,
         }
     }
@@ -551,16 +608,12 @@ impl Collector {
 
     /// Creates the data directory, owner-only, loads the saved history and GitHub cache, starts
     /// the source threads, and publishes now and every `publish_interval_s`.
-    pub fn start(self: &Arc<Self>, publish: Option<Box<dyn Fn() + Send>>, publish_interval_s: f64) {
-        std::fs::create_dir_all(&self.config.data_dir).ok();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.config.data_dir,
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .ok();
-        }
+    pub fn start(
+        self: &Arc<Self>,
+        publish: Option<Box<dyn Fn() + Send>>,
+        publish_interval_s: f64,
+    ) -> Result<(), String> {
+        files::prepare_private_dir(&self.config.data_dir)?;
         self.load_local_history_in_place();
         self.load_github_cache_in_place();
         self.flow_tracker.load();
@@ -612,6 +665,7 @@ impl Collector {
                 }
             }));
         }
+        Ok(())
     }
 
     /// Asks the source threads to end and waits briefly for them.
@@ -651,7 +705,10 @@ impl Collector {
                     .map(|text| (*text).to_owned())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown".to_owned());
-                eprintln!("Dashboard refresh of {} failed: {message}", source.name());
+                self.log_error(&format!(
+                    "Dashboard refresh of {} failed: {message}",
+                    source.name()
+                ));
                 self.store_failure(source, self.describe(&format!("panic: {message}")), started);
             }
             if self.wait_for_stop(interval_s) {
@@ -660,16 +717,43 @@ impl Collector {
         }
     }
 
+    /// Runs one of the collector's commands; the tests read what it ran.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn run(
+        &self,
+        argv: &[String],
+        environment: Environment,
+        timeout: Duration,
+        max_stdout: usize,
+    ) -> Result<Output, RunError> {
+        #[cfg(test)]
+        lock(&self.recorded).push(argv.to_vec());
+        command::run(argv, environment, timeout, max_stdout)
+    }
+
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn log_error(&self, message: &str) {
+        eprintln!("{message}");
+        #[cfg(test)]
+        lock(&self.logged).push(message.to_owned());
+    }
+
     pub fn store_failure(&self, source: Source, error: String, attempted_at: f64) {
         lock(&self.results).fail(source, error, attempted_at);
     }
 
-    /// An error message for the page, with the token removed.
+    /// An error message for the page: the token, the environment's GitHub tokens and every
+    /// secret-looking value masked.
     pub fn describe(&self, message: &str) -> String {
         match &self.github {
             Some(github) => github.redact(message),
-            None => message.to_owned(),
+            None => super::github::scrub(&super::github::environment_secrets(), message),
         }
+    }
+
+    /// The end of a command's output for a message, masked before it is cut.
+    fn output_tail(&self, text: &str, limit: usize) -> String {
+        tail_chars(&self.describe(text.trim()), limit).to_owned()
     }
 
     /// Re-reads the resource status, when the instance has a command for it, and the process
@@ -718,24 +802,25 @@ impl Collector {
                 self.config.state_dir().display().to_string(),
             ),
         ]);
-        let outcome = command::run(
-            &self.config.resource_status_command,
-            environment,
-            seconds(self.config.command_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|output| {
-            if output.success() {
-                Ok(output)
-            } else {
-                Err(format!(
-                    "RuntimeError: resource status exit {}: {}",
-                    output.status,
-                    tail_chars(output.stderr.trim(), 200)
-                ))
-            }
-        });
+        let outcome = self
+            .run(
+                &self.config.resource_status_command,
+                environment,
+                seconds(self.config.command_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|output| {
+                if output.success() {
+                    Ok(output)
+                } else {
+                    Err(format!(
+                        "RuntimeError: resource status exit {}: {}",
+                        output.status,
+                        self.output_tail(&output.stderr, 200)
+                    ))
+                }
+            });
         match outcome {
             Ok(output) => {
                 let status = parsers::parse_lease_status(&output.stdout);
@@ -804,7 +889,7 @@ impl Collector {
         }
         text.push_str("--- docker\n");
         let docker = ["docker", "ps", "--format", DOCKER_FORMAT].map(str::to_owned);
-        if let Ok(output) = command::run(
+        if let Ok(output) = self.run(
             &docker,
             Environment::Inherit(Vec::new()),
             Duration::from_secs(5),
@@ -821,7 +906,7 @@ impl Collector {
         if self.config.device_probe_command.is_empty() {
             return String::new();
         }
-        command::run(
+        self.run(
             &self.config.device_probe_command,
             Environment::Inherit(Vec::new()),
             seconds(self.config.device_probe_timeout_s),
@@ -906,7 +991,7 @@ impl Collector {
         });
     }
 
-    fn probe_host(&self, host: &str, script: &str) -> Result<MachineProbe, String> {
+    pub fn probe_host(&self, host: &str, script: &str) -> Result<MachineProbe, String> {
         // A host read from a state file must not be taken by ssh for an option.
         if host.starts_with('-') {
             return Err(format!("RuntimeError: refusing host {host:?}"));
@@ -925,18 +1010,19 @@ impl Collector {
         .iter()
         .map(|word| (*word).to_owned())
         .collect();
-        let output = command::run(
-            &argv,
-            Environment::Inherit(Vec::new()),
-            seconds(self.config.remote_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())?;
+        let output = self
+            .run(
+                &argv,
+                Environment::Inherit(Vec::new()),
+                seconds(self.config.remote_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())?;
         if !output.success() {
             return Err(format!(
                 "RuntimeError: ssh exit {}: {}",
                 output.status,
-                tail_chars(output.stderr.trim(), 160)
+                self.output_tail(&output.stderr, 160)
             ));
         }
         Ok(parsers::parse_machine_probe(&output.stdout))
@@ -1060,30 +1146,31 @@ impl Collector {
         } else {
             self.config.queue_depth_command.clone()
         };
-        let outcome = command::run(
-            &argv,
-            Environment::Inherit(environment),
-            seconds(self.config.claimable_timeout_s),
-            MAX_OUTPUT_BYTES,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|output: Output| {
-            let printed = output.stdout.trim();
-            if let Some(count) = optional_int(printed).filter(|_| output.success()) {
-                Ok(count)
-            } else {
-                let detail = if output.stderr.is_empty() {
-                    printed
+        let outcome = self
+            .run(
+                &argv,
+                Environment::Inherit(environment),
+                seconds(self.config.claimable_timeout_s),
+                MAX_OUTPUT_BYTES,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|output: Output| {
+                let printed = output.stdout.trim();
+                if let Some(count) = optional_int(printed).filter(|_| output.success()) {
+                    Ok(count)
                 } else {
-                    output.stderr.as_str()
-                };
-                Err(format!(
-                    "RuntimeError: queue count exit {}: {}",
-                    output.status,
-                    tail_chars(detail.trim(), 200)
-                ))
-            }
-        });
+                    let detail = if output.stderr.is_empty() {
+                        printed
+                    } else {
+                        output.stderr.as_str()
+                    };
+                    Err(format!(
+                        "RuntimeError: queue count exit {}: {}",
+                        output.status,
+                        self.output_tail(detail, 200)
+                    ))
+                }
+            });
         match outcome {
             Ok(count) => {
                 let duration = self.now() - started;
@@ -1099,31 +1186,31 @@ impl Collector {
     /// worked.
     pub fn refresh_fleet_in_place(&self) {
         let started = self.now();
-        // SSH_AUTH_SOCK stays: an ssh transport may authenticate through the agent.
         let mut environment: Vec<(String, String)> = std::env::vars_os()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-            .filter(|(name, _)| !SECRET_VARIABLE.is_match(name))
+            .filter(|(name, value)| !secret_variable(name, value))
             .collect();
         for (name, value) in &self.config.fleet_environment {
             environment.retain(|(existing, _)| existing != name);
             environment.push((name.clone(), value.clone()));
         }
-        let outcome = command::run(
-            &self.config.fleet_status_command,
-            Environment::Exactly(environment),
-            seconds(self.config.fleet_timeout_s),
-            FLEET_OUTPUT_MAX_BYTES,
-        )
-        .map_err(|error: RunError| error.to_string())
-        .and_then(|output| {
-            fleet::parse(&output.stdout).map_err(|error| {
-                redact(&format!(
-                    "RuntimeError: fleet exit {}: {error}; {}",
-                    output.status,
-                    tail_chars(output.stderr.trim(), 200)
-                ))
-            })
-        });
+        let outcome = self
+            .run(
+                &self.config.fleet_status_command,
+                Environment::Exactly(environment),
+                seconds(self.config.fleet_timeout_s),
+                FLEET_OUTPUT_MAX_BYTES,
+            )
+            .map_err(|error: RunError| error.to_string())
+            .and_then(|output| {
+                fleet::parse(&output.stdout).map_err(|error| {
+                    self.describe(&format!(
+                        "RuntimeError: fleet exit {}: {error}; {}",
+                        output.status,
+                        self.output_tail(&output.stderr, 200)
+                    ))
+                })
+            });
         match outcome {
             Ok(report) => {
                 let duration = self.now() - started;
@@ -1179,8 +1266,9 @@ impl Collector {
             {
                 continue;
             }
+            // Past the cap the loop goes on, so every live pid keeps its cached issue.
             if lookups >= PID_LOOKUPS_PER_CYCLE {
-                break;
+                continue;
             }
             lookups += 1;
             lock(&self.pid_lookup_attempts).insert(pid, now);
@@ -1278,7 +1366,7 @@ impl Collector {
                 reason: "state/paused present".to_owned(),
             };
         }
-        let Ok(output) = command::run(
+        let Ok(output) = self.run(
             &self.config.crontab_command,
             Environment::Inherit(Vec::new()),
             seconds(self.config.command_timeout_s),
@@ -1568,4 +1656,40 @@ fn history_line(row: &HistoryRow) -> String {
         });
     }
     format!("{}\n", columns.join("\t"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secret_variable;
+
+    #[test]
+    fn secret_looking_variables_are_kept_from_fleet() {
+        for name in [
+            "OPENAI_KEY",
+            "GITHUB_PAT",
+            "NPM_AUTH",
+            "SENTRY_DSN",
+            "my_api_token",
+            "DB_PASSWORD",
+            "SESSIONID",
+            "OAUTH",
+        ] {
+            assert!(secret_variable(name, "x"), "{name}");
+        }
+        for name in ["PATH", "KEYBOARD", "HOME", "SSH_AUTH_SOCK", "LANG"] {
+            assert!(!secret_variable(name, "x"), "{name}");
+        }
+        assert!(secret_variable(
+            "DATABASE_URL",
+            "postgres://user:pw@db.example.com/app"
+        ));
+        assert!(!secret_variable("SITE", "https://example.com/a:b"));
+        assert!(secret_variable("KUBE_BEARER", "x"));
+        assert!(secret_variable(
+            "SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/T/B/x"
+        ));
+        assert!(secret_variable("PUSH", "https://user@example.com/hook"));
+        assert!(secret_variable("PUSH", "https://example.com/hook?sig=abc"));
+    }
 }
