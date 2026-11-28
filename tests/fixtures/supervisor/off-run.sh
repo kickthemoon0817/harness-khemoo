@@ -3,7 +3,8 @@
 # harness checkout $1 and run with $HARNESS_BIN: a firing that starts a tick, which claims an issue,
 # then one at a full window with a reset ahead. It prints the dashboard snapshot's top-level keys,
 # every state file's path and the allocator log, times taken out. test_supervisor.sh compares it
-# with off-state.txt, which harness/agents printed: the supervisor off, nothing may differ.
+# with off-state.txt, printed by a tree without the supervisor: with the supervisor off, nothing may
+# differ, so never regenerate it from this tree.
 set -u
 src=$1
 H=$(mktemp -d)

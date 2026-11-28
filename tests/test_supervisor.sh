@@ -132,7 +132,7 @@ record() {
 reset_supervisor() { rm -rf "$SUP" "$S/directive.json" "$DLOG" "$H/sup-prompt.txt" "$H/sup-crash" "$H/directive-in.json" "$H/answer.json"; }
 usage 10
 
-# --- with SUPERVISOR unset, a run leaves exactly what harness/agents's leaves --------------------
+# --- with SUPERVISOR unset, a run leaves exactly what off-state.txt records ----------------------
 off=$(bash "$here/tests/fixtures/supervisor/off-run.sh" "$here" 2>&1)
 check "SUPERVISOR unset: the state, the logs and the dashboard's keys a run leaves are harness/agents's" \
     '[ "$off" = "$(cat "$here/tests/fixtures/supervisor/off-state.txt")" ]' \

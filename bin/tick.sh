@@ -242,12 +242,9 @@ supervisor_argv() {
         codex) argv=("$(agent_bin codex)" exec --model "$2" "${flags[@]}" -) ;;
     esac
 }
-# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. Each flag is
-# one the defaults use, given once, and the confining ones are all there: claude's --tools with an
-# empty value, --restricted and --strict-mcp-config; codex's read-only sandbox, every --disable of
-# SUPERVISOR_CODEX_DISABLED and -c web_search=disabled, its only -c. A flag outside this list,
-# such as one that names tools, loads settings or MCP servers, enables a feature or lifts the
-# sandbox, is refused, not weighed.
+# True when the flags $2... confine agent $1 and hold nothing else; else sets refusal. An
+# allowlist: a flag outside it, such as one that names tools, loads settings or MCP servers, enables
+# a feature or lifts the sandbox, is refused, not weighed.
 supervisor_flags_ok() {
     local agent=$1 word seen=" " f
     shift
@@ -555,6 +552,9 @@ queue_depth() {  # $1 = the label to count
     queue_n=$out
 }
 
+# True while the lane cannot run at all: its entry cools down, or its agent's cap is 0. --landing
+# ignores how many ticks that agent runs, so a lane only full for now stays open, and work ticks
+# keep off its issues.
 lane_closed() {
     entry_cooling "$lane_entry" && return 0
     ! pick_model "" --entry "$lane_entry" --landing >/dev/null
@@ -592,8 +592,7 @@ lane_decide() {
 LANDING_MARK="This tick is the merge slot's landing tick"
 LANDING_LANE="$LANDING_MARK: claim only an issue labelled \`$READY_LABEL\`. If none is claimable, print a one-line summary and end."
 
-# The tick's prompt: the lane line, the core rules, then this installation's own. {{KEY}} takes
-# the key's value through a sed escape, never eval, so a value cannot run as code.
+# {{KEY}} takes the key's value through a sed escape, never eval, so a value cannot run as code.
 PROMPT_KEYS="GH_REPO ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL LANE_LABEL TICK_BUDGET_MIN LONG_TICK_BUDGET_MIN USAGE_CEILING_PCT"
 SUPERVISOR_PROMPT_KEYS="FIRST_LABEL LOW_LABEL SUPERVISOR_BUDGET_MIN SUPERVISOR_MAX_DIRECTIVE_S SUPERVISOR_STOP_GRACE_S SUPERVISOR_MAX_PARKS_PER_DAY"
 prompt_subst() {  # sets subst to the sed expressions for the keys $@
@@ -613,8 +612,7 @@ compose_prompt() {  # $1 = the lane line
     printf '\n## This installation\n\n'
     sed "${subst[@]}" "$INSTANCE_PROMPT"
 }
-# The supervisor's prompt: its core rules, this installation's own when it has them, then the health
-# snapshot. GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
+# GH_TOKEN reaches `harness health`, as it reaches the queue count, never the agent.
 compose_supervisor_prompt() {
     local subst doc
     # shellcheck disable=SC2086
@@ -677,7 +675,6 @@ limit_message() {
 # fleet exits 1 when any device failed, with the document complete, so only the document decides.
 fleet_check() {
     # The document is read as text, so one that is not JSON is reported like one of the wrong shape.
-    # A device is down when its ok is false, null, 0, "", [] or {}.
     # shellcheck disable=SC2016
     timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null | jq -Rrs \
         --argjson agents "$(list_agents | jq -Rsc 'split("\n") | map(select(. != ""))')" \
