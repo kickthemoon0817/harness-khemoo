@@ -48,6 +48,43 @@ hit its usage limit, or no fresh usage reading. A line with `ERROR queue count f
 queue count could not be read (a GitHub outage, or a broken `QUEUE_DEPTH_CMD`); the launcher then
 counts one claimable issue so a tick still runs.
 
+## The supervisor
+
+With `SUPERVISOR=1` a supervisor tick steers the harness through a directive. Read what it did:
+
+```bash
+target/release/harness directive show      # the directive in force, or why none is
+target/release/harness health              # what the supervisor last read, in short (--json in full)
+tail -20 state/logs/directive.log          # every change to the directive, newest last
+cat state/supervisor/runs.log              # each run: time, exit, duration, what made it due
+ls -t state/logs/supervisor-* | head -1    # the newest run's own output
+```
+
+A `directive.log` entry starts with a line naming what happened, then one indented line per field
+that changed:
+
+```
+2026-11-28T10:02:11Z apply: codex windows fill; claude first (until 2026-11-28T16:02:11Z)
+2026-11-28T10:02:11Z   models: none -> ["claude:claude-opus-5-5","codex:gpt-5.5"]
+2026-11-28T10:02:11Z   clamped width to 4 (the configured width)
+2026-11-28T10:30:02Z stop: TERM to pid 4242 (process group 4242) after its grace: loops on #7
+2026-11-28T16:02:13Z expired at 2026-11-28T16:02:11Z, defaults in force
+```
+
+Other first lines are `refused: <why>` (the directive in force stays), `clear: <reason>`,
+`ignored, defaults in force: <why>` (a directive that no longer validates, logged once) and
+`stop: pid <n> skipped: <why>`. The allocator log says `directive: quiet (pause|wake) until ...`
+once while a directive keeps the launcher quiet, and `its quiet ended early on <event>` when a wake
+event ended it.
+
+To clear a directive, so the configuration's own formulas hold at once:
+`target/release/harness directive clear --reason "<why>"`. To turn the supervisor off, set
+`SUPERVISOR=` in `harness.env`: the next firing reads no directive and starts no supervisor tick, and
+one already running finishes its budget. Clear the directive too, or it applies again the day the
+supervisor is turned back on, until its expiry. `touch state/paused` still pauses everything,
+supervisor included. To make it run at the next firing, inside its backoff too, remove `state/supervisor/last_start`
+and `state/supervisor/failures`.
+
 ## Is it stuck?
 
 Usually not. Check in this order:

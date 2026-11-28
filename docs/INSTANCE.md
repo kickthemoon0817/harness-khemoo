@@ -52,6 +52,7 @@ and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 | `harness.env` | required, with `TARGET_REPO` and `WORKTREE_ROOT` set | the config; `templates/instance/harness.env.example` lists every key |
 | `prompts/tick.md` | required | the installation's section of every tick prompt |
 | `prompts/runbook.md`, `prompts/glossary.md`, `prompts/public-record.md` | optional | read by the tick when `tick.md` or the core prompt tells it to |
+| `prompts/supervisor.md` | optional | the installation's section of the supervisor's prompt (below) |
 | `lint_rules.json` | optional | the project's lint rules (below) |
 | `hooks/env.sh`, `hooks/hold`, `hooks/worktree-busy`, `hooks/worktree-remove` | optional | the hooks (below) |
 | `bin/` | optional | the instance's scripts, first on PATH |
@@ -105,7 +106,8 @@ defaults to the three above joined.
 
 The runner starts every tick, a local agent or `fleet dispatch`, with
 `HARNESS_TICK="state=<HARNESS_STATE> slot=<n> agent=<agent> model=<model> kind=work|lane|landing"`
-in its environment. A tick is the topmost process carrying it: one whose parent does not. A node
+in its environment; the supervisor's tick carries `slot=0 ... kind=supervisor` and holds
+`supervisor.lock` instead of a slot's. A tick is the topmost process carrying it: one whose parent does not. A node
 shim and the native agent it starts, and every tool shell, inherit the variable, so each resolves
 to the process the runner started. `harness ticks [--json]` lists the live ticks of
 `$HARNESS_STATE` as pid, age in seconds, slot, agent, model and kind, read from this user's
@@ -116,7 +118,7 @@ landing ticks and each agent's running ticks with it.
 `libexec/tick-pid.sh` gives a claim and the merge lock to the nearest ancestor of the calling shell
 that carries `HARNESS_TICK` for this state directory, or `FLEET_SESSION` (fleetd sets it in every
 agent it starts), while its parent carries neither. An operator's own agent CLI carries neither, so
-it never takes a claim or the merge lock.
+it never takes a claim or the merge lock. Neither does the supervisor: its marker does not count.
 
 ## Usage windows
 
@@ -156,6 +158,42 @@ fresh reading from a source other than `none`. The pool's cap is the agents' cap
 names while no lane tick is wanted; slots past it and up to `MAX_SLOTS` are left for the landing tick. A running tick
 stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
 `USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
+
+## Supervisor
+
+Off unless `SUPERVISOR=1`; off, the launcher, the runners and `usage-ok.sh` behave as if none of it
+existed and a `state/directive.json` is not read. `docs/ARCHITECTURE.md` says when it runs and what
+a directive may do.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
+| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host; its agent needs a local profile |
+| `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
+| `SUPERVISOR_INTERVAL_S` | 1800 | it runs at least this often while it has room |
+| `SUPERVISOR_MIN_INTERVAL_S` | 600 | and never sooner after its last start; a failed run doubles the wait each time |
+| `SUPERVISOR_MAX_DIRECTIVE_S` | 21600 | the latest a directive's `expires_at` may be; a later one is clamped |
+| `SUPERVISOR_STOP_GRACE_S` | 600 | how long a tick named in `stop` has to wind down before TERM |
+| `OPERATOR_LOGINS` | empty | the logins whose `Operator` comments wake the supervisor; empty, the repository's owner, members and collaborators |
+
+Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
+`$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the
+output of `harness health --json`, all on stdin. The same `{{KEY}}` substitution applies, with
+`FIRST_LABEL`, `LOW_LABEL`, `SUPERVISOR_BUDGET_MIN`, `SUPERVISOR_MAX_DIRECTIVE_S` and
+`SUPERVISOR_STOP_GRACE_S` added. `harness health` and `harness directive` read the keys above,
+`TICK_MODELS`, `TICK_AGENT`, `MAX_SLOTS`, `TICK_WIDTH` and the budgets from the environment, else
+from `harness.env`, since a supervisor tick's environment holds none of the config. The token
+reaches `harness health` as it reaches the queue count, never the supervisor.
+
+What it keeps, all plain files:
+
+| Path | What |
+|---|---|
+| `state/directive.json` | the directive in force, owner-only, written by `harness directive apply` |
+| `state/logs/directive.log` | every apply (the reason, each changed field, each clamp), refusal, clear, expiry, invalid directive and stop |
+| `state/supervisor/` | `last_start`, `last_end`, `last_exit`, `failures`, `last_reason`, `runs.log`, and the event stamps |
+| `state/logs/supervisor-<UTC>.log` | each run's output and exit trailer; the newest 20 are kept |
+| `state/claims.log` | `<issue> <pid> <UTC>` for every claim `libexec/claim.sh` takes, for the loop signal; cut to its newest 2000 lines past a MiB |
 
 ## Fleet
 
@@ -259,6 +297,9 @@ The prompt's first line tells the tick which issues it may claim:
 | `This tick runs on <LANE_MODEL>, the model lane: claim only an issue labelled <LANE_LABEL>. ...` | claimable lane issues outnumber the young lane ticks |
 | `This tick runs on <model>. <LANE_MODEL> cannot run now, on its usage limit or windows, so an issue labelled <LANE_LABEL> may be claimed too.` | `LANE_MODEL` is cooling down, or its agent's windows allow no tick |
 | `This tick is the merge slot's landing tick: claim only an issue labelled <READY_LABEL>. ...` | a landing tick started past the usage width while every allowed slot is held |
+
+A directive's `focus` and `avoid` append `The supervisor asks: among the issues you may claim,
+prefer #<n>, ...` and `The supervisor asks: do not claim #<n>, ...` to whichever line applies.
 
 The lane is on only when both `LANE_MODEL` and `LANE_LABEL` are set, it needs `QUEUE_DEPTH_CMD`
 to count lane issues, and the lane's agent needs room under its usage windows. The launcher
