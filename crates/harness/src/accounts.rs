@@ -710,6 +710,30 @@ mod tests {
         );
     }
 
+    /// Writes an executable from a child process. A file this process held open for writing could
+    /// still be open in a child that another test thread forked and has not yet exec'd, and running
+    /// it then fails with ETXTBSY.
+    fn write_executable(path: &Path, text: &str) {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "writing {}",
+            path.display()
+        );
+    }
+
     fn refresh_logged(env: Lookup, state: &Path, account: &Account, now: u64) -> Vec<String> {
         refresh(env, state, std::slice::from_ref(account), now, true)
     }
@@ -721,15 +745,13 @@ mod tests {
         std::fs::create_dir_all(root.join("accounts/codex/codex-work")).unwrap();
         let answer = root.join("answer");
         let fake = root.join("codex");
-        std::fs::write(
+        write_executable(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$CODEX_HOME\" >> {0}.seen\ncat {0} >&2\n",
                 answer.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let env = env_of(&[
             (
                 "AGENT_ACCOUNTS_DIR",
