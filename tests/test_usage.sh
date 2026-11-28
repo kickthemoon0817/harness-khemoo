@@ -58,14 +58,16 @@ check "a per-window override moves one window's steps" '[ "$(USAGE_STEPS_claude_
 out=$(USAGE_STEPS_LONG="80 85" "$HARNESS_BIN" usage 2>&1); rc=$?
 check "malformed steps are an error that names the key" '[ "$rc" -eq 2 ] && [[ "$out" == *"USAGE_STEPS_LONG"* ]]' "rc=$rc $out"
 
-# Codex reads its newest rollout, which stays true past its age until the window resets.
+# Codex reads its newest rollout. Past its age it allows one tick, whose run writes a fresh one.
 cache 10 20
 rollout 82 3600 0
 check "codex's rollout window steps down as a long window" '[ "$(pool codex:gpt-5.5)" = "4 codex=4" ]' "$(pool codex:gpt-5.5)"
 rollout 82 3600 86400
-check "a day-old rollout holds until its window resets" '[ "$(pool codex:gpt-5.5)" = "4 codex=4" ]' "$(pool codex:gpt-5.5)"
-rollout 95 -60 86400
+check "a day-old rollout allows one tick until a fresh one sizes the pool" '[ "$(pool codex:gpt-5.5)" = "1 codex=1" ]' "$(pool codex:gpt-5.5)"
+rollout 95 -60 0
 check "a rollout whose window reset reads as empty" '[ "$(pool codex:gpt-5.5)" = "8 codex=8" ]' "$(pool codex:gpt-5.5)"
+rollout 95 -60 86400
+check "an old rollout whose window reset still allows only one tick" '[ "$(pool codex:gpt-5.5)" = "1 codex=1" ]' "$(pool codex:gpt-5.5)"
 rm -f "$H/sessions/2026/11/28/rollout-a.jsonl"
 check "no rollout: codex starts nothing" '[ "$(pool codex:gpt-5.5)" = "0 codex=0" ]' "$(pool codex:gpt-5.5)"
 check "gemini has no windows by default: the full width" '[ "$(pool gemini:gemini-3-pro)" = "8 gemini=8" ]' "$(pool gemini:gemini-3-pro)"

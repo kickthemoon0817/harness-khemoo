@@ -300,6 +300,8 @@ impl AgentSource {
 #[serde(rename_all = "snake_case", tag = "state", content = "detail")]
 pub enum Freshness {
     Fresh,
+    /// Past its age, but its source records every use and every window says when it resets.
+    Holding,
     Stale,
     Unreadable(String),
     /// The source is `none`.
@@ -346,7 +348,9 @@ fn steps_of(
 
 /// Weighs `reading` (or why there is none) at `now_ms`. A window whose reset time has passed reads
 /// as empty. A reading older than `USAGE_MAX_AGE` is stale and allows nothing, unless it holds until
-/// its windows reset and every window says when that is.
+/// its windows reset and every window says when that is: then it allows one tick. Use elsewhere on
+/// the account may have moved it, so it never sizes the pool, but that tick's own run writes a fresh
+/// reading, so the agent is never locked out.
 pub fn assess(
     env: Lookup,
     settings: &Settings,
@@ -375,8 +379,10 @@ pub fn assess(
     };
     usage.taken_ms = Some(reading.taken_ms);
     let age_s = now_ms.saturating_sub(reading.taken_ms) / 1000;
-    let fresh = age_s <= settings.max_age_s
-        || (reading.holds_until_reset && reading.windows.iter().all(|w| w.resets_at_s().is_some()));
+    let fresh = age_s <= settings.max_age_s;
+    let holding = !fresh
+        && reading.holds_until_reset
+        && reading.windows.iter().all(|w| w.resets_at_s().is_some());
     let now_s = now_ms / 1000;
     for window in reading.windows {
         let steps = steps_of(env, settings, &source.agent, &window)?;
@@ -396,14 +402,18 @@ pub fn assess(
             steps,
         });
     }
+    let cap = usage
+        .windows
+        .iter()
+        .map(|w| w.cap)
+        .min()
+        .unwrap_or(settings.width);
     if fresh {
         usage.reading = Freshness::Fresh;
-        usage.cap = usage
-            .windows
-            .iter()
-            .map(|w| w.cap)
-            .min()
-            .unwrap_or(settings.width);
+        usage.cap = cap;
+    } else if holding {
+        usage.reading = Freshness::Holding;
+        usage.cap = cap.min(1);
     } else {
         usage.reading = Freshness::Stale;
     }
@@ -555,6 +565,7 @@ fn report(env: Lookup, json: bool) -> Result<ExitCode, String> {
     for agent in &report.agents {
         let state = match &agent.reading {
             Freshness::Fresh => String::new(),
+            Freshness::Holding => ": the reading is old, so one tick refreshes it".to_owned(),
             Freshness::Stale => ": the reading is stale".to_owned(),
             Freshness::Unreadable(message) => format!(": no reading ({message})"),
             Freshness::Unmetered => ": no windows".to_owned(),
@@ -594,7 +605,7 @@ pub fn verdict(settings: &Settings, usage: &AgentUsage) -> Verdict {
     match usage.reading {
         Freshness::Unmetered => Verdict::Go,
         Freshness::Stale | Freshness::Unreadable(_) => Verdict::Unknown,
-        Freshness::Fresh => {
+        Freshness::Fresh | Freshness::Holding => {
             let over = usage.windows.iter().any(|w| {
                 let stop = if w.long {
                     settings.stop_long
@@ -976,9 +987,9 @@ mod tests {
             holds_until_reset: true,
         };
         let held = assess(&env, &s, &source, Ok(rollout(&[Some(now_s + 60)])), NOW_MS).unwrap();
-        assert_eq!((held.cap, &held.reading), (4, &Freshness::Fresh));
+        assert_eq!((held.cap, &held.reading), (1, &Freshness::Holding));
         let reset = assess(&env, &s, &source, Ok(rollout(&[Some(now_s - 60)])), NOW_MS).unwrap();
-        assert_eq!(reset.cap, 8);
+        assert_eq!((reset.cap, &reset.reading), (1, &Freshness::Holding));
         assert!(reset.windows[0].used_pct.abs() < f64::EPSILON);
         let unknown = assess(
             &env,

@@ -140,8 +140,8 @@ past one, 2 without a fresh reading. Both read the keys below from the environme
 `USAGE_REFRESH_AFTER` (default 120 s); it runs with no input or output and is killed after 60 s.
 Claude's defaults to `USAGE_FETCH` (default `~/.claude/scripts/usage-fetch.sh`). A reading older
 than `USAGE_MAX_AGE` (default 1800 s) is stale. A codex reading is as new as the newest codex
-session on the host, which records every change, so it stays true past its age while every window
-gives `resets_at`. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. The
+session on the host. Past its age, while every window gives `resets_at`, it allows one codex tick
+rather than none: that tick's own run writes a fresh reading, which then sizes the pool. A window whose numeric `resets_at` (Unix seconds) has passed reads 0 %. The
 rollouts hold only this host's codex use: an instance whose codex ticks run on fleet devices, or
 whose codex account works on other hosts too, reads codex from `json:` with a fetch that covers the
 account.
