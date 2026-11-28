@@ -85,5 +85,27 @@ rm -f "$T/h/state/local-cpu-lane"
 out=$($B)
 check "with the lane switched off, no compile goes local" '[[ "$out" == *"ssh://"* ]]' "$out"
 
+
+# --free-only: what bin/build.sh asks before it moves a waiting build.
+kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3; rm -f "$T/h/state/locks/cost-wait."*
+hold "$T/lk/worv-dev-build-remote-one.lock"
+out=$($B --free-only); rc=$?
+check "--free-only names the first lane whose lock is free" '[ "$rc" -eq 0 ] && [[ "$out" == "export DOCKER_HOST=ssh://b@two WORV_DEV_BUILD_LOCK=$T/lk/worv-dev-build-remote-two.lock "* ]]' "rc=$rc $out"
+hold "$T/lk/worv-dev-build-remote-two.lock"
+out=$($B --free-only); rc=$?
+check "--free-only names nothing when every lock is taken" '[ "$rc" -eq 1 ] && [ -z "$out" ]' "rc=$rc $out"
+kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3
+hold "$T/lk/worv-dev-build-remote-one.lock"
+out=$(HOLD=6 $B --free-only); rc=$?
+check "--free-only never names a host a cost read holds whole, though its lock is free" '[ "$rc" -eq 1 ] && [ -z "$out" ]' "rc=$rc $out"
+echo "b@two $(date +%s)" > "$T/h/state/locks/cost-wait.2464"
+out=$($B --free-only); rc=$?
+check "--free-only never names a host a waiting cost read asks for" '[ "$rc" -eq 1 ] && [ -z "$out" ]' "rc=$rc $out"
+kill "${pids[@]}" 2>/dev/null; pids=(); sleep 0.3
+echo "a@one $(date +%s)" > "$T/h/state/locks/cost-wait.2502"
+out=$($B); out2=$($B --free-only); rc=$?
+check "--free-only does not fall back when every host is left out, as the plain choice does" '[[ "$out" == *"ssh://a@one "* ]] && [ "$rc" -eq 1 ] && [ -z "$out2" ]' "$out / rc=$rc $out2"
+rm -f "$T/h/state/locks/cost-wait."*
+
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
