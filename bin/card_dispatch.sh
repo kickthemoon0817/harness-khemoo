@@ -10,6 +10,8 @@
 # This host's card takes part only for the issues the owner opened it to
 # (state/locks/local-card-issues): when no live lease holds one of its slots and nothing computes
 # on it, a listed issue's waiting queue gets `local`.
+# Every pass reads `lease.sh status`, waiting queues or not: those reads are the samples that let
+# lease.sh reclaim a hold whose slot containers stay down (its IDLE_HOLD_S rule).
 set -u
 H="${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 S="${HARNESS_STATE:-$H/state}"
@@ -19,6 +21,7 @@ mkdir -p "$S/logs" "$S/locks" 2>/dev/null || exit 0
 exec 9>"$S/locks/card_dispatch.lock" || exit 0
 flock -n 9 || exit 0
 now=$(date +%s); iso=$(date -u +%FT%TZ)
+lease_status=$("$H/bin/lease.sh" status < /dev/null 2>/dev/null)
 
 # Pinned waiters: "<priority rank> <BUSY since epoch> <wanted host> <runs dir> <issue>".
 prio=" $(cat "$S/locks/operator-priority" 2>/dev/null | tr '\n' ' ') "
@@ -43,7 +46,6 @@ done | sort -k1,1n -k2,2n)
 [ -n "$waiters" ] || exit 0
 
 # Free cards: remote hosts with no live lease on any slot, idle on their last probe.
-lease_status=$("$H/bin/lease.sh" status < /dev/null 2>/dev/null)
 free=$(printf '%s\n' "$lease_status" | awk '
     /^remote card: / { host = $3; split(substr($5, 1, length($5) - 1), r, "-"); lo[host] = r[1]; hi[host] = r[2] }
     /^slot [0-9]+ HELD / && /\(alive\)$/ { held[$2] = 1 }
