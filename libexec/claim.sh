@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One tick per issue: a local claim taken atomically before the claim comment,
 # so two ticks that start seconds apart cannot both claim an issue whose first
-# comment has not reached GitHub yet. It belongs to the tick (bin/tick-pid.sh
+# comment has not reached GitHub yet. It belongs to the tick (libexec/tick-pid.sh
 # finds it), and a dead holder frees it.
 #   claim.sh acquire <issue>  -> ACQUIRED, or BUSY <issue> <pid> <since> (exit 1)
 #   claim.sh status <issue>   -> free, HELD <issue> <pid> <since> or ORPHAN <...>
@@ -13,8 +13,8 @@ cmd="${1:-}"; issue="${2:-}"
 F="$L/claim.$issue"
 if [ "$cmd" = status ]; then
   pid=""
-elif [ -x "$H/bin/tick-pid.sh" ]; then
-  pid=$("$H/bin/tick-pid.sh" 2>/dev/null) || {
+elif [ -x "$H/libexec/tick-pid.sh" ]; then
+  pid=$("$H/libexec/tick-pid.sh" 2>/dev/null) || {
     echo "ERROR: no tick (an ancestor in TICK_AGENT_EXES) above this shell; call claim.sh from the tick's own shell" >&2
     exit 2
   }

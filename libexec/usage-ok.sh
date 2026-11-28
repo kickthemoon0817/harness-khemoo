@@ -6,10 +6,10 @@
 # or agent.
 set -u
 # shellcheck source=/dev/null
-. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
 harness_load
 # shellcheck source=/dev/null
-. "$HARNESS_HOME/bin/usage-lib.sh"
+. "$HARNESS_HOME/lib/usage.sh"
 
 # A ruling posted after a tick's claim binds that tick, so name each Operator comment on the issue this tick claimed that is newer than the
 # claim, once per tick. Silent, and never fatal, when no claim, no token or no answer is found.

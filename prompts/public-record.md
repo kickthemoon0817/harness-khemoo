@@ -3,7 +3,7 @@
 Everything a tick posts to GitHub is read by people who have the repository and nothing else: no
 dev host, no harness checkout, no scratch store, no memory of the last tick. An issue body, a PR
 body, a comment, a close summary and a commit message have to stand on their own there, today and
-in a year. This file is the contract. `bin/public_record_lint.py` checks the mechanical half of it,
+in a year. This file is the contract. `libexec/public-record-lint.py` checks the mechanical half of it,
 and a tick runs the lint on every body before `gh` posts it: a blocking finding means rewrite, not
 post. The project's terms are in the installation's `prompts/glossary.md`; define each one the first
 time a body uses it, with the glossary's phrase. The installation's `prompts/public-record.md`, when

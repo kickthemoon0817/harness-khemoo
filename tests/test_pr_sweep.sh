@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises bin/pr_sweep.sh with a fake gh that serves an open pull request list and issue
+# Exercises bin/pr-sweep.sh with a fake gh that serves an open pull request list and issue
 # states from fixtures and logs every write.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -24,27 +24,27 @@ echo "closed 2026-11-23T19:59:09Z" > "$FX/issue.2382"
 echo "open -" > "$FX/issue.2464"
 echo "closed 2026-11-25T06:31:33Z" > "$FX/issue.2026"
 
-out=$(bash "$here/bin/pr_sweep.sh" --dry-run)
+out=$(bash "$here/bin/pr-sweep.sh" --dry-run)
 check "--dry-run names each pull request whose issue is closed" '[ "$(echo "$out" | grep -c "would close")" = 2 ] && echo "$out" | grep -q "PR #2386" && echo "$out" | grep -q "PR #2030"' "$out"
 check "--dry-run writes nothing" '[ ! -s "$CALLS" ]' "$(cat "$CALLS" 2>/dev/null)"
 
-: > "$CALLS"; bash "$here/bin/pr_sweep.sh"
+: > "$CALLS"; bash "$here/bin/pr-sweep.sh"
 check "a pull request whose issue is closed gets a comment and is closed" 'grep -q "POST repos/org/repo/issues/2386/comments" "$CALLS" && grep -q "PATCH repos/org/repo/pulls/2386 -f state=closed" "$CALLS"' "$(cat "$CALLS")"
 check "the other one is closed too" 'grep -q "PATCH repos/org/repo/pulls/2030 -f state=closed" "$CALLS"' "$(cat "$CALLS")"
 check "a pull request whose issue is open is left alone" '! grep -q "2472" "$CALLS"' "$(cat "$CALLS")"
-check "each close is logged with its issue" '[ "$(grep -c "closed PR #" "$T/h/state/logs/pr_sweep.log")" = 2 ] && grep -q "closed PR #2386 (ai/2382-converted-push): #2382 closed" "$T/h/state/logs/pr_sweep.log"' "$(cat "$T/h/state/logs/pr_sweep.log")"
+check "each close is logged with its issue" '[ "$(grep -c "closed PR #" "$T/h/state/logs/pr-sweep.log")" = 2 ] && grep -q "closed PR #2386 (ai/2382-converted-push): #2382 closed" "$T/h/state/logs/pr-sweep.log"' "$(cat "$T/h/state/logs/pr-sweep.log")"
 
 : > "$CALLS"; printf '%s\n' "1 ai/docs" "2 ai/9999-gone" > "$FX/prs"
-bash "$here/bin/pr_sweep.sh"
+bash "$here/bin/pr-sweep.sh"
 check "a branch without an issue number, or an issue that cannot be read, is left alone" '[ ! -s "$CALLS" ]' "$(cat "$CALLS")"
 
-: > "$CALLS"; : > "$T/h/state/logs/pr_sweep.log"; touch "$FX/fail_write"; printf '%s\n' "2386 ai/2382-converted-push" > "$FX/prs"
-bash "$here/bin/pr_sweep.sh"
-check "a failed comment leaves the pull request open and says so" '! grep -q PATCH "$CALLS" && grep -q "PR #2386 comment failed" "$T/h/state/logs/pr_sweep.log"' "$(cat "$CALLS") / $(cat "$T/h/state/logs/pr_sweep.log")"
+: > "$CALLS"; : > "$T/h/state/logs/pr-sweep.log"; touch "$FX/fail_write"; printf '%s\n' "2386 ai/2382-converted-push" > "$FX/prs"
+bash "$here/bin/pr-sweep.sh"
+check "a failed comment leaves the pull request open and says so" '! grep -q PATCH "$CALLS" && grep -q "PR #2386 comment failed" "$T/h/state/logs/pr-sweep.log"' "$(cat "$CALLS") / $(cat "$T/h/state/logs/pr-sweep.log")"
 
-rm -f "$FX/fail_write"; : > "$CALLS"; : > "$T/h/state/logs/pr_sweep.log"
+rm -f "$FX/fail_write"; : > "$CALLS"; : > "$T/h/state/logs/pr-sweep.log"
 printf '%s\n' "2386 ai/2382-converted-push" "2030 bot/2026-still-island-sleep" > "$FX/prs"
-BRANCH_PREFIX=bot/ bash "$here/bin/pr_sweep.sh"
+BRANCH_PREFIX=bot/ bash "$here/bin/pr-sweep.sh"
 check "BRANCH_PREFIX names the branches swept" 'grep -q "pulls/2030 -f state=closed" "$CALLS" && ! grep -q 2386 "$CALLS"' "$(cat "$CALLS")"
 
 echo "pass=$pass fail=$fail"

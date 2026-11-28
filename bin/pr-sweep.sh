@@ -2,19 +2,19 @@
 # Closes each open pull request on a `<BRANCH_PREFIX><n>-…` branch (default prefix `ai/`)
 # whose issue #<n> is closed. An issue that lands on another pull request, or that the operator
 # closes, otherwise leaves its own draft open. The branch stays, so a closed pull request can be
-# reopened. One line per close goes to $HARNESS_STATE/logs/pr_sweep.log.
+# reopened. One line per close goes to $HARNESS_STATE/logs/pr-sweep.log.
 #
-#   pr_sweep.sh             close them
-#   pr_sweep.sh --dry-run   name them, close nothing
+#   pr-sweep.sh             close them
+#   pr-sweep.sh --dry-run   name them, close nothing
 set -u
 # shellcheck source=/dev/null
-. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
 # Every key exported: gh reads GH_TOKEN from the config.
 set -a; harness_load; set +a
 : "${GH_REPO:?set GH_REPO in the instance harness.env}"
 : "${BRANCH_PREFIX:=ai/}"
 dry=""; [ "${1:-}" = --dry-run ] && dry=1
-LOG="${PR_SWEEP_LOG:-$HARNESS_STATE/logs/pr_sweep.log}"; mkdir -p "$(dirname "$LOG")"
+LOG="${PR_SWEEP_LOG:-$HARNESS_STATE/logs/pr-sweep.log}"; mkdir -p "$(dirname "$LOG")"
 ts() { date -u +%FT%TZ; }
 
 prs=$(gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \

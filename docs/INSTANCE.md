@@ -2,7 +2,7 @@
 
 The core (`bin/`, `prompts/`) holds no project, host or device. Everything specific to one
 installation lives in its instance directory. The core reads that directory only through
-`bin/instance-lib.sh` (`harness_load` and `harness_hook`), and the dashboard and the lint read it
+`lib/instance.sh` (`harness_load` and `harness_hook`), and the dashboard and the lint read it
 the same way. `templates/instance/` is a working starting point, and `tests/fixtures/instance/`
 is the smallest complete one.
 
@@ -10,7 +10,7 @@ is the smallest complete one.
 
 | Name | Set by | Default |
 |---|---|---|
-| `HARNESS_HOME` | environment | the checkout that holds `bin/instance-lib.sh` |
+| `HARNESS_HOME` | environment | the checkout that holds `lib/instance.sh` |
 | `HARNESS_INSTANCE_DIR` | environment only | `$HARNESS_HOME/instance` (gitignored) |
 | `HARNESS_ENV` | environment only | `$HARNESS_INSTANCE_DIR/harness.env` |
 | `HARNESS_STATE` | environment or `harness.env` | `$HARNESS_HOME/state` |
@@ -32,15 +32,15 @@ skipped.
 `LANE_LABEL`), and the fleet keys (`TICK_AGENT`, `TICK_AGENT_EXES`, `FLEET_DISPATCH`, `FLEET_DEVICE`, `FLEET_BIN`,
 `FLEET_CONFIG`). None of them is secret. No other config key reaches a tick's environment unless
 `TICK_EXPORTS` lists it. `GH_TOKEN` never does: `tick.sh` unexports it, whether the environment,
-`TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr_sweep.sh` and
-`worktree_gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
+`TICK_EXPORTS` or `hooks/env.sh` exported it, and passes it only to the queue count. `pr-sweep.sh` and
+`worktree-gc.sh` export every key, because cron gives them no environment and `gh` reads `GH_TOKEN`.
 
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
 `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
 `WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
-empty `GH_REPO` is derived through `bin/instance-lib.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `bin/claimable.sh`, for its queue count,
+empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `libexec/claimable.sh`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
@@ -102,7 +102,7 @@ environment or arguments instead of `cd`-ing to them.
 |---|---|---|
 | `FLEET_DISPATCH` | empty | `1` dispatches every tick through fleet |
 | `TICK_AGENT` | `claude` | the adapter a tick runs; another value needs `FLEET_DISPATCH=1`, or `check` fails and the launcher logs the instance as incomplete |
-| `TICK_AGENT_EXES` | `claude:-p claude-code:-p node:-p` | the agent processes a tick runs as, space-separated, each `exe` or `exe:arg`; `bin/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has base name `exe` and, with `:arg`, whose argv[1] is exactly `arg`. The argument keeps an operator's interactive `claude` from taking claims or the merge lock. Add `codex:exec` for codex ticks |
+| `TICK_AGENT_EXES` | `claude:-p claude-code:-p node:-p` | the agent processes a tick runs as, space-separated, each `exe` or `exe:arg`; `libexec/tick-pid.sh` gives a claim to the nearest ancestor whose argv[0] or executable has base name `exe` and, with `:arg`, whose argv[1] is exactly `arg`. The argument keeps an operator's interactive `claude` from taking claims or the merge lock. Add `codex:exec` for codex ticks |
 | `FLEET_DEVICE` | `auto` | a device name from `fleet.toml`, or `auto` |
 | `FLEET_BIN` | `fleet` | the fleet CLI |
 | `FLEET_CONFIG` | `$HARNESS_INSTANCE_DIR/fleet.toml` | the device registry (`templates/instance/fleet.toml.example`) |
@@ -124,7 +124,7 @@ it finds nothing. A failed lane or landing count starts no lane or landing tick.
 ## Worktrees
 
 A tick's worktree is the directory `$WORKTREE_ROOT/<name>-<issue>` (a name, a hyphen, the issue
-number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree_gc.sh` reads a
+number, as in `app-42`) on a `<BRANCH_PREFIX><issue>-<slug>` branch. `worktree-gc.sh` reads a
 worktree's issue from its branch, else from the trailing number of its directory name, and never removes one that names no
 issue. The dashboard reads the issue from the directory name the same way.
 
@@ -138,8 +138,8 @@ executable. It runs under `timeout HOOK_TIMEOUT_S` when the caller sets that var
 |---|---|---|
 | `hooks/env.sh` | sourced by `tick.sh` after the config, in launcher and runner mode (not in `check`) | what it exports reaches every tick; a non-zero status is logged once as `hooks/env.sh failed (exit N); ticks run without it` |
 | `hooks/hold` | executed with no arguments, under `HOLD_TIMEOUT_S` (default 5 s), when the launcher starts, when a runner starts, and before each chained tick | exit 0 means held: the launcher starts nothing and runners chain nothing. The first line of stdout is the reason, logged as `held: <reason>` once until the state changes. Any other exit, or a timeout, means not held |
-| `hooks/worktree-busy` | executed by `worktree_gc.sh` with no arguments, under `WORKTREE_BUSY_TIMEOUT_S` (default 30 s) | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept. A non-zero exit or a timeout removes nothing |
-| `hooks/worktree-remove` | executed by `worktree_gc.sh --apply` with every removed worktree's path | removes what `git worktree remove --force` could not, such as root-owned files or copies elsewhere; its output and status are ignored |
+| `hooks/worktree-busy` | executed by `worktree-gc.sh` with no arguments, under `WORKTREE_BUSY_TIMEOUT_S` (default 30 s) | prints paths in use, one a line (for example what containers mount); a worktree that holds one of them is kept. A non-zero exit or a timeout removes nothing |
+| `hooks/worktree-remove` | executed by `worktree-gc.sh --apply` with every removed worktree's path | removes what `git worktree remove --force` could not, such as root-owned files or copies elsewhere; its output and status are ignored |
 
 The templates ship `hooks/env.sh.example` and `hooks/hold.example`. Copy them without the
 `.example` suffix to turn them on, and keep `hold` executable.
@@ -181,7 +181,7 @@ to count lane issues. The launcher and the dashboard recognise a landing tick by
 
 ## Lint rules
 
-`bin/public_record_lint.py` always applies the core rules: `harness-path` (any path under
+`libexec/public-record-lint.py` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
 `harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
 the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these

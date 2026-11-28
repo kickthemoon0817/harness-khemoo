@@ -1,7 +1,7 @@
 # Fleet: devices and agent sessions
 
 Fleet monitors devices and the coding-agent sessions on them (Claude Code, Codex, any agent
-CLI), and dispatches new agent sessions to them. It is a Cargo workspace under `fleet/`:
+CLI), and dispatches new agent sessions to them. It is part of the Cargo workspace at the repository root, under `crates/`:
 
 | Crate | Kind | Role |
 |---|---|---|
@@ -955,7 +955,6 @@ when present.
 ## Building and testing
 
 ```bash
-cd fleet
 cargo build --release          # target/release/fleetd, target/release/fleet
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

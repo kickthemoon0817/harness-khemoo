@@ -11,7 +11,7 @@ set -u
 : "${GH_REPO:?claimable.sh needs GH_REPO (owner/name)}"; : "${ISSUE_LABEL:=ai}"; : "${WIP_LABEL:=ai:wip}"; : "${SIGNOFF_LABEL:=ai:signoff}"
 : "${OPERATOR_LABEL:=ai:operator}"
 : "${FIRST_LABEL:=ai:first}"; : "${LOW_LABEL:=ai:low}"; : "${LANE_LABEL:=}"
-# A tick takes a local claim (bin/claim.sh) before its claim comment reaches GitHub.
+# A tick takes a local claim (libexec/claim.sh) before its claim comment reaches GitHub.
 CLAIM_LOCKS="${HARNESS_STATE:-${HARNESS_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/state}/locks"
 json=$(gh issue list --repo "$GH_REPO" --label "$ISSUE_LABEL" --state open --limit 100 \
     --json number,body,labels) || { echo "claimable.sh: gh issue list failed" >&2; exit 1; }

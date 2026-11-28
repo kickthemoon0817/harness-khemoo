@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The merge slot's lock: one landing at a time, so a ready PR merges on top of
 # the batch-mates that landed before it in the slot. It belongs to the tick
-# (bin/tick-pid.sh finds it), and a dead holder frees it.
+# (libexec/tick-pid.sh finds it), and a dead holder frees it.
 #   merge-lock.sh acquire <issue>  -> ACQUIRED, or BUSY <holder> (exit 1)
 #   merge-lock.sh release <issue>  -> RELEASED, or NOT-HOLDER
 #   merge-lock.sh status           -> free, HELD <holder> or ORPHAN <holder>
@@ -11,8 +11,8 @@ L="${HARNESS_STATE:-$H/state}/locks"
 F="$L/merge.lock"
 if [ "${1:-}" = status ]; then
   pid=""
-elif [ -x "$H/bin/tick-pid.sh" ]; then
-  pid=$("$H/bin/tick-pid.sh" 2>/dev/null) || {
+elif [ -x "$H/libexec/tick-pid.sh" ]; then
+  pid=$("$H/libexec/tick-pid.sh" 2>/dev/null) || {
     echo "ERROR: no tick (an ancestor in TICK_AGENT_EXES) above this shell; call merge-lock.sh from the tick's own shell" >&2
     exit 2
   }

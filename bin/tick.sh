@@ -15,7 +15,7 @@
 set -u
 
 # shellcheck source=/dev/null
-. "$(dirname "${BASH_SOURCE[0]}")/instance-lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
 harness_load
 : "${ISSUE_LABEL:=ai}"
 : "${WIP_LABEL:=ai:wip}"
@@ -31,7 +31,7 @@ harness_load
 : "${LOG_RETENTION:=200}"
 : "${HOLD_TIMEOUT_S:=5}"
 # shellcheck source=/dev/null
-. "$HARNESS_HOME/bin/usage-lib.sh"
+. "$HARNESS_HOME/lib/usage.sh"
 : "${CLAUDE_BIN:=claude}"
 # Set, but possibly empty: an explicit `CLAUDE_FLAGS=` means "pass no flags".
 [ -z "${CLAUDE_FLAGS+x}" ] && CLAUDE_FLAGS="--dangerously-skip-permissions"

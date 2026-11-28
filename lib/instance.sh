@@ -25,7 +25,7 @@ harness_load() {
     export PATH="$HARNESS_INSTANCE_DIR/bin:$PATH"
     for name in ${TICK_EXPORTS:-}; do
         if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then export "${name?}"
-        else echo "instance-lib: TICK_EXPORTS: '$name' is not a variable name" >&2; fi
+        else echo "lib/instance.sh: TICK_EXPORTS: '$name' is not a variable name" >&2; fi
     done
 }
 

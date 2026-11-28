@@ -10,7 +10,7 @@ configures them, as an auto-refreshing page (`/`) and as JSON (`/api/state`).
 The config file is $HARNESS_ENV, else $HARNESS_INSTANCE_DIR/harness.env (default <harness home>/instance). From it
 the dashboard reads only ENV_KEYS; GH_TOKEN reaches `gh` through its environment and is never shown. A panel whose
 key is unset is left off the page. HARNESS_STATE, USAGE_CACHE and WORKTREE_ROOT in the environment win over the
-file's. An empty GH_REPO is derived from TARGET_REPO's origin by bin/instance-lib.sh, as the scripts derive it.
+file's. An empty GH_REPO is derived from TARGET_REPO's origin by lib/instance.sh, as the scripts derive it.
 Otherwise the file is never evaluated: a command key may name `$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`, a path key `$HOME` too,
 and no other `$` text is expanded. bin/dashboard.sh starts this detached.
 """
@@ -424,7 +424,7 @@ class DashboardApp:
     @staticmethod
     def derived_repo(harness_home: Path) -> str:
         """
-        Asks bin/instance-lib.sh for GH_REPO, so the dashboard derives an empty one from TARGET_REPO's origin exactly
+        Asks lib/instance.sh for GH_REPO, so the dashboard derives an empty one from TARGET_REPO's origin exactly
         as the launcher does. It loads the config the way the launcher does.
 
         Args:
@@ -433,7 +433,7 @@ class DashboardApp:
         Returns:
             The repository, or an empty string when none is derived or the loader fails.
         """
-        library: Path = Path(__file__).resolve().parent / "instance-lib.sh"
+        library: Path = Path(__file__).resolve().parent.parent / "lib" / "instance.sh"
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
                 ["bash", "-c", '. "$1"; harness_load >/dev/null 2>&1; printf %s "${GH_REPO:-}"', "_", str(library)],
@@ -543,7 +543,7 @@ class DashboardApp:
         parser.add_argument("--remote-interval", type=float, default=120.0,
                             help="read-only ssh probe of each remote host; 0 turns it off")
         parser.add_argument("--claimable-interval", type=float, default=300.0,
-                            help="how often to run QUEUE_DEPTH_CMD, else bin/claimable.sh; 0 turns it off")
+                            help="how often to run QUEUE_DEPTH_CMD, else libexec/claimable.sh; 0 turns it off")
         parser.add_argument("--fleet-interval", type=float, default=30.0,
                             help="how often to run FLEET_STATUS_CMD, when it is set")
         parser.add_argument("--done-hours", type=float, default=6.0, help="how long a closed issue stays as done")

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Exercises bin/claimable.sh's priority gate with a fake gh that answers from fixture files.
+# Exercises libexec/claimable.sh's priority gate with a fake gh that answers from fixture files.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
 trap 'rm -rf "$H"' EXIT
-mkdir -p "$H/bin" "$H/state/locks" "$H/fake" "$H/fx"
-cp "$here/bin/claimable.sh" "$H/bin/claimable.sh"
+mkdir -p "$H/libexec" "$H/state/locks" "$H/fake" "$H/fx"
+cp "$here/libexec/claimable.sh" "$H/libexec/claimable.sh"
 # gh issue list --label L ... prints $H/fx/<L>.json (empty list when absent);
 # gh issue view N --json state prints OPEN unless $H/fx/closed.<N> exists; comments print nothing.
 cat > "$H/fake/gh" <<'EOF'
@@ -40,7 +40,7 @@ issue() {  # number, comma-separated labels, optional body
 plan() { local IFS=,; echo "[$*]" > "$FX/ai_plan.json"; }
 firsts() { local IFS=,; echo "[$*]" > "$FX/ai_first.json"; }
 lanes() { local IFS=,; echo "[$*]" > "$FX/ai_lane.json"; }
-count() { "$H/bin/claimable.sh"; }
+count() { "$H/libexec/claimable.sh"; }
 reset() { rm -f "$FX"/*; }
 
 reset; plan "$(issue 1 ai,ai:plan)" "$(issue 2 ai,ai:plan,ai:low)"

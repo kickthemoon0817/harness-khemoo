@@ -8,7 +8,8 @@ holders=()
 cleanup() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$H"; }
 trap cleanup EXIT
 mkdir -p "$H/bin" "$H/prompts" "$H/instance/prompts" "$H/state/locks" "$H/state/logs" "$H/target" "$H/fakebin" "$H/livebin"
-cp "$here/bin/tick.sh" "$here/bin/usage-lib.sh" "$here/bin/instance-lib.sh" "$H/bin/"
+mkdir -p "$H/lib"
+cp "$here/bin/tick.sh" "$H/bin/"; cp "$here/lib/usage.sh" "$here/lib/instance.sh" "$H/lib/"
 echo "Core rules." > "$H/prompts/tick-core.md"
 cp "$here/tests/fixtures/instance/prompts/tick.md" "$H/instance/prompts/tick.md"
 cat > "$H/fakebin/claude" <<'EOF'

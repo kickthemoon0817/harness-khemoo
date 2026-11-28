@@ -48,7 +48,7 @@ from dashboard_lib.runqueue import RunQueueReader
 @dataclass(frozen=True)
 class UsageThresholds:
     """
-    Where each usage window cuts the pool (bin/usage-lib.sh defaults).
+    Where each usage window cuts the pool (lib/usage.sh defaults).
     """
 
     ceiling_pct: float = 90
@@ -486,7 +486,7 @@ exit 0
 
     def refresh_claimable_in_place(self) -> None:
         """
-        Runs QUEUE_DEPTH_CMD, else bin/claimable.sh, for the queue label with the labels the launcher passes it, and
+        Runs QUEUE_DEPTH_CMD, else libexec/claimable.sh, for the queue label with the labels the launcher passes it, and
         keeps its count.
         """
         started: float = self.clock()
@@ -502,7 +502,7 @@ exit 0
         })
         try:
             completed: subprocess.CompletedProcess[str] = subprocess.run(
-                list(self.config.queue_depth_command) or [str(self.config.harness_home / "bin" / "claimable.sh")],
+                list(self.config.queue_depth_command) or [str(self.config.harness_home / "libexec" / "claimable.sh")],
                 capture_output=True, text=True,
                 timeout=self.config.claimable_timeout_s, env=environment, stdin=subprocess.DEVNULL,
             )
