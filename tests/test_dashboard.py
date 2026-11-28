@@ -363,6 +363,17 @@ class ParserTest(unittest.TestCase):
                          [("whole-card", 2467, 35, "priority"), ("single-slot", 2470, 12, "first in line")])
         self.assertEqual(status.unparsed_lines, ("something unexpected",))
 
+    def test_lease_status_idle_clock_is_one_tag(self) -> None:
+        status = StateParsers.parse_lease_status(
+            "slot 1 HELD 2501 4242 2026-11-28T00:00:00Z domain=77 render idle 312 s (alive)\n"
+            "slot 2 HELD 2502 4343 2026-11-28T00:00:00Z domain=78 (alive)\n"
+        )
+        by_slot: dict[int | None, LeaseSlot] = {slot.slot: slot for slot in status.slots}
+        self.assertEqual(by_slot[1].tags, ("render", "idle 312 s"))
+        self.assertEqual(by_slot[1].domain, 77)
+        self.assertEqual(by_slot[2].tags, ())
+        self.assertEqual(status.unparsed_lines, ())
+
     def test_stalls_keep_the_newest(self) -> None:
         stalls = StateParsers.parse_stalls((FIXTURES / "stalls.log").read_text(), 2)
         self.assertEqual([stall.kind for stall in stalls], ["lock_wait", "gpu_idle"])

@@ -451,6 +451,9 @@ class StateParsers:
             if tag.startswith("domain="):
                 domain = StateParsers._optional_int(tag.split("=", 1)[1])
                 tags.remove(tag)
+        # A sampled idle tick hold ends its marks with `idle N s`, kept as one tag.
+        if len(tags) >= 3 and tags[-3] == "idle" and tags[-2].isdigit() and tags[-1] == "s":
+            tags[-3:] = [" ".join(tags[-3:])]
         return LeaseSlot(
             slot=held_slot,
             state="held" if held_match.group(2) == "HELD" else "orphan",
