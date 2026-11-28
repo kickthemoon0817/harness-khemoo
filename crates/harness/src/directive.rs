@@ -1142,7 +1142,7 @@ mod tests {
             max_directive_s: 21_600,
             stop_grace_s: 600,
             width: 4,
-            models: Entry::list("claude:opus codex:gpt gemini:pro", "claude").unwrap(),
+            models: Entry::list("claude:opus codex:gpt agy:pro", "claude").unwrap(),
             default_agent: "claude".to_owned(),
         }
     }
@@ -1630,7 +1630,7 @@ mod tests {
         assert_eq!(status(&paths, &context()), Status::None);
         apply(
             &paths,
-            with("models", json!(["gemini:pro"])).to_string().as_bytes(),
+            with("models", json!(["agy:pro"])).to_string().as_bytes(),
             &context(),
             &[],
         )
@@ -1646,7 +1646,7 @@ mod tests {
             ..context()
         };
         assert!(
-            matches!(status(&paths, &narrowed), Status::Invalid(error) if error.contains("gemini:pro"))
+            matches!(status(&paths, &narrowed), Status::Invalid(error) if error.contains("agy:pro"))
         );
         std::fs::write(paths.directive(), "{\"version\": 1, \"surprise\": true}").unwrap();
         assert!(matches!(status(&paths, &context()), Status::Invalid(_)));

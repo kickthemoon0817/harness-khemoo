@@ -242,10 +242,13 @@ pub fn split_key(text: &str) -> Result<(String, Option<String>), String> {
         ));
     }
     if let Some(account) = account {
-        if crate::accounts::variable(agent).is_none() {
+        if agent == "agy" {
             return Err(format!(
-                "'{text}': only claude, codex and gemini have accounts"
+                "'{text}': agy has no accounts: it keeps one sign-in in the OS keyring and its config under ~/.gemini/antigravity-cli, which no variable moves"
             ));
+        }
+        if crate::accounts::variable(agent).is_none() {
+            return Err(format!("'{text}': only claude and codex have accounts"));
         }
         if !crate::accounts::valid_name(account) {
             return Err(format!(
@@ -273,7 +276,7 @@ impl Entry {
         // model may hold `@` otherwise, as a Vertex model id does.
         if !text.contains(':')
             && let Some((agent, account)) = text.split_once('@')
-            && crate::accounts::variable(agent).is_some()
+            && (crate::accounts::variable(agent).is_some() || agent == "agy")
             && crate::accounts::valid_name(account)
         {
             return Err(format!(
@@ -364,6 +367,8 @@ impl AgentSource {
                 Some(dir) => PathBuf::from(dir).join("sessions"),
                 None => need_home()?.join(".codex/sessions"),
             }),
+            // agy shows its quota only in an interactive panel: its usage-limit cooldown gates it.
+            (None, "agy") => Source::None,
             (None, _) => Source::Unset,
         };
         Ok(Self {
@@ -378,10 +383,9 @@ impl AgentSource {
     /// An account's: `USAGE_SOURCE_<agent>_<account>` and `USAGE_FETCH_<agent>_<account>`, a `-` of
     /// the name read as `_`, and never the agent's own keys: two seats reading one file would count
     /// one account's usage twice, and the agent's fetch reads the default account's login. Without
-    /// its own source claude reads `<folder>/usage-cache.json` and codex `<folder>/sessions`; an
-    /// agent with no such folder default is refused while its own source names a reading, and
-    /// unmetered while that is `none`. A Claude cache with no fetch of its own is refused too, since
-    /// nothing of this account's would write it.
+    /// its own source claude reads `<folder>/usage-cache.json` and codex `<folder>/sessions`. A
+    /// Claude cache with no fetch of its own is refused, since nothing of this account's would
+    /// write it.
     pub fn for_account(env: Lookup, account: Account) -> Result<Self, String> {
         let agent = account.agent.clone();
         let own = format!("{agent}_{}", crate::accounts::key_name(&account.name));
@@ -389,21 +393,11 @@ impl AgentSource {
         let own_key = format!("USAGE_SOURCE_{own}");
         let fetch_key = format!("USAGE_FETCH_{own}");
         let mut refusal = None;
-        let source = match (env(&own_key), agent.as_str()) {
-            (Some(text), _) => Source::parse(&text, || Some(sessions.clone()))
+        let source = match env(&own_key) {
+            Some(text) => Source::parse(&text, || Some(sessions.clone()))
                 .map_err(|message| format!("{own_key}: {message}"))?,
-            (None, "claude") => Source::ClaudeCache(account.dir.join("usage-cache.json")),
-            (None, "codex") => Source::CodexSessions(sessions.clone()),
-            (None, _) => match env(&format!("USAGE_SOURCE_{agent}")).as_deref() {
-                Some("none") => Source::None,
-                Some(_) => {
-                    refusal = Some(format!(
-                        "an account never reads USAGE_SOURCE_{agent}: set {own_key}"
-                    ));
-                    Source::Unset
-                }
-                None => Source::Unset,
-            },
+            None if agent == "claude" => Source::ClaudeCache(account.dir.join("usage-cache.json")),
+            None => Source::CodexSessions(sessions.clone()),
         };
         let fetch = env(&fetch_key).map(PathBuf::from);
         if matches!(source, Source::ClaudeCache(_)) && fetch.is_none() {
@@ -708,13 +702,9 @@ pub fn agent_usage(
     let reading = if let Some(why) = &source.refusal {
         Err(why.clone())
     } else {
-        match (&source.source, account) {
-            (Source::None, _) => Err(String::new()),
-            (Source::Unset, Some(name)) => Err(format!(
-                "neither USAGE_SOURCE_{agent}_{} nor USAGE_SOURCE_{agent}=none is set: name its source, or none",
-                crate::accounts::key_name(name)
-            )),
-            (Source::Unset, None) => Err(format!(
+        match &source.source {
+            Source::None => Err(String::new()),
+            Source::Unset => Err(format!(
                 "USAGE_SOURCE_{agent} is not set: name its source, or none"
             )),
             _ if refresh => read_refreshed(settings, &source),
@@ -1385,30 +1375,36 @@ mod tests {
     #[test]
     fn an_agent_without_a_source_allows_nothing() {
         let s = settings(&[]);
-        let usage = agent_usage(&env_of(&[]), &s, "gemini", None, false).unwrap();
+        let usage = agent_usage(&env_of(&[]), &s, "aider", None, false).unwrap();
         assert_eq!(usage.cap, 0);
         assert_eq!(
             usage.reading,
             Freshness::Unreadable(
-                "USAGE_SOURCE_gemini is not set: name its source, or none".to_owned()
+                "USAGE_SOURCE_aider is not set: name its source, or none".to_owned()
             )
         );
         let none = agent_usage(
-            &env_of(&[("USAGE_SOURCE_gemini", "none")]),
+            &env_of(&[("USAGE_SOURCE_aider", "none")]),
             &s,
-            "gemini",
+            "aider",
             None,
             false,
         )
         .unwrap();
         assert_eq!(none.cap, 8);
+        let agy = agent_usage(&env_of(&[]), &s, "agy", None, false).unwrap();
+        assert_eq!(
+            (agy.cap, &agy.reading),
+            (8, &Freshness::Unmetered),
+            "agy has no reading to find: only its usage-limit cooldown gates it"
+        );
     }
 
     #[test]
     fn an_unmetered_agent_has_the_full_width() {
         let s = settings(&[("MAX_SLOTS", "3")]);
         let source = AgentSource {
-            agent: "gemini".to_owned(),
+            agent: "agy".to_owned(),
             account: None,
             source: Source::None,
             fetch: None,
@@ -1528,7 +1524,7 @@ mod tests {
     #[test]
     fn entries_name_an_agent_or_take_the_default() {
         assert_eq!(
-            Entry::list("claude:opus codex:gpt-5.5 gemini-3-pro", "claude").unwrap(),
+            Entry::list("claude:opus codex:gpt-5.5 model-flash", "claude").unwrap(),
             [
                 Entry {
                     agent: "claude".into(),
@@ -1543,7 +1539,7 @@ mod tests {
                 Entry {
                     agent: "claude".into(),
                     account: None,
-                    model: "gemini-3-pro".into()
+                    model: "model-flash".into()
                 },
             ]
         );
@@ -1586,14 +1582,15 @@ mod tests {
             Source::CodexSessions("/home/dev-a/.codex/sessions".into())
         );
         assert_eq!(of("codex").fetch, None);
-        assert_eq!(of("gemini").source, Source::Unset);
+        assert_eq!(of("agy").source, Source::None);
+        assert_eq!(of("aider").source, Source::Unset);
         let set = env_of(&[
             ("HOME", "/home/dev-a"),
             ("USAGE_CACHE", "/c.json"),
             ("USAGE_FETCH", "/f.sh"),
             ("CODEX_HOME", "/ch"),
-            ("USAGE_SOURCE_gemini", "json:/g.json"),
-            ("USAGE_FETCH_gemini", "/g.sh"),
+            ("USAGE_SOURCE_agy", "json:/g.json"),
+            ("USAGE_FETCH_agy", "/g.sh"),
         ]);
         let of = |agent| AgentSource::from_env(&set, agent).unwrap();
         assert_eq!(of("claude").source, Source::ClaudeCache("/c.json".into()));
@@ -1602,8 +1599,8 @@ mod tests {
             of("codex").source,
             Source::CodexSessions("/ch/sessions".into())
         );
-        assert_eq!(of("gemini").source, Source::Json("/g.json".into()));
-        assert_eq!(of("gemini").fetch, Some("/g.sh".into()));
+        assert_eq!(of("agy").source, Source::Json("/g.json".into()));
+        assert_eq!(of("agy").fetch, Some("/g.sh".into()));
         let bad = env_of(&[("USAGE_SOURCE_codex", "s3://x")]);
         assert!(
             AgentSource::from_env(&bad, "codex")
@@ -1627,7 +1624,7 @@ mod tests {
             candidate("claude:opus", false, 2, 2),
             candidate("codex:gpt-5.5", true, 4, 0),
             candidate("codex:gpt-5.4", false, 4, 1),
-            candidate("gemini:gemini-3-pro", false, 4, 0),
+            candidate("agy:model-flash", false, 4, 0),
         ];
         let name = |found: Option<&Entry>| found.map(ToString::to_string);
         assert_eq!(
@@ -1637,7 +1634,7 @@ mod tests {
         let tried = [Entry::parse("codex:gpt-5.4", "claude").unwrap()];
         assert_eq!(
             name(pick(&list, &tried, false)),
-            Some("gemini:gemini-3-pro".to_owned())
+            Some("agy:model-flash".to_owned())
         );
         // A landing tick may start past its agent's running count, never past a cap of 0.
         assert_eq!(name(pick(&list, &[], true)), Some("claude:opus".to_owned()));
@@ -1689,7 +1686,7 @@ mod tests {
     fn the_pool_counts_each_agent_once_and_the_lane_too() {
         let env = env_of(&[
             ("TICK_MODELS", "claude:a codex:b claude:c"),
-            ("LANE_MODEL", "gemini:d"),
+            ("LANE_MODEL", "agy:d"),
         ]);
         let (entries, lane) = model_entries(&env).unwrap();
         assert_eq!(
@@ -1697,7 +1694,7 @@ mod tests {
             [
                 ("claude".to_owned(), None),
                 ("codex".to_owned(), None),
-                ("gemini".to_owned(), None)
+                ("agy".to_owned(), None)
             ]
         );
         let bare = env_of(&[("TICK_AGENT", "codex"), ("TICK_MODELS", "gpt-5.5")]);
@@ -1738,10 +1735,19 @@ mod tests {
             assert!(error.starts_with(&format!("'{bad}'")), "{bad}: {error}");
         }
         assert_eq!(
-            split_key("gemini@lab").unwrap(),
-            ("gemini".to_owned(), Some("lab".to_owned()))
+            split_key("codex@lab").unwrap(),
+            ("codex".to_owned(), Some("lab".to_owned()))
         );
-        assert!(split_key("gemini@").is_err());
+        assert!(split_key("codex@").is_err());
+        assert_eq!(
+            split_key("agy@work").unwrap_err(),
+            "'agy@work': agy has no accounts: it keeps one sign-in in the OS keyring and its config under ~/.gemini/antigravity-cli, which no variable moves"
+        );
+        assert!(
+            Entry::parse("agy@work:model-flash", "claude")
+                .unwrap_err()
+                .contains("agy has no accounts")
+        );
     }
 
     fn account_dir(root: &Path, agent: &str, name: &str) -> Account {
@@ -1759,13 +1765,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let claude = account_dir(&root, "claude", "work");
         let codex = account_dir(&root, "codex", "client-2");
-        let gemini = account_dir(&root, "gemini", "lab");
         let env = env_of(&[
             ("HOME", "/home/dev-a"),
             ("USAGE_CACHE", "/default-cache.json"),
             ("USAGE_FETCH", "/f.sh"),
             ("CODEX_HOME", "/default-codex"),
-            ("USAGE_SOURCE_gemini", "none"),
         ]);
         let of = |account: &Account| AgentSource::for_account(&env, account.clone()).unwrap();
         assert_eq!(
@@ -1791,7 +1795,6 @@ mod tests {
             Some("/f.sh".into()),
             "the default account keeps claude's fetch"
         );
-        assert_eq!(of(&gemini).source, Source::None);
         let own = env_of(&[
             ("USAGE_SOURCE_codex_client_2", "codex-sessions"),
             ("USAGE_SOURCE_claude_work", "json:/w.json"),
@@ -1805,27 +1808,16 @@ mod tests {
             Source::CodexSessions(codex.dir.join("sessions")),
             "a bare codex-sessions names the account's own"
         );
-        assert_eq!(of(&gemini).source, Source::Unset);
         let inherited = env_of(&[
-            ("USAGE_SOURCE_gemini", "json:/g.json"),
-            ("USAGE_FETCH_gemini", "/g.sh"),
+            ("USAGE_SOURCE_codex", "json:/c.json"),
             ("USAGE_FETCH_codex", "/c.sh"),
         ]);
         let of = |account: &Account| AgentSource::for_account(&inherited, account.clone()).unwrap();
         assert_eq!(
-            (
-                of(&gemini).source,
-                of(&gemini).fetch,
-                of(&gemini).refusal.as_deref()
-            ),
-            (
-                Source::Unset,
-                None,
-                Some("an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_lab")
-            ),
+            (of(&codex).source, of(&codex).fetch),
+            (Source::CodexSessions(codex.dir.join("sessions")), None),
             "an account never takes its agent's source or fetch"
         );
-        assert_eq!(of(&codex).fetch, None);
         let bad = env_of(&[("USAGE_SOURCE_claude_work", "s3://x")]);
         assert!(
             AgentSource::for_account(&bad, claude.clone())
@@ -2067,23 +2059,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("usage-shared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("accounts");
-        account_dir(&root, "gemini", "lab");
         account_dir(&root, "codex", "a");
         let root_text = root.display().to_string();
         let shared = env_of(&[
             ("AGENT_ACCOUNTS_DIR", &root_text),
-            ("TICK_MODELS", "gemini:g gemini@lab:g"),
-            ("USAGE_SOURCE_gemini", "json:/shared.json"),
-            ("USAGE_SOURCE_gemini_lab", "json:/shared.json"),
+            ("TICK_MODELS", "codex:x codex@a:x"),
+            ("USAGE_SOURCE_codex", "json:/shared.json"),
+            ("USAGE_SOURCE_codex_a", "json:/shared.json"),
         ]);
         assert_eq!(
             pool(&shared).unwrap_err(),
-            "gemini and gemini@lab both read their usage from /shared.json: give each account a source of its own"
+            "codex and codex@a both read their usage from /shared.json: give each account a source of its own"
         );
         let defaults = env_of(&[
-            ("TICK_MODELS", "codex:x gemini:g"),
+            ("TICK_MODELS", "codex:x agy:g"),
             ("USAGE_SOURCE_codex", "json:/shared.json"),
-            ("USAGE_SOURCE_gemini", "json:/shared.json"),
+            ("USAGE_SOURCE_agy", "json:/shared.json"),
         ]);
         assert!(
             pool(&defaults).is_ok(),
@@ -2105,7 +2096,11 @@ mod tests {
             "claude:claude-opus-4@20250514",
             "a bare model holding @ is no account, as it was without accounts"
         );
-        assert!(Entry::parse("gemini@lab", "claude").is_err());
+        assert!(Entry::parse("codex@lab", "claude").is_err());
+        assert!(
+            Entry::parse("agy@lab", "claude").is_err(),
+            "agy@<name> alone is no model either"
+        );
         assert_eq!(
             Entry::parse("aider@work", "claude").unwrap().model,
             "aider@work",

@@ -92,26 +92,41 @@ usage windows allow (below); when an entry's agent prints its usage-limit messag
 `$HARNESS_STATE/model-cooldown/<entry>`) and the tick re-runs at once on the next entry.
 An agent name is 1 to 32 of `a-z`, `0-9` and `_`.
 
-Three agents run locally, each with the composed prompt on stdin, never in argv:
+Three agents run locally, each with the composed prompt on stdin, never in argv. `agy` is the
+Antigravity CLI, Google's agent CLI for Google-account sign-ins; Gemini CLI is not supported.
 
 | Agent | Command line | `AGENT_FLAGS_<agent>` default | `AGENT_LIMIT_RE_<agent>` default |
 |---|---|---|---|
 | `claude` | `$AGENT_BIN_claude -p --model <model> <flags>` | `--dangerously-skip-permissions` | `You've (reached\|hit) your [^.]{0,40}limit` |
 | `codex` | `$AGENT_BIN_codex exec --model <model> <flags> -` | `--dangerously-bypass-approvals-and-sandbox` | `You've hit your usage limit\|rate_limit_reached` |
-| `gemini` | `$AGENT_BIN_gemini --model <model> <flags>`, headless because stdin is not a terminal | `--yolo` | `TerminalQuotaError\|RESOURCE_EXHAUSTED\|exhausted your daily quota\|exhausted your capacity\|Quota exceeded\|status 429` |
+| `agy` | `$AGENT_BIN_agy --model <model> --input-format stream-json --output-format stream-json <flags>`, the prompt as one stream-json line | `--dangerously-skip-permissions` | `RESOURCE_EXHAUSTED\|quota\|rate.?limit\|\b429\b`, against its ERROR result's error |
 
 `AGENT_BIN_<agent>` defaults to the agent's name, looked up on `HARNESS_PATH`. `AGENT_FLAGS_<agent>`
 is split on whitespace; set but empty, it passes no flag, and a `--model` in it is dropped, since
-the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. `AGENT_LIMIT_RE_<agent>`
-is an extended regex. For claude and codex it must match at the start of one of the last 5
-non-empty lines of the attempt's output, after spaces and an optional error prefix (`Error:`,
-`ERROR:`), so a sentence a tick quotes from an issue body and then writes past is no limit. For
-gemini, which ends a quota error with a stack trace or wraps it in `[API Error: ...]`, it may match
-anywhere in the attempt's last 40 lines. Set but empty, `check` refuses it. A gemini attempt counts as a usage limit only
-when it also exited non-zero, as gemini does on every error it ends on, so a tick that quoted the
-message and went on does not cool its entry; claude's and codex's exit status on a limit is not
-documented, so for them the message alone decides. Any other agent runs only through fleet, where
-its limit regex defaults to the three above joined.
+the entry names the model, as `--model=<m>`, `-m <m>` or `-m<m>` alike. For agy, a
+`--input-format`, `--output-format`, `-p`, `--print` or `--prompt` in it is dropped too, since its
+profile fixes how it reads the prompt and writes its answer. `AGENT_LIMIT_RE_<agent>` is an
+extended regex. For claude and codex it must match at the start of one of the last 5 non-empty
+lines of the attempt's output, after spaces and an optional error prefix (`Error:`, `ERROR:`), so a
+sentence a tick quotes from an issue body and then writes past is no limit; their exit status on a
+limit is not documented, so the message alone decides. Set but empty, `check` refuses it. Any
+other agent runs only through fleet, where its limit regex defaults to claude's and codex's joined.
+
+agy reads its prompt from stdin only as stream-json: the runner sends one NDJSON line,
+`{"event":"user","message":{"content":"<the prompt>"}}`, encoded by `jq`, and agy answers with
+NDJSON events, `init`, `step_update` and a final `result` whose `status` is `SUCCESS` or `ERROR`.
+The tick log keeps the events as they came, and after them the result's `response`, as text, for
+the tick's summary. The result decides the trailer's exit: a turn that ended in `ERROR`, or wrote
+no result, failed whatever agy exited with. An attempt counts as a usage limit when its result is
+`ERROR` and the result's `error` matches `AGENT_LIMIT_RE_agy`, case-insensitive; text the agent
+writes during its turn never reaches that field, so a quota error a tick quotes is no limit. agy
+documents no usage-limit text and none has been seen, so the default regex is unconfirmed: set
+`AGENT_LIMIT_RE_agy` once a real limit shows its words. `check` refuses an `agy` whose `--help`
+lacks `--input-format`: the Antigravity IDE ships a launcher of the same name, which is no
+headless CLI, and on some hosts it is first on `PATH`; install the CLI, or point
+`AGENT_BIN_agy` at it (`$HOME/.local/bin/agy` by the CLI's installer). agy keeps its one sign-in in
+the OS keyring and its settings in `~/.gemini/antigravity-cli/settings.json`, and an unauthenticated
+run ends on `authentication required`.
 
 ### Tick identity
 
@@ -166,9 +181,11 @@ past one, 2 without a fresh reading. Both read the keys below from the environme
 | `codex-sessions[:<dir>]` | the last `rate_limits` of the newest `rollout-*.jsonl` that has one under `<dir>/YYYY/MM/DD/` (default `${CODEX_HOME:-~/.codex}/sessions`), walked newest first by name and given up after 16 rollouts or a directory of more than 10000 entries, as windows `primary` and `secondary` from `used_percent`, `window_minutes` and `resets_at`; a null window is absent | `codex` |
 | `none` | no windows: only the usage-limit cooldown gates the agent | |
 
-Only claude and codex have a default. Every other agent, gemini and any fleet adapter included,
-must set `USAGE_SOURCE_<agent>`, to `none` when only the cooldown is to gate it: without one its cap
-is 0 and `check` names the key.
+Only claude and codex have a reading by default. agy's default is `none`: its quota shows only in
+an interactive panel, so its usage-limit cooldown gates it, unless `USAGE_SOURCE_agy` names a
+`json:` reading some other script writes. Every other agent, any fleet adapter included, must set
+`USAGE_SOURCE_<agent>`, to `none` when only the cooldown is to gate it: without one its cap is 0 and
+`check` names the key.
 
 `USAGE_FETCH_<agent>` is an executable that `harness usage refresh` runs when the reading is missing
 or older than `USAGE_REFRESH_AFTER` (default 120 s); it runs with no input or output and is killed
@@ -217,8 +234,11 @@ credential: it only picks the folder a tick runs with.
 $AGENT_ACCOUNTS_DIR/            for example $HOME/.agents-accounts
   claude/claude-<name>/         run as CLAUDE_CONFIG_DIR   (sign in: CLAUDE_CONFIG_DIR=<folder> claude auth login)
   codex/codex-<name>/           run as CODEX_HOME          (sign in: CODEX_HOME=<folder> codex login)
-  gemini/gemini-<name>/         run as GEMINI_CLI_HOME     (sign in: GEMINI_CLI_HOME=<folder> gemini)
 ```
+
+agy has no accounts: it keeps one sign-in in the OS keyring and its config under
+`~/.gemini/antigravity-cli`, which no variable moves, so `check` refuses an `agy@<name>` entry and
+says so.
 
 A name is 1 to 32 of `a-z`, `0-9` and `-`, not starting with `-`. The root is an absolute path;
 write it with `$HOME`, not `~`, since the dashboard expands only `$HOME` in a path key. An account
@@ -236,18 +256,23 @@ another agent as a sub-agent, and either would otherwise sign in as the default 
 |---|---|
 | `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `AWS_BEARER_TOKEN_BEDROCK` |
 | `codex` | `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE` |
-| `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE` |
+| `agy` | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_LOCATION` |
+| Google SDKs | `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `CLOUDSDK_CONFIG`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` |
 | the harness | `USAGE_CREDENTIALS_FILE`, which may name the default account's credentials file; an account's fetch gets its folder's own instead, when there is one |
 
-The list was read from Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3; a variable a
-later release adds is not on it. The supervisor on an account takes none of them into its cut-down
-environment either. An account signed in with an API key keeps that key in its folder.
+The list was read from Claude Code 2.1.332 and Codex 0.155.1, from the documentation of agy 1.5.19,
+and from what Google's SDKs and gcloud read; a variable a later release adds is not on it. Unsetting
+them is defence in depth, not a boundary. An account's tick shares the user's session and home
+folder: an agy it starts still signs in through the OS keyring, and a Google SDK still finds
+`~/.config/gcloud/application_default_credentials.json`. The supervisor on an account takes none of
+them into its cut-down environment either. An account signed in with an API key keeps that key in
+its folder.
 
 **Entries.** `agent@account:model` names an account in `TICK_MODELS`, `LANE_MODEL`,
 `SUPERVISOR_MODEL` and `state/tick-model`, as in
 `TICK_MODELS="claude@work:claude-opus-5-5 claude@home:claude-opus-5-5 codex@work:gpt-5.5"`. An entry
 without `@` runs as it always has, with the CLI's own default folder. An entry with no `:` whose
-text before `@` is `claude`, `codex` or `gemini` and whose text after it is an account name, such as
+text before `@` is `claude`, `codex` or `agy` and whose text after it is an account name, such as
 `claude@work`, names no model, and `check` refuses it. Any other bare model may hold `@`, as a
 Vertex model id does (`claude-opus-4@20250514`), and runs on `TICK_AGENT` as before. The runner sets the agent's
 variable to the account's folder for that tick only (`harness accounts env`), and records
@@ -273,7 +298,6 @@ source is `USAGE_SOURCE_<agent>_<account>`, else its folder's own default, and i
 |---|---|---|
 | `claude` | `claude-cache:<folder>/usage-cache.json` | none, so it allows nothing (below) |
 | `codex` | `codex-sessions:<folder>/sessions` | none, and it needs none |
-| `gemini` | `none` while `USAGE_SOURCE_gemini` is `none`; refused while it names a reading, with `an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_<account>`, logged once; unset, none | none |
 
 Two seats of the lists whose sources name one file or directory, one of them on an account, are
 refused: `harness usage` names them (`<seat> and <seat> both read their usage from <path>`), so
@@ -316,8 +340,7 @@ and name, whether it is signed in and how, when the sign-in ends where the CLI s
 and reading. It asks `claude auth status --json` with `CLAUDE_CONFIG_DIR` set and
 `codex login status` with `CODEX_HOME` set (`AGENT_BIN_<agent>`, 20 s each), and keeps from their
 answers only claude's `loggedIn`, `authMethod` and `loginExpiresAt` and the method word of codex's
-`Logged in using ...` line: never the email, organization or key either prints. Gemini's CLI has no
-command that answers without starting a session, so a gemini account reads `unknown`. Each answer
+`Logged in using ...` line: never the email, organization or key either prints. Each answer
 is kept, owner-only, in `$HARNESS_STATE/accounts/<agent>@<name>.json` and asked again once it is
 over 5 minutes old: by `harness usage refresh`, which the launcher and the runners run, for the
 accounts of the lists and, with `SUPERVISOR=1`, the supervisor's, and by `harness accounts` for
@@ -374,7 +397,7 @@ when they are set; on an account, its agent's variable names the account's folde
 |---|---|---|
 | `claude` | `-p --tools "" --restricted --strict-mcp-config --disable-slash-commands --no-session-persistence`, no `--dangerously-skip-permissions` | no built-in tool at all (`--tools ""`), no MCP server, no user, project or local settings and so no hooks or plugins (`--restricted`), no skills, nothing saved |
 | `codex` | `exec --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation -c web_search=disabled -` | no shell or exec tool, no apps, plugins, browser or web search, no MCP servers from `config.toml`; whatever else it runs is sandboxed read-only and offline |
-| `gemini` | refused | its headless mode keeps file reading and web fetching whatever `--approval-mode` says, so it cannot run without tools |
+| `agy` | refused | no flag of its CLI disables all its tools: without `--dangerously-skip-permissions` headless mode only denies the ones that ask, and `--mode plan` still runs read tools |
 
 `SUPERVISOR_FLAGS_<agent>` is held to an allowlist, not weighed: every flag in it must be one of
 the defaults above, given once, and the confining ones must all be there. For claude that is

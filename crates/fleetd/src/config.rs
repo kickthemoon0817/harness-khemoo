@@ -310,7 +310,7 @@ struct RawAdapter {
 enum Preset {
     Claude,
     Codex,
-    Gemini,
+    Agy,
 }
 
 struct PresetTable {
@@ -338,11 +338,19 @@ impl Preset {
                 max_concurrent: 1,
                 timeout_s: 3600,
             },
-            // Gemini runs headless when stdin is not a terminal, and reads the prompt from it.
-            Self::Gemini => PresetTable {
-                args: &["--model", "{model}"],
+            // agy reads a prompt from stdin only as stream-json, one NDJSON message a line. fleetd
+            // passes the dispatched prompt to stdin as it came, so the dispatcher sends that line.
+            Self::Agy => PresetTable {
+                args: &[
+                    "--model",
+                    "{model}",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                ],
                 models: &[],
-                match_exe: &["gemini"],
+                match_exe: &["agy"],
                 max_concurrent: 1,
                 timeout_s: 3600,
             },

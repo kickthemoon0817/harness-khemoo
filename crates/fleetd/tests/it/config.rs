@@ -109,18 +109,28 @@ preset = "codex"
 }
 
 #[test]
-fn the_gemini_preset_reads_its_prompt_from_stdin() {
+fn the_agy_preset_reads_its_prompt_from_stdin_as_stream_json() {
     let f = Fixture::new();
     let cfg = f
         .parse(
-            "[adapters.gemini]\npreset = \"gemini\"\nexe = \"{dir}/agent\"\nworkdir_roots = [\"{dir}/root\"]\nmodels = [\"gemini-3-pro\"]\n",
+            "[adapters.agy]\npreset = \"agy\"\nexe = \"{dir}/agent\"\nworkdir_roots = [\"{dir}/root\"]\nmodels = [\"model-flash\"]\n",
         )
         .unwrap();
-    let gemini = &cfg.adapters[0];
-    assert_eq!(gemini.match_exe, ["gemini"]);
-    let launch = gemini.launch.as_ref().unwrap();
-    let argv = launch.render(gemini.models.first(), &f.dir.join("root"));
-    assert_eq!(argv, ["--model", "gemini-3-pro"]);
+    let agy = &cfg.adapters[0];
+    assert_eq!(agy.match_exe, ["agy"]);
+    let launch = agy.launch.as_ref().unwrap();
+    let argv = launch.render(agy.models.first(), &f.dir.join("root"));
+    assert_eq!(
+        argv,
+        [
+            "--model",
+            "model-flash",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json"
+        ]
+    );
 }
 
 #[test]

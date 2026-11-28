@@ -46,16 +46,20 @@ HARNESS_HOME = "/srv/harness"
 HARNESS_INSTANCE_DIR = "/srv/harness/instance"
 TARGET_REPO = "/srv/checkout"
 
-[adapters.gemini]
-preset = "gemini"
-exe = "/usr/local/bin/gemini"
-args = ["--model", "{model}", "--yolo"]
-models = ["gemini-3-pro"]
+# agy, the Antigravity CLI: the harness sends its prompt as the one stream-json line it reads.
+[adapters.agy]
+preset = "agy"
+exe = "/home/dev/.local/bin/agy"
+args = [
+    "--model", "{model}", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+]
+models = ["gemini-3.8-flash-low"]
 workdir_roots = ["/srv/checkout"]
 max_concurrent = 2
 timeout_s = 9000
 
-[adapters.gemini.env]
+[adapters.agy.env]
 HARNESS_HOME = "/srv/harness"
 HARNESS_INSTANCE_DIR = "/srv/harness/instance"
 TARGET_REPO = "/srv/checkout"

@@ -1,6 +1,6 @@
 20261126T010013Z slot2 chains tick 4 after 4521s: claude=10[five_hour:49%,weekly:20%] allowed=10 claimable=1 young=0
 20261126T011002Z claude=10[five_hour:0%,weekly:50%] codex=2[primary:71.5%] allowed=10 busy=5 claimable=1 -> spawning 1
 20261126T011500Z slot3 claude:claude-sonnet-5-2 hit its usage limit; cooling 1800s
-20261126T012000Z no fresh usage reading for gemini; none of its ticks start
-20261126T012604Z claude=10[five_hour:0%,weekly:51%] gemini=0[unknown] allowed=10 busy=6 ready=1 -> spawning 1 landing tick
+20261126T012000Z no fresh usage reading for agy; none of its ticks start
+20261126T012604Z claude=10[five_hour:0%,weekly:51%] agy=0[unknown] allowed=10 busy=6 ready=1 -> spawning 1 landing tick
 20261126T013206Z slot5 chains tick 3 after 4193s: claude=10[five_hour:52%,weekly:30%] allowed=10 claimable=2 young=0

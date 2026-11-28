@@ -63,10 +63,15 @@ SUP="$HARNESS_STATE/supervisor"
 # shows. AGENT_BIN_<agent> names the executable (default: the agent's name), AGENT_FLAGS_<agent> its
 # flags (set but empty passes none) and AGENT_LIMIT_RE_<agent> the extended regex its usage-limit
 # message matches. Through fleet any adapter runs, and the device's fleetd.toml fixes its argv.
-LOCAL_AGENTS="claude codex gemini"
+# agy, the Antigravity CLI, reads its prompt only as one stream-json line and answers in NDJSON
+# events (agent_prompt, agy_result).
+LOCAL_AGENTS="claude codex agy"
 CLAUDE_LIMIT_RE="You've (reached|hit) your [^.]{0,40}limit"
 CODEX_LIMIT_RE="You've hit your usage limit|rate_limit_reached"
-GEMINI_LIMIT_RE="TerminalQuotaError|RESOURCE_EXHAUSTED|exhausted your daily quota|exhausted your capacity|Quota exceeded|status 429"
+# Matched, case-insensitive, against the error of agy's ERROR result. agy documents no usage-limit
+# text, and none has been seen: these are the words a quota error is likely to carry, 429 as a word
+# only, so a trace id holding it is none.
+AGY_LIMIT_RE='RESOURCE_EXHAUSTED|quota|rate.?limit|\b429\b'
 agent_setting() {  # $1 = setting, $2 = agent, $3 = default when the setting is unset
     local name="$1_$2"
     if [ -n "${!name+x}" ]; then printf '%s' "${!name}"; else printf '%s' "$3"; fi
@@ -76,9 +81,9 @@ agent_limit_re() {
     case $1 in
         claude) agent_setting AGENT_LIMIT_RE claude "$CLAUDE_LIMIT_RE" ;;
         codex) agent_setting AGENT_LIMIT_RE codex "$CODEX_LIMIT_RE" ;;
-        gemini) agent_setting AGENT_LIMIT_RE gemini "$GEMINI_LIMIT_RE" ;;
+        agy) agent_setting AGENT_LIMIT_RE agy "$AGY_LIMIT_RE" ;;
         # A fleet adapter of another name runs one of these CLIs under it.
-        *) agent_setting AGENT_LIMIT_RE "$1" "$CLAUDE_LIMIT_RE|$CODEX_LIMIT_RE|$GEMINI_LIMIT_RE" ;;
+        *) agent_setting AGENT_LIMIT_RE "$1" "$CLAUDE_LIMIT_RE|$CODEX_LIMIT_RE" ;;
     esac
 }
 # Sets argv to the command line that runs agent $1 on model $2 here.
@@ -88,7 +93,7 @@ agent_argv() {
     case $1 in
         claude) flags=$(agent_setting AGENT_FLAGS claude --dangerously-skip-permissions) ;;
         codex) flags=$(agent_setting AGENT_FLAGS codex --dangerously-bypass-approvals-and-sandbox) ;;
-        gemini) flags=$(agent_setting AGENT_FLAGS gemini --yolo) ;;
+        agy) flags=$(agent_setting AGENT_FLAGS agy --dangerously-skip-permissions) ;;
     esac
     # Split on whitespace, never globbed.
     read -ra words <<<"$flags"
@@ -96,20 +101,36 @@ agent_argv() {
     case $1 in
         claude) argv+=(-p --model "$2") ;;
         codex) argv+=(exec --model "$2") ;;
-        # gemini runs headless because its stdin is not a terminal.
-        gemini) argv+=(--model "$2") ;;
+        agy) argv+=(--model "$2" --input-format stream-json --output-format stream-json) ;;
     esac
-    # The entry names the model; a model flag among the flags would contradict it.
+    # The entry names the model, and the profile how agy reads and answers; a flag among the flags
+    # that set either would contradict it.
     for word in "${words[@]}"; do
         if [ -n "$skip" ]; then skip=""; continue; fi
-        case $word in
-            --model|-m) skip=1 ;;
-            --model=*|-m?*) ;;
+        case $1:$word in
+            *:--model|*:-m) skip=1 ;;
+            *:--model=*|*:-m?*) ;;
+            # -p, --print and --prompt take the prompt as their value, which must never be argv.
+            agy:--input-format|agy:--output-format|agy:-p|agy:--print|agy:--prompt) skip=1 ;;
+            agy:--input-format=*|agy:--output-format=*|agy:--print=*|agy:--prompt=*|agy:-p?*) ;;
             *) argv+=("$word") ;;
         esac
     done
     [ "$1" = codex ] && argv+=(-)
     return 0
+}
+
+# Writes the prompt on stdin, as agent $1 reads it: agy takes it as one stream-json user message,
+# encoded by jq, and every other agent as text.
+agent_prompt() {  # $1 = agent, $2 = the lane line
+    if [ "$1" = agy ]; then compose_prompt "$2" | jq -Rsc '{event: "user", message: {content: .}}'
+    else compose_prompt "$2"; fi
+}
+# Prints the last `result` event agy wrote to the tick log from byte $1, as one JSON object, or
+# nothing when it wrote none. Lines that are not JSON, such as its stderr, are passed over.
+agy_result() {
+    tail -c +"$1" "$log" | jq -cR 'fromjson? | select(type == "object" and .event == "result") | .result | select(type == "object")' \
+        2>/dev/null | tail -n 1
 }
 
 # The launcher fires every couple of minutes: a state that persists is logged once, not each time.
@@ -243,8 +264,7 @@ supervisor_entry() {
 # never add one. What the defaults guarantee (docs/INSTANCE.md): claude has no built-in tool
 # (--tools ""), no MCP server (--strict-mcp-config) and no settings, hooks or plugins
 # (--restricted); codex runs read-only and offline with its shell, exec, apps, plugins, browser and
-# web search off. Gemini has no flag that takes its file and web tools away in headless mode, so it
-# never supervises.
+# web search off. agy has no flag that disables all its tools, so it never supervises.
 SUPERVISOR_CODEX_DISABLED="shell_tool unified_exec apps plugins browser_use computer_use in_app_browser image_generation"
 supervisor_argv() {
     local name="SUPERVISOR_FLAGS_$1" word f
@@ -267,7 +287,7 @@ supervisor_argv() {
     fi
     case $1 in
         claude|codex) supervisor_flags_ok "$1" "${flags[@]}" || { refusal="$name: $refusal"; return 1; } ;;
-        gemini) refusal="gemini cannot supervise: no flag of its CLI takes its file and web tools away in headless mode"; return 1 ;;
+        agy) refusal="agy cannot supervise: no flag of its CLI disables all its tools, and --mode plan still runs read tools"; return 1 ;;
         *) refusal="$1 cannot supervise: only claude and codex run here without tools"; return 1 ;;
     esac
     case $1 in
@@ -351,9 +371,28 @@ directive_lane() {
     return 0
 }
 
+# Whether the agy at path $1 is the Antigravity CLI: its --help names --input-format. The answer is
+# kept in $HARNESS_STATE/agy-cli for that path and modification time, since the launcher asks at
+# every firing and --help may take seconds. Only an answer --help gave is kept: one that timed out or
+# printed nothing is asked again, so a slow first probe never refuses the CLI until it changes.
+agy_is_cli() {
+    local key kept="$HARNESS_STATE/agy-cli" verdict=no help rc
+    key="$1 $(stat -L -c %Y -- "$1" 2>/dev/null)"
+    if [ -s "$kept" ] && [ "$(head -c 4096 "$kept" | sed -n 1p)" = "$key" ]; then
+        verdict=$(sed -n 2p "$kept")
+    else
+        help=$(timeout 20 "$1" --help </dev/null 2>&1); rc=$?
+        grep -q -- --input-format <<<"$help" && verdict=yes
+        if [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && [ -n "$help" ]; then
+            printf '%s\n%s\n' "$key" "$verdict" >"$kept.$$" && mv -f "$kept.$$" "$kept"
+        fi
+    fi
+    [ "$verdict" = yes ]
+}
+
 # Prints one line per thing the instance lacks; a tick cannot run without any of them.
 instance_missing() {
-    local root argv a bin k name s own accounts
+    local root argv a bin k name s accounts
     if [ ! -r "$HARNESS_ENV_FILE" ]; then echo "$HARNESS_ENV_FILE"
     else
         if [ -z "${TARGET_REPO:-}" ]; then echo "$HARNESS_ENV_FILE: TARGET_REPO unset"
@@ -379,23 +418,21 @@ instance_missing() {
                 case " $LOCAL_AGENTS " in
                     *" $a "*)
                         bin=$(agent_bin "$a")
-                        type -P -- "$bin" >/dev/null || echo "an executable AGENT_BIN_$a ($bin)" ;;
+                        if ! type -P -- "$bin" >/dev/null; then echo "an executable AGENT_BIN_$a ($bin)"
+                        # The Antigravity IDE ships a launcher of the same name, which takes no prompt.
+                        elif [ "$a" = agy ] && ! agy_is_cli "$(type -P -- "$bin")"; then
+                            echo "an agy that is the Antigravity CLI: $(type -P -- "$bin") takes no --input-format, so it is another program of that name, such as the Antigravity IDE's launcher; install the CLI, or set AGENT_BIN_agy=\$HOME/.local/bin/agy where it is"
+                        fi ;;
                     *) echo "$HARNESS_ENV_FILE: agent $a needs FLEET_DISPATCH=1; only $LOCAL_AGENTS run locally" ;;
                 esac
             done
         fi
     fi
     for a in $(list_agents); do
-        # Only claude's cache and codex's rollouts are found without being named. An account of
-        # another agent may name its own, else it takes the agent's.
+        # Only claude's cache and codex's rollouts are found without being named, and agy reads none.
         name="USAGE_SOURCE_$a"
-        case $a in claude|codex) ;; *)
-            for s in $(list_seats | grep -E "^$a(@|\$)"); do
-                own=""
-                [ "$s" != "$a" ] && own="USAGE_SOURCE_${a}_$(printf '%s' "${s#*@}" | tr - _)"
-                [ -n "${!name:-}" ] || { [ -n "$own" ] && [ -n "${!own:-}" ]; } \
-                    || echo "$HARNESS_ENV_FILE: ${own:+$own or }$name unset: name $s's usage source, or none"
-            done ;;
+        case $a in claude|codex|agy) ;; *)
+            [ -n "${!name:-}" ] || echo "$HARNESS_ENV_FILE: $name unset: name $a's usage source, or none" ;;
         esac
         # An empty pattern matches every line, so every attempt would read as a usage limit.
         name="AGENT_LIMIT_RE_$a"
@@ -426,7 +463,7 @@ instance_missing() {
     # An entry naming an account must name a model too: `claude@work` alone reads as a model. A bare
     # model may hold `@` otherwise, as a Vertex model id does.
     for s in $(model_list) $(lane_on && printf '%s' "$LANE_MODEL") $([ -n "$supervisor" ] && printf '%s' "${SUPERVISOR_MODEL:-}"); do
-        [[ "$s" == *@* && "$s" != *:* && "${s%%@*}" =~ ^(claude|codex|gemini)$ && "${s#*@}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] \
+        [[ "$s" == *@* && "$s" != *:* && "${s%%@*}" =~ ^(claude|codex|agy)$ && "${s#*@}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] \
             && echo "$HARNESS_ENV_FILE: '$s' names an account but no model: write agent@account:model"
     done
     # Each account named must be a folder a tick can run with; a fleet device keeps its own, and the
@@ -709,28 +746,21 @@ record_tick() {
         && mv -f "$slot_file.$$" "$slot_file")
 }
 
-# Whether attempt status $2 of agent $1 can be a usage limit. Gemini exits non-zero on every error
-# it ends on, a quota error included, so its message echoed by a tick that went on is not one.
-# Claude's and Codex's status on a limit is not known, so for them the message alone decides.
-limit_failed() {
-    [ "$1" != gemini ] || [ "$2" -ne 0 ]
-}
-
-# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message.
-# For claude and codex, one of its last 5 non-empty lines starts with it, after spaces and an error
-# prefix such as `Error:` or `ERROR:`: an agent that quotes the sentence mid-output, from an issue
-# body or a diff, writes more after it. Gemini ends a quota error with a stack trace, or wraps it in
-# `[API Error: ...]`, so for it the message may be anywhere in the last 40 lines; limit_failed has
-# already required the failure that makes it one.
+# Whether the attempt's output, from byte $1 of the tick log, ends on agent $2's usage-limit message:
+# one of its last 5 non-empty lines starts with it, after spaces and an error prefix such as `Error:`
+# or `ERROR:`. An agent that quotes the sentence mid-output, from an issue body or a diff, writes
+# more after it.
 limit_message() {
     local re
     re=$(agent_limit_re "$2")
-    if [ "$2" = gemini ]; then
-        tail -c +"$1" "$log" | tail -n 40 | grep -qE -- "$re"
-    else
-        tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
-            | grep -qE -- "^[[:space:]]*(([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($re)"
-    fi
+    tail -c +"$1" "$log" | grep -v '^[[:space:]]*$' | tail -n 5 \
+        | grep -qE -- "^[[:space:]]*(([A-Za-z]*[Ee]rror|ERROR):[[:space:]]*)?($re)"
+}
+# Whether agy's result $1, as agy_result printed it, is a usage limit: ERROR, its error matching the
+# limit regex, case-insensitive. Text the agent writes in its turn never reaches that field.
+agy_limited() {
+    [ "$(jq -r '.status // ""' <<<"$1" 2>/dev/null)" = ERROR ] \
+        && jq -r '.error // "" | tostring' <<<"$1" | grep -qiE -- "$(agent_limit_re agy)"
 }
 
 # Prints each device `fleet status --json` reports, then `@missing <agent>` for each agent of the
@@ -791,6 +821,7 @@ if [ "${1:-}" = check ]; then
     fi
     for a in $(list_agents); do
         if [ -n "$fleet" ]; then echo "agent $a: fleet adapter $a"
+        elif [ "$a" = agy ]; then agent_argv agy '<model>'; echo "agent agy: ${argv[*]} < prompt as one stream-json line"
         elif [[ " $LOCAL_AGENTS " == *" $a "* ]]; then agent_argv "$a" '<model>'; echo "agent $a: ${argv[*]} < prompt"
         else echo "agent $a: no local profile"; fi
     done
@@ -958,14 +989,25 @@ if [ "${1:-}" = "runner" ]; then
             # itself, cannot reset them (bash keeps a signal ignored on entry ignored); env can, so
             # `kill -INT` and `timeout -s INT` reach the agent's tools.
             setsid env --default-signal=INT,QUIT ${account_args[@]+"${account_args[@]}"} HARNESS_TICK="$marker" "${argv[@]}" \
-                < <(compose_prompt "$lane") >>"$log" 2>&1 &
+                < <(agent_prompt "$agent" "$lane") >>"$log" 2>&1 &
             tick_pid=$!
             record_tick "$tick_pid" "$seat" "$model" "$kind"
             wait "$tick_pid"; rc=$?
             rm -f "$slot_file"
             limited=""
-            [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" \
-                && limit_message "$log_from" "$agent" && limited=1
+            short=""; [ $(( $(date +%s) - run_s )) -lt "${CHAIN_MIN_TICK_S:-180}" ] && short=1
+            if [ "$agent" = agy ]; then
+                # Its result decides: a turn that ended in ERROR failed whatever agy exited with,
+                # and one with no result never finished. The result is read once, before its
+                # response, which the agent wrote and may shape as an event, joins the log as the
+                # tick's summary.
+                result=$(agy_result "$log_from")
+                [ "$(jq -r '.status // ""' <<<"$result" 2>/dev/null)" = SUCCESS ] || { [ "$rc" -eq 0 ] && rc=1; }
+                [ -n "$short" ] && agy_limited "$result" && limited=1
+                jq -r '.response // empty | tostring' <<<"$result" 2>/dev/null >>"$log"
+            else
+                [ -n "$short" ] && limit_message "$log_from" "$agent" && limited=1
+            fi
             # The trailer makes a silently dead tick distinguishable from a quiet one.
             echo "[tick.sh] exit=$rc duration=$(( $(date +%s) - run_s ))s agent=$seat model=$model" >>"$log"
             if [ -n "$limited" ]; then
@@ -1052,7 +1094,7 @@ if [ "${1:-}" = supervisor ]; then
     dur=$(( $(date +%s) - run_s ))
     cat "$answer" >>"$log"
     echo "[tick.sh] exit=$rc duration=${dur}s agent=$seat model=$model" >>"$log"
-    if [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && limit_failed "$agent" "$rc" && tail -n 40 "$log" | grep -qE -- "$(agent_limit_re "$agent")"; then
+    if [ "$dur" -lt "${CHAIN_MIN_TICK_S:-180}" ] && tail -n 40 "$log" | grep -qE -- "$(agent_limit_re "$agent")"; then
         mkdir -p "$MODEL_COOL"; touch "$MODEL_COOL/$entry"
         echo "$(date -u +%Y%m%dT%H%M%SZ) supervisor $entry hit its usage limit; cooling ${MODEL_COOLDOWN_S}s" >>"$LOGS/allocator.log"
     fi

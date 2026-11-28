@@ -254,9 +254,10 @@ check "a second supervisor is kept out by the lock" '[ "$(wc -l < "$SUP/runs.log
 kill "${holders[-1]}" 2>/dev/null; wait "${holders[-1]}" 2>/dev/null
 
 # --- agents that cannot run confined are refused -------------------------------------------------
-write_env 1 "SUPERVISOR_MODEL=gemini:pro"
+write_env 1 "SUPERVISOR_MODEL=agy:model-flash"
 out=$("$H/bin/tick.sh" check 2>&1); rc=$?
-check "gemini is refused as the supervisor, saying why" '[ "$rc" -eq 1 ] && [[ "$out" == *"gemini cannot supervise"* ]]' "rc=$rc $(grep -i supervis <<<"$out")"
+check "agy is refused as the supervisor, saying why" \
+    '[ "$rc" -eq 1 ] && [[ "$out" == *"agy cannot supervise: no flag of its CLI disables all its tools"* ]]' "rc=$rc $(grep -i supervis <<<"$out")"
 # The flags are held to an allowlist: each of these would give the supervisor a tool, a setting,
 # an MCP server or a looser sandbox, and is refused, so the supervisor does not run.
 confine="--tools= --restricted --strict-mcp-config"

@@ -2,8 +2,9 @@
 //! and the ticks its usage allows.
 //!
 //! An account is a folder the owner signed in to once, by hand, with the agent's own CLI:
-//! `<root>/claude/claude-<name>` is run as `CLAUDE_CONFIG_DIR`, `<root>/codex/codex-<name>` as
-//! `CODEX_HOME` and `<root>/gemini/gemini-<name>` as `GEMINI_CLI_HOME`. The harness never creates
+//! `<root>/claude/claude-<name>` is run as `CLAUDE_CONFIG_DIR` and `<root>/codex/codex-<name>` as
+//! `CODEX_HOME`. agy has none: it keeps its one sign-in in the OS keyring and its config under
+//! `~/.gemini/antigravity-cli`, which no variable moves. The harness never creates
 //! one, signs in or reads a credential: it names the folder a tick runs with, and asks the agent's
 //! CLI whether that folder is signed in. Of the CLI's answer only the fields [`SignIn`] holds are
 //! kept, so no email, organization or token reaches a file, a log, the dashboard or the supervisor.
@@ -24,18 +25,16 @@ use crate::supervisor::{epoch_of, now_s};
 use crate::usage::{self, AgentUsage, Lookup};
 
 /// The agents an account can belong to, each with the variable that points its CLI at a folder.
-const AGENTS: [(&str, &str); 3] = [
-    ("claude", "CLAUDE_CONFIG_DIR"),
-    ("codex", "CODEX_HOME"),
-    ("gemini", "GEMINI_CLI_HOME"),
-];
+const AGENTS: [(&str, &str); 2] = [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")];
 /// The variables other than a folder through which any agent's CLI signs in: a key, a token, a
 /// cloud provider's credentials or the switch to one, and the harness's own pointer at the default
 /// account's credentials file. A tick, fetch or sign-in check on an account runs without every one of
 /// them, its own agent's and the others', since a tick may start another agent as a sub-agent: the
-/// default account must never sign in on an account's behalf. Read from Claude Code 2.1.332, Codex
-/// 0.155.1 and Gemini CLI 0.27.3.
-const CREDENTIALS: [&str; 23] = [
+/// default account must never sign in on an account's behalf. Read from Claude Code 2.1.332 and
+/// Codex 0.155.1, from the Antigravity CLI's documentation for agy 1.5.19, and from what Google's
+/// SDKs and gcloud read. Unsetting them is defence in depth, not a boundary: the keyring and the
+/// home folder an agy or a gcloud login keeps its credentials in are shared.
+const CREDENTIALS: [&str; 32] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -52,12 +51,21 @@ const CREDENTIALS: [&str; 23] = [
     "CODEX_ACCESS_TOKEN",
     "OPENAI_IDENTITY_TOKEN_FILE",
     "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
+    "GOOGLE_GEMINI_BASE_URL",
+    "AGY_ADC_AUTH",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_API_KEY",
     "GOOGLE_GENAI_USE_VERTEXAI",
     "GOOGLE_GENAI_USE_GCA",
     "GOOGLE_CLOUD_ACCESS_TOKEN",
     "GEMINI_DEFAULT_AUTH_TYPE",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCLOUD_PROJECT",
+    "CLOUDSDK_CONFIG",
+    "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+    "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
     "USAGE_CREDENTIALS_FILE",
 ];
 /// How long a sign-in check holds: the launcher fires every couple of minutes, and no firing should
@@ -156,7 +164,7 @@ impl Account {
     pub fn resolve(env: Lookup, agent: &str, name: &str) -> Result<Self, String> {
         if variable(agent).is_none() {
             return Err(format!(
-                "{agent} has no account folders: only claude, codex and gemini do"
+                "{agent} has no account folders: only claude and codex do"
             ));
         }
         if !valid_name(name) {
@@ -337,15 +345,14 @@ fn parse_codex(output: &str) -> (SignState, Option<String>) {
     (SignState::Unknown, None)
 }
 
-/// Asks the account's CLI, with its variable set to the folder and its agent's credential variables
-/// unset, whether it is signed in. Gemini's CLI has no command that answers without starting a
-/// session, so its accounts read as unknown.
+/// Asks the account's CLI, with its variable set to the folder and every agent's credential
+/// variables unset, whether it is signed in.
 fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
     let bin = env(&format!("AGENT_BIN_{}", account.agent)).unwrap_or_else(|| account.agent.clone());
-    let words: &[&str] = match account.agent.as_str() {
-        "claude" => &["auth", "status", "--json"],
-        "codex" => &["login", "status"],
-        _ => &[],
+    let words: &[&str] = if account.agent == "claude" {
+        &["auth", "status", "--json"]
+    } else {
+        &["login", "status"]
     };
     let mut sign_in = SignIn {
         state: SignState::Unknown,
@@ -354,10 +361,6 @@ fn probe(env: Lookup, account: &Account, now: u64) -> SignIn {
         checked_at: now,
         reason: Some(UNREADABLE.to_owned()),
     };
-    if words.is_empty() {
-        sign_in.reason = Some(format!("{}'s CLI has no sign-in check", account.agent));
-        return sign_in;
-    }
     let argv: Vec<String> = std::iter::once(bin)
         .chain(words.iter().map(|word| (*word).to_owned()))
         .collect();
@@ -697,7 +700,7 @@ pub(crate) mod tests {
     #[test]
     fn each_agent_resolves_to_its_own_folder_and_variable() {
         let root = scratch("resolve");
-        for agent in ["claude", "codex", "gemini"] {
+        for agent in ["claude", "codex", "agy"] {
             std::fs::create_dir_all(root.join(agent).join(format!("{agent}-work"))).unwrap();
         }
         let env = env_of(&[("AGENT_ACCOUNTS_DIR", root.to_str().unwrap())]);
@@ -709,9 +712,11 @@ pub(crate) mod tests {
             Account::resolve(&env, "codex", "work").unwrap().variable(),
             "CODEX_HOME"
         );
-        assert_eq!(
-            Account::resolve(&env, "gemini", "work").unwrap().variable(),
-            "GEMINI_CLI_HOME"
+        assert!(
+            Account::resolve(&env, "agy", "work")
+                .unwrap_err()
+                .contains("only claude and codex do"),
+            "agy keeps no account in a folder, whatever folders exist"
         );
         assert!(Account::resolve(&env, "aider", "work").is_err());
         assert!(
@@ -723,8 +728,7 @@ pub(crate) mod tests {
             found(&env).unwrap(),
             [
                 ("claude".to_owned(), "work".to_owned()),
-                ("codex".to_owned(), "work".to_owned()),
-                ("gemini".to_owned(), "work".to_owned())
+                ("codex".to_owned(), "work".to_owned())
             ]
         );
         std::fs::remove_dir_all(&root).unwrap();
@@ -994,20 +998,23 @@ pub(crate) mod tests {
             (kept.method, kept.expires_at, kept.reason),
             (None, None, None)
         );
-        std::fs::create_dir_all(root.join("accounts/gemini/gemini-a")).unwrap();
-        let env = env_of(&[(
-            "AGENT_ACCOUNTS_DIR",
-            root.join("accounts").to_str().unwrap(),
-        )]);
-        let account = Account::resolve(&env, "gemini", "a").unwrap();
+        std::fs::create_dir_all(root.join("accounts/codex/codex-a")).unwrap();
+        let env = env_of(&[
+            (
+                "AGENT_ACCOUNTS_DIR",
+                root.join("accounts").to_str().unwrap(),
+            ),
+            ("AGENT_BIN_codex", "/nonexistent/codex"),
+        ]);
+        let account = Account::resolve(&env, "codex", "a").unwrap();
         std::fs::write(
-            state.join("accounts/gemini@a.json"),
+            state.join("accounts/codex@a.json"),
             r#"{"state": "signed_out", "method": null, "expires_at": null, "checked_at": 9000000000}"#,
         )
         .unwrap();
         refresh_logged(&env, &state, &account, 1_000);
         assert_eq!(
-            cached(&state, "gemini@a").unwrap().checked_at,
+            cached(&state, "codex@a").unwrap().checked_at,
             1_000,
             "a check dated ahead of the clock is checked again"
         );
@@ -1045,7 +1052,11 @@ pub(crate) mod tests {
         );
         for name in [
             "CODEX_API_KEY",
-            "GOOGLE_GENAI_USE_VERTEXAI",
+            "AGY_ADC_AUTH",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_API_KEY",
+            "GEMINI_DEFAULT_AUTH_TYPE",
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
             "AWS_BEARER_TOKEN_BEDROCK",
             "USAGE_CREDENTIALS_FILE",
         ] {
@@ -1054,15 +1065,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_missing_cli_or_gemini_reads_unknown() {
+    fn a_missing_cli_reads_unknown() {
         let root = scratch("unknown");
-        std::fs::create_dir_all(root.join("gemini/gemini-a")).unwrap();
+        std::fs::create_dir_all(root.join("codex/codex-a")).unwrap();
         std::fs::create_dir_all(root.join("claude/claude-a")).unwrap();
         let env = env_of(&[
             ("AGENT_ACCOUNTS_DIR", root.to_str().unwrap()),
             ("AGENT_BIN_claude", "/nonexistent/claude"),
+            ("AGENT_BIN_codex", "/nonexistent/codex"),
         ]);
-        for agent in ["gemini", "claude"] {
+        for agent in ["codex", "claude"] {
             let account = Account::resolve(&env, agent, "a").unwrap();
             assert_eq!(probe(&env, &account, 5).state, SignState::Unknown);
         }

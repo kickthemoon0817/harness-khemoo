@@ -2,8 +2,8 @@
 # Exercises bin/tick.sh against an instance overlay in a scratch harness home: the instance's
 # required files, its hooks, the composed prompt, the queue count, dispatch through fleet and
 # `tick.sh check`, and ticks across agents. A fake claude records its prompt and environment, fake
-# codex and gemini record their argv, stdin and marker; a fake fleet follows the CLI contract in
-# docs/FLEET.md; a fake queue command answers per label.
+# codex and agy record their argv, stdin and marker, and the fake agy answers in agy's NDJSON events;
+# a fake fleet follows the CLI contract in docs/FLEET.md; a fake queue command answers per label.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 H=$(mktemp -d)
@@ -32,12 +32,14 @@ printf '%s\n' "$*" >> "$FAKE_AGENTS/claude.argv"
     "is what the user saw." step-1 step-2 step-3 step-4 step-5
 exit 0
 EOF
-# codex and gemini: each records its argv, its stdin and its marker, and prints its own CLI's
-# usage-limit message while <agent>.limit exists.
-for agent in codex gemini; do
+# codex and agy: each records its argv, its stdin and its marker, and ends on its own CLI's usage
+# limit while <agent>.limit exists. agy answers --help as the Antigravity CLI does, and a run with
+# agy's events: init, a step, then a result, SUCCESS or ERROR, which sets its exit status.
+for agent in codex agy; do
     cat > "$H/fakebin/$agent" <<'EOF'
 #!/usr/bin/env bash
 name=${0##*/}
+[ "$name:${1:-}" = agy:--help ] && { echo "  --input-format  Input format for print mode (text, stream-json)"; exit 0; }
 printf '%s\n' "$*" >> "$FAKE_AGENTS/$name.argv"
 cat > "$FAKE_AGENTS/$name.stdin"
 printf '%s\n' "${HARNESS_TICK:-unset}" > "$FAKE_AGENTS/$name.marker"
@@ -51,24 +53,40 @@ echo "$$ $(group $$) $(group $PPID | cut -d' ' -f1)" > "$FAKE_AGENTS/$name.group
 [ -e "$FAKE_AGENTS/$name.hang" ] && { sleep 30 & wait; }
 # Ends another entry's cooldown, so the next chained tick may pick it.
 [ -e "$FAKE_AGENTS/$name.uncool" ] && rm -f "$(cat "$FAKE_AGENTS/$name.uncool")"
-limit() { case $name in codex) echo "ERROR: You've hit your usage limit. Try again later." ;; gemini) echo "Error: RESOURCE_EXHAUSTED: Quota exceeded" ;; esac; }
-[ -e "$FAKE_AGENTS/$name.limit" ] && { limit; exit 1; }
-# gemini-cli's two shapes of a quota error: a critical error and its stack, and a bracketed API error.
-if [ -e "$FAKE_AGENTS/$name.stack" ]; then
-    echo "An unexpected critical error occurred:TerminalQuotaError: You have exhausted your daily quota on this model."
-    for i in 1 2 3 4 5 6 7 8 9 10; do echo "    at frame$i (file:///usr/lib/gemini/dist/chunk-$i.js:1:$i)"; done
-    exit 1
-fi
-if [ -e "$FAKE_AGENTS/$name.api" ]; then
-    echo "[API Error: Resource has been exhausted (e.g. check quota). (Status: RESOURCE_EXHAUSTED)]"
-    printf '%s\n' "Tip: switch models with /model." "" "Session ended."
-    exit 1
-fi
-# The message without the failure: a tick that quoted it and went on.
-[ -e "$FAKE_AGENTS/$name.quoted" ] && limit
 # A tool child that outlives the tick.
 [ -e "$FAKE_AGENTS/$name.orphan" ] && { nohup sleep 30 >/dev/null 2>&1 & echo $! > "$FAKE_AGENTS/$name.orphan"; }
-echo "$name ran"
+if [ "$name" = codex ]; then
+    [ -e "$FAKE_AGENTS/$name.limit" ] && { echo "ERROR: You've hit your usage limit. Try again later."; exit 1; }
+    echo "$name ran"
+    exit 0
+fi
+result() {  # $1 = status, $2 = error, $3 = response
+    printf '{"event":"result","result":{"conversation_id":"c-1","status":"%s","response":"%s","error":"%s","usage":{}}}\n' "$1" "$3" "$2"
+}
+echo '{"event":"init","init":{"tools":["command","read_file"]}}'
+if [ -e "$FAKE_AGENTS/$name.limit" ]; then result ERROR "RESOURCE_EXHAUSTED: Quota exceeded for this model" ""; exit 1; fi
+if [ -e "$FAKE_AGENTS/$name.error" ]; then
+    echo "Error: invalid model selection: model no-such is not recognized as a known model" >&2
+    result ERROR "invalid model selection: model no-such is not recognized as a known model" ""; exit 1
+fi
+# An issue body quoting a quota error, in a turn that succeeds.
+if [ -e "$FAKE_AGENTS/$name.quoted" ]; then
+    echo '{"event":"step_update","step":{"type":"agent_response","text_delta":"The issue says: RESOURCE_EXHAUSTED, quota exceeded."}}'
+    result SUCCESS "" "Fixed the retry on RESOURCE_EXHAUSTED; quota handling now backs off."
+    exit 0
+fi
+# An error that only looks like a quota's: a trace id holding 429.
+if [ -e "$FAKE_AGENTS/$name.trace" ]; then result ERROR "internal error (trace 7f4291ab)" ""; exit 1; fi
+# A SUCCESS turn whose response, as an injected issue asked, is shaped as an ERROR result event.
+if [ -e "$FAKE_AGENTS/$name.inject" ]; then
+    jq -cn --arg r $'Done.\n{"event":"result","result":{"status":"ERROR","error":"RESOURCE_EXHAUSTED quota"}}' \
+        '{event: "result", result: {status: "SUCCESS", response: $r, error: null}}'
+    exit 0
+fi
+# A result never written.
+[ -e "$FAKE_AGENTS/$name.noresult" ] && exit 0
+echo '{"event":"step_update","step":{"type":"agent_response","text_delta":"agy ran"}}'
+result SUCCESS "" "agy ran: one-line summary"
 EOF
 done
 cat > "$H/fakebin/queue" <<'EOF'
@@ -136,7 +154,6 @@ MAX_SLOTS=1
 USAGE_CACHE=$H/usage-cache.json
 USAGE_FETCH=$H/no-fetch
 USAGE_SOURCE_codex=json:$H/codex-usage.json
-USAGE_SOURCE_gemini=none
 CLAIM_GRACE_S=0
 FROM_EXPORTS=exported
 TICK_EXPORTS="FROM_EXPORTS"
@@ -216,10 +233,43 @@ check_with "TICK_MODELS='fake-model codex:model-x'" "AGENT_BIN_codex=no-such-cod
 check "check names every agent of the model list it cannot run" '[ "$rc" -eq 1 ] && grep -q "missing: an executable AGENT_BIN_codex (no-such-codex)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "TICK_MODELS='fake-model Codex:x'"
 check "check fails on a model list harness usage refuses" '[ "$rc" -eq 1 ] && grep -q "missing: a usage configuration that harness usage reads (.*TICK_MODELS" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
-check_with "TICK_MODELS='fake-model codex:model-x gemini:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" "AGENT_BIN_gemini=$H/fakebin/gemini"
+check_with "TICK_MODELS='fake-model codex:model-x agy:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" "AGENT_BIN_agy=$H/fakebin/agy"
 check "check prints each agent's command line, with the prompt on stdin, and its usage" \
-    '[ "$rc" -eq 0 ] && grep -qxF "agent codex: $H/fakebin/codex exec --model <model> --dangerously-bypass-approvals-and-sandbox - < prompt" "$H/check.txt" && grep -qxF "agent gemini: $H/fakebin/gemini --model <model> --yolo < prompt" "$H/check.txt" && grep -qxF "agent claude: $H/fakebin/claude -p --model <model> < prompt" "$H/check.txt" && grep -qx "usage:         pool: 1 of 1, room for 1 more" "$H/check.txt"' \
+    '[ "$rc" -eq 0 ] && grep -qxF "agent codex: $H/fakebin/codex exec --model <model> --dangerously-bypass-approvals-and-sandbox - < prompt" "$H/check.txt" && grep -qxF "agent agy: $H/fakebin/agy --model <model> --input-format stream-json --output-format stream-json --dangerously-skip-permissions < prompt as one stream-json line" "$H/check.txt" && grep -qxF "agent claude: $H/fakebin/claude -p --model <model> < prompt" "$H/check.txt" && grep -qx "usage:         pool: 1 of 1, room for 1 more" "$H/check.txt" && grep -q "^usage:         agy: cap 1 of 1, 0 running, none: no windows" "$H/check.txt"' \
     "rc=$rc $(cat "$H/check.txt")"
+# The Antigravity IDE's launcher of the same name: a VS Code-style CLI, with no --input-format.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" 1.107.0 0123abc arm64\n' > "$H/fakebin/ide-agy"; chmod +x "$H/fakebin/ide-agy"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/ide-agy"
+check "check refuses an agy that is not the Antigravity CLI, naming it and the fix" \
+    '[ "$rc" -eq 1 ] && grep -qF "missing: an agy that is the Antigravity CLI: $H/fakebin/ide-agy takes no --input-format, so it is another program of that name, such as the Antigravity IDE'"'"'s launcher; install the CLI, or set AGENT_BIN_agy=\$HOME/.local/bin/agy where it is" "$H/check.txt"' \
+    "rc=$rc $(cat "$H/check.txt")"
+check_with "AGENT_BIN_agy=$H/fakebin/ide-agy"
+check "an agy outside the model list is not looked at" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
+# Its --help is asked once per binary and modification time: the launcher fires every few minutes.
+cat > "$H/fakebin/count-agy" <<'EOF'
+#!/usr/bin/env bash
+echo x >> "$FAKE_AGENTS/count-agy.help"
+echo "  --input-format  Input format for print mode"
+EOF
+chmod +x "$H/fakebin/count-agy"; rm -f "$FAKE_AGENTS/count-agy.help"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/count-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "agy's --help is asked once for one binary, kept in the state" \
+    '[ "$rc" -eq 0 ] && [ "$(wc -l < "$FAKE_AGENTS/count-agy.help")" = 1 ]' "rc=$rc $(cat "$FAKE_AGENTS/count-agy.help" 2>/dev/null)"
+touch -d "@$(( $(date +%s) - 60 ))" "$H/fakebin/count-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "and again once the binary changes" '[ "$(wc -l < "$FAKE_AGENTS/count-agy.help")" = 2 ]' "$(cat "$FAKE_AGENTS/count-agy.help" 2>/dev/null)"
+# A --help that failed to answer is no verdict: the next check asks again.
+cat > "$H/fakebin/mute-agy" <<'EOF'
+#!/usr/bin/env bash
+echo x >> "$FAKE_AGENTS/mute-agy.help"
+exit 1
+EOF
+chmod +x "$H/fakebin/mute-agy"; rm -f "$FAKE_AGENTS/mute-agy.help"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/mute-agy"
+"$H/bin/tick.sh" check >/dev/null 2>&1
+check "an agy whose --help says nothing is refused, and asked again at the next check" \
+    '[ "$rc" -eq 1 ] && [ "$(wc -l < "$FAKE_AGENTS/mute-agy.help")" = 2 ]' "rc=$rc $(cat "$FAKE_AGENTS/mute-agy.help" 2>/dev/null)"
 check_with "CLAUDE_FLAGS=" "WEEK_HALF_AT=64" "TICK_AGENT_EXES=claude:-p"
 check "check names each key it does not read, and the key to set instead" \
     '[ "$rc" -eq 1 ] && grep -q "missing: .*CLAUDE_FLAGS is not read; set AGENT_FLAGS_claude instead" "$H/check.txt" && grep -q "WEEK_HALF_AT is not read; set USAGE_STEPS_LONG instead" "$H/check.txt" && grep -q "TICK_AGENT_EXES is not read; remove it" "$H/check.txt"' \
@@ -370,9 +420,14 @@ rm -rf "$FAKE_FLEET_LIMIT" "$H/state/model-cooldown"
 fleet_env "TICK_AGENT=codex" "FLEET_DEVICE=dev-a"
 launch
 check "TICK_AGENT and FLEET_DEVICE reach the dispatch" 'grep -q -- "^dispatch --device dev-a --adapter codex " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
-fleet_env "TICK_MODELS='gemini:model-g'"
+fleet_env "TICK_MODELS='aider:model-g'" "USAGE_SOURCE_aider=none"
 launch
-check "through fleet, an entry's agent is the adapter" 'grep -q -- "^dispatch --device auto --adapter gemini .*--model model-g " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
+check "through fleet, an entry's agent is the adapter" 'grep -q -- "^dispatch --device auto --adapter aider .*--model model-g " "$FAKE_FLEET_ARGV"' "$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
+fleet_env "TICK_MODELS='agy:model-g'"
+launch
+check "through fleet, agy's prompt is dispatched as its one stream-json line" \
+    'grep -q -- "^dispatch --device auto --adapter agy .*--model model-g " "$FAKE_FLEET_ARGV" && [ "$(wc -l < "$FAKE_FLEET_STDIN")" -le 1 ] && jq -e ".event == \"user\" and (.message.content | startswith(\"This tick runs on model-g.\"))" "$FAKE_FLEET_STDIN" >/dev/null' \
+    "$(head -c 300 "$FAKE_FLEET_STDIN" 2>/dev/null)"
 fleet_env
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check reports fleet's devices and passes with one that can take a tick" \
@@ -389,10 +444,10 @@ check "check fails when FLEET_DEVICE names a device that cannot be reached" '[ "
 fleet_env "FLEET_BIN=no-such-fleet"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check fails when FLEET_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable FLEET_BIN (no-such-fleet)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
-fleet_env "TICK_MODELS='fake-model gemini:model-g'"
+fleet_env "TICK_MODELS='fake-model agy:model-g'"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check names each agent no fleet device offers" \
-    '[ "$rc" -eq 1 ] && grep -qx "fleet device:  dev-a (tls) reachable, claude 1/2 running, no gemini adapter" "$H/check.txt" && grep -qx "missing: a fleet device that can take a gemini tick" "$H/check.txt" && ! grep -q "take a claude tick" "$H/check.txt"' \
+    '[ "$rc" -eq 1 ] && grep -qx "fleet device:  dev-a (tls) reachable, claude 1/2 running, no agy adapter" "$H/check.txt" && grep -qx "missing: a fleet device that can take a agy tick" "$H/check.txt" && ! grep -q "take a claude tick" "$H/check.txt"' \
     "rc=$rc $(cat "$H/check.txt")"
 write_env "TICK_AGENT=aider"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
@@ -405,8 +460,8 @@ check "the launcher refuses an agent without a local profile and logs why" \
 write_env
 
 agents_env() {
-    write_env "TICK_MODELS='claude:model-c codex:model-x gemini:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" \
-        "AGENT_BIN_gemini=$H/fakebin/gemini" "MODEL_COOLDOWN_S=600" "$@"
+    write_env "TICK_MODELS='claude:model-c codex:model-x agy:model-g'" "AGENT_BIN_codex=$H/fakebin/codex" \
+        "AGENT_BIN_agy=$H/fakebin/agy" "MODEL_COOLDOWN_S=600" "$@"
 }
 agents_env
 launch
@@ -417,55 +472,90 @@ touch "$FAKE_AGENTS/claude.limit" "$FAKE_AGENTS/codex.limit"
 launch
 tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
 check "a limit message from each agent cools that entry and the tick moves on to the next agent" \
-    '[ -e "$H/state/model-cooldown/claude:model-c" ] && [ -e "$H/state/model-cooldown/codex:model-x" ] && [ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "codex:model-x hit its usage limit" "$LOG" && grep -q "^\[tick.sh\] exit=0 .*agent=gemini model=model-g$" "$tick_log"' \
+    '[ -e "$H/state/model-cooldown/claude:model-c" ] && [ -e "$H/state/model-cooldown/codex:model-x" ] && [ ! -e "$H/state/model-cooldown/agy:model-g" ] && grep -q "codex:model-x hit its usage limit" "$LOG" && grep -q "^\[tick.sh\] exit=0 .*agent=agy model=model-g$" "$tick_log"' \
     "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
-check "codex and gemini get their argv, with the prompt on stdin and never in argv" \
-    '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && [ "$(cat "$FAKE_AGENTS/gemini.argv")" = "--model model-g --yolo" ] && head -1 "$FAKE_AGENTS/gemini.stdin" | grep -qx "This tick runs on model-g." && grep -q "^Core rules for" "$FAKE_AGENTS/codex.stdin" && ! grep -q "Core rules\|This tick" "$FAKE_AGENTS"/*.argv' \
+check "codex and agy get their argv, with the prompt on stdin and never in argv" \
+    '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && [ "$(cat "$FAKE_AGENTS/agy.argv")" = "--model model-g --input-format stream-json --output-format stream-json --dangerously-skip-permissions" ] && grep -q "^Core rules for" "$FAKE_AGENTS/codex.stdin" && ! grep -q "Core rules\|This tick" "$FAKE_AGENTS"/*.argv' \
     "$(head -c 300 "$FAKE_AGENTS"/*.argv)"
+check "agy's prompt is one stream-json line: a user message whose content is the whole prompt" \
+    '[ "$(wc -l < "$FAKE_AGENTS/agy.stdin")" -eq 1 ] && jq -e ".event == \"user\" and (.message.content | startswith(\"This tick runs on model-g.\n\")) and (.message.content | contains(\"Core rules for o/r&x|y\\\\z\"))" "$FAKE_AGENTS/agy.stdin" >/dev/null' \
+    "$(head -c 300 "$FAKE_AGENTS/agy.stdin")"
+check "the tick log keeps agy's events and gives its result's response as the summary" \
+    'grep -qx "{\"event\":\"init\",\"init\":{\"tools\":\[\"command\",\"read_file\"\]}}" "$tick_log" && grep -qx "agy ran: one-line summary" "$tick_log"' "$(cat "$tick_log" 2>/dev/null)"
 check "a tick and every tool it runs take SIGINT and SIGQUIT" \
-    '[ $(( 16#$(cat "$FAKE_AGENTS/gemini.sigign") & 6 )) -eq 0 ] && [ $(( 16#$(cat "$FAKE_AGENTS/codex.sigign") & 6 )) -eq 0 ]' \
-    "gemini=$(cat "$FAKE_AGENTS/gemini.sigign" 2>/dev/null) codex=$(cat "$FAKE_AGENTS/codex.sigign" 2>/dev/null)"
-read -r g_pid g_pgid g_sid g_runner < "$FAKE_AGENTS/gemini.group"
+    '[ $(( 16#$(cat "$FAKE_AGENTS/agy.sigign") & 6 )) -eq 0 ] && [ $(( 16#$(cat "$FAKE_AGENTS/codex.sigign") & 6 )) -eq 0 ]' \
+    "agy=$(cat "$FAKE_AGENTS/agy.sigign" 2>/dev/null) codex=$(cat "$FAKE_AGENTS/codex.sigign" 2>/dev/null)"
+read -r g_pid g_pgid g_sid g_runner < "$FAKE_AGENTS/agy.group"
 check "a tick leads a process group and session of its own, apart from its runner's" \
-    '[ "$g_pgid" = "$g_pid" ] && [ "$g_sid" = "$g_pid" ] && [ "$g_runner" != "$g_pid" ]' "$(cat "$FAKE_AGENTS/gemini.group")"
+    '[ "$g_pgid" = "$g_pid" ] && [ "$g_sid" = "$g_pid" ] && [ "$g_runner" != "$g_pid" ]' "$(cat "$FAKE_AGENTS/agy.group")"
 check "every agent's tick carries its marker and never GH_TOKEN" \
-    '[ "$(cat "$FAKE_AGENTS/gemini.marker")" = "state=$H/state slot=1 agent=gemini model=model-g kind=work" ] && grep -qx "token=unset" "$FAKE_AGENTS/codex.env" && grep -qx "token=unset" "$FAKE_AGENTS/gemini.env"' \
-    "$(cat "$FAKE_AGENTS/gemini.marker" 2>/dev/null)"
+    '[ "$(cat "$FAKE_AGENTS/agy.marker")" = "state=$H/state slot=1 agent=agy model=model-g kind=work" ] && grep -qx "token=unset" "$FAKE_AGENTS/codex.env" && grep -qx "token=unset" "$FAKE_AGENTS/agy.env"' \
+    "$(cat "$FAKE_AGENTS/agy.marker" 2>/dev/null)"
 launch
-check "while both cool down the next tick starts on gemini at once" \
-    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && [ -s "$FAKE_AGENTS/gemini.argv" ]' "log=$(cat "$LOG")"
+check "while both cool down the next tick starts on agy at once" \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && [ -s "$FAKE_AGENTS/agy.argv" ]' "log=$(cat "$LOG")"
 rm -rf "$H/state/model-cooldown" "$FAKE_AGENTS"/*.limit
 usage 80
 launch
 check "an agent whose windows allow no tick is passed over for the next agent" \
-    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && grep -q "claude=0\[five_hour:80%,weekly:10%\] codex=1\[five_hour:10%\] gemini=1\[\] pool=1 room=1 " "$LOG"' \
+    '[ ! -e "$FAKE_AGENTS/claude.argv" ] && [ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --dangerously-bypass-approvals-and-sandbox -" ] && grep -q "claude=0\[five_hour:80%,weekly:10%\] codex=1\[five_hour:10%\] agy=1\[\] pool=1 room=1 " "$LOG"' \
     "log=$(cat "$LOG")"
 usage 10
 agents_env "AGENT_FLAGS_codex='--skip-git-repo-check -m other --model=x --model y -mz *'" "TICK_MODELS=codex:model-x"
 launch
 check "AGENT_FLAGS_<agent> replaces the agent's flags, never globbed, every model flag dropped" \
     '[ "$(cat "$FAKE_AGENTS/codex.argv")" = "exec --model model-x --skip-git-repo-check * -" ]' "$(cat "$FAKE_AGENTS/codex.argv" 2>/dev/null)"
-agents_env "AGENT_LIMIT_RE_gemini='custom quota'" "TICK_MODELS='gemini:model-g codex:model-x'"
-touch "$FAKE_AGENTS/gemini.limit"
+agents_env "AGENT_FLAGS_agy='--mode accept-edits -p foo --prompt x --print y --print=z --prompt=w -p=v -pq --output-format text --input-format=text --model x'" "TICK_MODELS=agy:model-g"
+launch
+check "agy's flags may not undo how its profile reads the prompt and writes its events, nor leave a prompt in argv" \
+    '[ "$(cat "$FAKE_AGENTS/agy.argv")" = "--model model-g --input-format stream-json --output-format stream-json --mode accept-edits" ]' "$(cat "$FAKE_AGENTS/agy.argv" 2>/dev/null)"
+agents_env "TICK_MODELS='agy:model-g codex:model-x'"
+touch "$FAKE_AGENTS/agy.limit"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "agy's ERROR result naming a quota cools its entry and the tick moves on to the next agent" \
+    '[ -e "$H/state/model-cooldown/agy:model-g" ] && grep -q "agy:model-g hit its usage limit" "$LOG" && [ -s "$FAKE_AGENTS/codex.argv" ] && grep -q "^\[tick.sh\] exit=1 .*agent=agy model=model-g$" "$tick_log"' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+rm -rf "$H/state/model-cooldown" "$FAKE_AGENTS"/*.limit
+agents_env "AGENT_LIMIT_RE_agy='custom quota'" "TICK_MODELS='agy:model-g codex:model-x'"
+touch "$FAKE_AGENTS/agy.limit"
 launch
 check "AGENT_LIMIT_RE_<agent> replaces the agent's limit message" \
-    '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
 rm -rf "$H/state/model-cooldown" "$FAKE_AGENTS"/*.limit
-agents_env "TICK_MODELS='gemini:model-g codex:model-x'"
-touch "$FAKE_AGENTS/gemini.quoted"
+agents_env "TICK_MODELS='agy:model-g codex:model-x'"
+touch "$FAKE_AGENTS/agy.error"
 launch
-check "a gemini limit message from a tick that exited 0 is no usage limit" \
-    '[ ! -e "$H/state/model-cooldown/gemini:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$H/state/logs/"tick-*.log && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
-rm -f "$FAKE_AGENTS/gemini.quoted"
-for shape in stack api; do
-    rm -rf "$H/state/model-cooldown"
-    agents_env "TICK_MODELS='gemini:model-g codex:model-x'"
-    touch "$FAKE_AGENTS/gemini.$shape"
-    launch
-    check "gemini's quota error as a $shape cools its entry and the tick moves on" \
-        '[ -e "$H/state/model-cooldown/gemini:model-g" ] && [ -s "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
-    rm -f "$FAKE_AGENTS/gemini.$shape"
-done
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "agy's ERROR result on anything but a limit fails the tick and cools nothing" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -q "^\[tick.sh\] exit=1 .*agent=agy model=model-g$" "$tick_log"' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_AGENTS/agy.error"
+touch "$FAKE_AGENTS/agy.quoted"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "a quota error quoted in a SUCCESS turn is no usage limit" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && grep -q "RESOURCE_EXHAUSTED" "$tick_log" && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -q "^\[tick.sh\] exit=0 .*agent=agy" "$tick_log"' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_AGENTS/agy.quoted"
+touch "$FAKE_AGENTS/agy.inject"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "a SUCCESS response shaped as an ERROR result event is the summary, never a usage limit" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ] && grep -qx "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"RESOURCE_EXHAUSTED quota\"}}" "$tick_log" && grep -q "^\[tick.sh\] exit=0 .*agent=agy model=model-g$" "$tick_log" && [ "$(grep -c "^\[tick.sh\]" "$tick_log")" = 1 ]' \
+    "log=$(cat "$LOG") tick=$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_AGENTS/agy.inject"
+touch "$FAKE_AGENTS/agy.trace"
+launch
+check "an ERROR whose trace id holds 429 is no usage limit" \
+    '[ ! -e "$H/state/model-cooldown/agy:model-g" ] && [ ! -e "$FAKE_AGENTS/codex.argv" ]' "log=$(cat "$LOG")"
+rm -f "$FAKE_AGENTS/agy.trace"
+touch "$FAKE_AGENTS/agy.noresult"
+launch
+tick_log=$(ls "$H/state/logs/"tick-*.log 2>/dev/null | head -1)
+check "an agy turn that writes no result failed, whatever agy exited with" \
+    'grep -q "^\[tick.sh\] exit=1 .*agent=agy model=model-g$" "$tick_log"' "tick=$(cat "$tick_log" 2>/dev/null)"
+rm -f "$FAKE_AGENTS/agy.noresult"
 rm -rf "$H/state/model-cooldown"
 agents_env "TICK_MODELS='claude:model-c codex:model-x'"
 touch "$FAKE_AGENTS/claude.echo"
@@ -584,9 +674,11 @@ mkdir -p "$H/state/model-cooldown"; touch "$H/state/model-cooldown/claude:model-
 launch
 check "with every entry cooling down the launcher stops early and quietly" '[ ! -s "$LOG" ] && [ ! -e "$FAKE_AGENTS/claude.argv" ]' "log=$(cat "$LOG")"
 rm -rf "$H/state/model-cooldown"
-check_with "TICK_MODELS='fake-model gemini:model-g'" "AGENT_BIN_gemini=$H/fakebin/gemini" "USAGE_SOURCE_gemini="
+check_with "TICK_MODELS='fake-model aider:model-g'" "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet"
 check "an agent without a default source must name one" \
-    '[ "$rc" -eq 1 ] && grep -q "missing: .*USAGE_SOURCE_gemini unset: name gemini.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+    '[ "$rc" -eq 1 ] && grep -q "missing: .*USAGE_SOURCE_aider unset: name aider.s usage source, or none" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "TICK_MODELS='fake-model agy:model-g'" "AGENT_BIN_agy=$H/fakebin/agy"
+check "agy needs no source: only its usage-limit cooldown gates it" '[ "$rc" -eq 0 ]' "rc=$rc $(cat "$H/check.txt")"
 mkdir -p "$H/oldenv"
 printf '#!/bin/sh\ncase "$1" in --default-signal*) echo "env: unrecognized option" >&2; exit 125 ;; esac\nexec /usr/bin/env "$@"\n' > "$H/oldenv/env"
 chmod +x "$H/oldenv/env"
