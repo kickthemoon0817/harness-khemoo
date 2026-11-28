@@ -18,7 +18,7 @@ infrastructure live in an instance directory that you own.
 - The runner composes the prompt (a lane line, `prompts/tick-core.md`, then the instance's
   `prompts/tick.md`) and runs `claude -p` on the best model that is not cooling down.
 - The tick claims an issue (`libexec/claim.sh`, a `WIP_LABEL` label and a claim comment), works in a
-  worktree under `WORKTREE_ROOT`, lints every body with `libexec/public-record-lint.py` before posting
+  worktree under `WORKTREE_ROOT`, lints every body with `"$HARNESS_BIN" lint` before posting
   it, and ends with a summary. It stays inside its budget and the usage ceiling (`libexec/usage-ok.sh`).
 - A ready PR lands under `libexec/merge-lock.sh`, one at a time.
 - When a tick ends with work still queued, the runner starts the next tick at once on a fresh
@@ -31,6 +31,7 @@ infrastructure live in an instance directory that you own.
 
 ```bash
 git clone <this repo> ~/harness && cd ~/harness
+cargo build --release                   # target/release/harness, and fleet and fleetd
 cp -r templates/instance instance       # gitignored; this is your installation
 mv instance/harness.env.example instance/harness.env
 $EDITOR instance/harness.env            # TARGET_REPO and WORKTREE_ROOT at least
@@ -78,7 +79,7 @@ gives each contract.
 an access token. It shows running ticks, the queue, landings, usage and the allocator log, plus
 the instance's devices, run queues and build locks when `harness.env` configures them.
 `bin/dashboard.sh status` prints the URL again, `bin/dashboard.sh stop` stops it, and
-`libexec/dashboard.py --help` lists the options.
+`harness dashboard --help` lists the options.
 
 ## Fleet
 
@@ -96,11 +97,12 @@ Devices and an Agent sessions panel. Unset, the harness runs on one host as abov
 tests/run.sh
 ```
 
-It runs every `tests/test_*.sh` and `tests/test_*.py`, plus any suites under `instance/tests/`.
-The shell suites need Linux: bash 4+, `flock`, `setsid` and `lslocks` (util-linux), `pgrep`
-(procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git` and `python3`. On another OS,
-run them in a container started with `--init`, so killed processes are reaped.
-`tests/test_fleet_e2e.sh` also needs `cargo`, to build the Rust workspace, and is skipped without it. `python3 tests/test_dashboard.py` runs anywhere and skips the cases that need `/proc`.
+It builds the `harness` binary (unless `HARNESS_BIN` names one) and runs every `tests/test_*.sh`,
+plus any suites under `instance/tests/`. The shell suites need Linux: bash 4+, `flock`, `setsid` and
+`lslocks` (util-linux), `pgrep` (procps), GNU `stat` and `date`, `bc`, `zstd`, `jq`, `curl`, `git`
+and `cargo`. On another OS, run them in a container started with `--init`, so killed processes are
+reaped. The Rust tests (`cargo test`) cover the lint, the queue count, the dashboard and fleet; they
+run anywhere and leave out the cases that need `/proc` and `lslocks` where those are missing.
 
 ## Safety posture
 

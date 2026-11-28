@@ -11,10 +11,9 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 0
 fi
 # The workspace pins its toolchain in rust-toolchain.toml, which rustup reads from the cwd.
-(cd "$here" && cargo build --quiet --locked --bin fleet --bin fleetd) || { echo "FAIL cargo build"; exit 1; }
-target=$(cd "$here" && cargo metadata --format-version 1 --no-deps \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
-FLEET="$target/debug/fleet"; FLEETD="$target/debug/fleetd"
+(cd "$here" && cargo build --quiet --locked --bin fleet --bin fleetd --bin harness) || { echo "FAIL cargo build"; exit 1; }
+target=$(cd "$here" && cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+FLEET="$target/debug/fleet"; FLEETD="$target/debug/fleetd"; HARNESS_BIN="${HARNESS_BIN:-$target/debug/harness}"
 
 H=$(mktemp -d)
 daemon=""
@@ -101,20 +100,19 @@ check "a usage-limit line cools the model down" \
     '[ -f "$H/state/model-cooldown/model-a" ] && [ ! -f "$H/state/model-cooldown/model-b" ] && grep -q "model-a hit its usage limit" "$H/state/logs/allocator.log"' \
     "$(ls "$H/state/model-cooldown" 2>/dev/null); $(cat "$H/state/logs/allocator.log" 2>/dev/null)"
 
-snapshot=$(python3 "$here/libexec/dashboard.py" --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
+snapshot=$("$HARNESS_BIN" dashboard --harness-home "$H" --gh "$H/fakebin/gh" --usage-cache "$H/usage-cache.json" \
     --remote-interval 0 --claimable-interval 0 --once 2>"$H/dashboard.err")
-panel=$(printf '%s' "$snapshot" | python3 -c '
-import json, sys
-fleet = json.load(sys.stdin)["fleet"]
-if not fleet["devices"]:
-    sys.exit("no devices: " + str(fleet["error"]))
-device = fleet["devices"][0]
-sessions = sorted((s["model"], s["adapter"], s["state"]) for s in fleet["sessions"])
-print(fleet["available"], device["name"], device["error"], device["cpus"] > 0, device["adapters"][0]["name"],
-      " ".join(",".join(s) for s in sessions))
-' 2>&1)
+# One line: availability, the first device's name, error, whether it reported CPUs and its first
+# adapter, then every session as model,adapter,state in sorted order.
+panel=$(printf '%s' "$snapshot" | jq -r '.fleet as $f
+    | if ($f.devices | length) == 0 then "no devices: \($f.error)"
+      else $f.devices[0] as $d
+        | [($f.available | tostring), $d.name, ($d.error | tostring), ($d.cpus > 0 | tostring), $d.adapters[0].name,
+           ([$f.sessions[] | [.model, .adapter, .state] | join(",")] | sort | join(" "))]
+        | join(" ")
+      end' 2>&1)
 check "the dashboard's fleet panel reads the real fleet status" \
-    '[ "$panel" = "True dev-a None True fake model-a,fake,exited 1 model-b,fake,exited 0" ]' \
+    '[ "$panel" = "true dev-a null true fake model-a,fake,exited 1 model-b,fake,exited 0" ]' \
     "$panel; $(tail -5 "$H/dashboard.err")"
 
 echo "pass=$pass fail=$fail"

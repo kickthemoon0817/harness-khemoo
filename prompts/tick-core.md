@@ -13,7 +13,7 @@ THE PUBLIC RECORD: everything you post to GitHub (an issue body, a PR body, a co
 summary) is read by people who have the repository and nothing else. Write it to
 `$HARNESS_HOME/prompts/public-record.md`, with every project term defined on first use in the words of
 the glossary. Write each body to a file and run
-`$HARNESS_HOME/libexec/public-record-lint.py --kind pr|issue|comment <file>` before `gh` posts it
+`"$HARNESS_BIN" lint --kind pr|issue|comment <file>` before `gh` posts it
 (`--body-file`); a blocking finding means rewrite, never post. No path on this host, no host name or
 address, no PID, lock or worktree in a body. A comment's visible text is the state in plain words; its
 protocol line (`harness tick <UTC> pid <PID> claiming`, the checkpoint line, the pausing line), the

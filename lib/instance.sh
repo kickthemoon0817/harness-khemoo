@@ -2,7 +2,7 @@
 # The instance holds everything specific to one installation (docs/INSTANCE.md); the core
 # reads it only through harness_load and harness_hook.
 
-# Sets and exports HARNESS_HOME, HARNESS_INSTANCE_DIR and HARNESS_STATE, sources the config
+# Sets and exports HARNESS_HOME, HARNESS_INSTANCE_DIR, HARNESS_STATE and HARNESS_BIN, sources the config
 # file, puts the instance's bin/ first on PATH and exports the names listed in TICK_EXPORTS.
 # An empty GH_REPO is derived from TARGET_REPO's origin remote and exported, so every gh call
 # and queue count names the same repository; it stays empty when the origin names none.
@@ -14,6 +14,12 @@ harness_load() {
     # Environment only: the config cannot name the directory it is read from.
     HARNESS_INSTANCE_DIR="${HARNESS_INSTANCE_DIR:-$HARNESS_HOME/instance}"
     HARNESS_ENV_FILE="${HARNESS_ENV:-$HARNESS_INSTANCE_DIR/harness.env}"
+    # The harness binary (crates/harness): this checkout's release build, else PATH's. It is set
+    # before the config is read, so the config can name it (QUEUE_DEPTH_CMD) or replace it.
+    if [ -z "${HARNESS_BIN:-}" ]; then
+        if [ -x "$HARNESS_HOME/target/release/harness" ]; then HARNESS_BIN=$HARNESS_HOME/target/release/harness
+        else HARNESS_BIN=harness; fi
+    fi
     # shellcheck source=/dev/null
     [ -r "$HARNESS_ENV_FILE" ] && . "$HARNESS_ENV_FILE"
     : "${HARNESS_STATE:=$HARNESS_HOME/state}"
@@ -21,7 +27,7 @@ harness_load() {
         GH_REPO=$(harness_repo_from_origin "$TARGET_REPO")
     fi
     [ -n "${GH_REPO:-}" ] && export GH_REPO
-    export HARNESS_HOME HARNESS_INSTANCE_DIR HARNESS_STATE
+    export HARNESS_HOME HARNESS_INSTANCE_DIR HARNESS_STATE HARNESS_BIN
     export PATH="$HARNESS_INSTANCE_DIR/bin:$PATH"
     for name in ${TICK_EXPORTS:-}; do
         if [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then export "${name?}"

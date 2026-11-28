@@ -91,7 +91,7 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
 
 - **Read the tick logs.** They are written for a human and contain the honest scope of each
   claim ("compile-verified only", "gate skipped because…"). Skimming PR titles is not the same.
-- **Audit the public record.** `libexec/public-record-lint.py --audit prs --last 20 --base <branch>`
+- **Audit the public record.** `"$HARNESS_BIN" lint --audit prs --last 20 --base <branch>`
   (and `--audit issues --label <label>`) tables the last bodies with their blocking findings. A
   body with a blocking finding was posted around the lint, or by a hand that skipped it; the fix
   is a rewrite of that body, and a runbook line if the cause is a rule that asks for host detail.

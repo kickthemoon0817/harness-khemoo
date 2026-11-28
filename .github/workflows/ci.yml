@@ -37,12 +37,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # tests/test_fleet_e2e.sh builds fleet and fleetd.
+      # tests/run.sh builds the harness binary, and tests/test_fleet_e2e.sh fleet and fleetd.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
       - uses: Swatinem/rust-cache@v2
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 git util-linux procps bc zstd jq curl
+          sudo apt-get install -y --no-install-recommends git util-linux procps bc zstd jq curl
       - run: tests/run.sh

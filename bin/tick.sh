@@ -86,6 +86,8 @@ instance_missing() {
             type -P -- "$CLAUDE_BIN" >/dev/null || echo "an executable CLAUDE_BIN ($CLAUDE_BIN)"
         fi
     fi
+    # A tick runs the lint through it before every post.
+    type -P -- "$HARNESS_BIN" >/dev/null || echo "an executable HARNESS_BIN ($HARNESS_BIN)"
     [ -r "$INSTANCE_PROMPT" ] || echo "$INSTANCE_PROMPT"
     [ -r "$CORE_PROMPT" ] || echo "$CORE_PROMPT"
 }
@@ -99,7 +101,7 @@ fi
 # reaches a tick, whoever exported it: the config's token is for the cron scripts and the dashboard.
 export TARGET_REPO WORKTREE_ROOT GH_REPO PUBLIC_RECORD_RULES PUBLIC_RECORD_PR_SECTIONS PUBLIC_RECORD_ISSUE_SECTIONS \
     ISSUE_LABEL WIP_LABEL READY_LABEL SIGNOFF_LABEL OPERATOR_LABEL LONG_LABEL FIRST_LABEL LOW_LABEL LANE_LABEL \
-    TICK_AGENT TICK_AGENT_EXES FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG
+    TICK_AGENT TICK_AGENT_EXES FLEET_DISPATCH FLEET_DEVICE FLEET_BIN FLEET_CONFIG HARNESS_BIN
 export -n GH_TOKEN
 
 # Sets claimable, young and want: queued issues not already about to be claimed.
@@ -257,35 +259,36 @@ compose_prompt() {  # $1 = the lane line
 # for dispatch (and is FLEET_DEVICE, when that names one). fleet exits 1 when any device failed, with
 # the document complete, so only the document decides.
 fleet_check() {
-    local script
-    script=$(cat <<'EOF'
-import json, sys
-agent, wanted = sys.argv[1:3]
-usable = 0
-try:
-    document = json.load(sys.stdin)
-    if document["version"] != 1:
-        raise ValueError(f"version {document['version']}, not 1")
-    for device in document["devices"]:
-        if not device["ok"]:
-            error = device["error"]
-            print(f"fleet device:  {device['name']} ({device['transport']}) unreachable: "
-                  f"{error['code']}: {error['message']}")
-            continue
-        adapter = next((a for a in device["status"]["adapters"] if a["name"] == agent), None)
-        offer = f"{agent} {adapter['running']}/{adapter['max_concurrent']} running" if adapter \
-            else f"no {agent} adapter"
-        print(f"fleet device:  {device['name']} ({device['transport']}) reachable, {offer}")
-        if adapter and adapter["max_concurrent"] > 0 and wanted in ("auto", device["name"]):
-            usable += 1
-except (ValueError, KeyError, TypeError) as error:
-    print(f"fleet:         fleet status --json gave no status document ({type(error).__name__}: {error})")
-    sys.exit(1)
-sys.exit(0 if usable else 1)
-EOF
-)
-    timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null \
-        | python3 -c "$script" "$TICK_AGENT" "${FLEET_DEVICE:-auto}"
+    # The document is read as text, so one that is not JSON is reported like one of the wrong shape.
+    # A device is down when its ok is false, null, 0, "", [] or {}.
+    # shellcheck disable=SC2016
+    timeout "${FLEET_CHECK_TIMEOUT_S:-60}" "$FLEET_BIN" status --json 2>/dev/null | jq -Rrs \
+        --arg agent "$TICK_AGENT" --arg wanted "${FLEET_DEVICE:-auto}" '
+        def need($k): if type == "object" and has($k) then .[$k] else error("no \($k) in \(type)") end;
+        def truthy: . != null and . != false and . != 0 and . != "" and . != [] and . != {};
+        def str: if type == "string" then . else tojson end;
+        def device:
+            if need("ok") | truthy | not then
+                need("error") as $e
+                | {line: "fleet device:  \(need("name") | str) (\(need("transport") | str)) unreachable: \($e | need("code") | str): \($e | need("message") | str)",
+                   usable: false}
+            else
+                . as $d
+                | ([need("status") | need("adapters") | if type == "array" then .[] else error("adapters is not a list") end
+                    | select(need("name") == $agent)] | first) as $a
+                | (if $a then "\($agent) \($a | need("running") | str)/\($a | need("max_concurrent") | str) running" else "no \($agent) adapter" end) as $offer
+                | {line: "fleet device:  \($d | need("name") | str) (\($d | need("transport") | str)) reachable, \($offer)",
+                   usable: ($a != null and ($a.max_concurrent | if type == "number" then . > 0 else error("max_concurrent is not a number") end)
+                            and ($wanted == "auto" or $wanted == $d.name))}
+            end;
+        [try (
+            (if test("^\\s*$") then error("empty output") else fromjson end)
+            | if need("version") != 1 then error("version \(.version | str), not 1") else . end
+            | need("devices") | if type == "array" then .[] else error("devices is not a list") end
+            | device
+        ) catch {error: (tostring | gsub("\\s+"; " ") | .[:160])}] as $items
+        | ($items[] | if has("error") then "fleet:         fleet status --json gave no status document (\(.error))" else .line end),
+          (if any($items[]; has("error")) or ([$items[] | select(.usable)] | length) == 0 then "" | halt_error(1) else empty end)'
 }
 
 # ----------------------------------------------------------------- check mode

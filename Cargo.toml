@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fleet-proto", "crates/fleetd", "crates/fleet"]
+members = ["crates/fleet-proto", "crates/fleetd", "crates/fleet", "crates/harness"]
 
 [workspace.package]
 version = "0.1.0"
@@ -53,3 +53,11 @@ too_many_lines = "allow"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# The redactor's patterns run on every snapshot; unoptimized, the regex engine is ten times slower,
+# which the tests' time bounds would feel.
+[profile.dev.package.regex-automata]
+opt-level = 3
+
+[profile.dev.package.regex-syntax]
+opt-level = 3

@@ -38,9 +38,11 @@ skipped.
 The dashboard reads the same file without sourcing it. It matches plain `KEY=value` lines and keeps
 only the keys it uses. It expands no `$` text except these names, as `$NAME` or `${NAME}`: in a
 command key (`RESOURCE_STATUS_CMD`, `DEVICE_PROBE_CMD`, `QUEUE_DEPTH_CMD`, `FLEET_STATUS_CMD`), split shell-style first,
-`$HARNESS_HOME` and `$HARNESS_INSTANCE_DIR`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
-`WORKTREE_ROOT`, `FLEET_CONFIG`), those two and `$HOME`. A path key from the environment wins over the file's. An
-empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `libexec/claimable.sh`, for its queue count,
+`$HARNESS_HOME`, `$HARNESS_INSTANCE_DIR` and `$HARNESS_BIN`; in a path key (`HARNESS_STATE`, `USAGE_CACHE`,
+`WORKTREE_ROOT`, `FLEET_CONFIG`), those three and `$HOME`. `$HARNESS_BIN` resolves as `lib/instance.sh`
+resolves it: the file's `HARNESS_BIN`, else the environment's, else `<home>/target/release/harness` when
+it is executable, else `harness` from `PATH`. A path key from the environment wins over the file's. An
+empty `GH_REPO` is derived through `lib/instance.sh`, as the scripts derive it. The dashboard runs `QUEUE_DEPTH_CMD`, else `$HARNESS_BIN claimable`, for its queue count,
 and reads a worktree's issue from its directory under `WORKTREE_ROOT`.
 
 ## Files
@@ -181,7 +183,7 @@ to count lane issues. The launcher and the dashboard recognise a landing tick by
 
 ## Lint rules
 
-`libexec/public-record-lint.py` always applies the core rules: `harness-path` (any path under
+`"$HARNESS_BIN" lint` always applies the core rules: `harness-path` (any path under
 `WORKTREE_ROOT`, `HARNESS_HOME` or `HARNESS_STATE`), `host-path`, `host-address`, `process-id`,
 `harness-file`, `tick-aside`, `container-tmp`, `operator-stamp`, and the `label-mention` warning for
 the harness labels (`WIP_LABEL` through `LOW_LABEL`, as set in the environment). It reads these
@@ -205,7 +207,11 @@ The installation's rules come from `PUBLIC_RECORD_RULES` when that is set, else 
 - `version_words`: words after which a dotted quad reads as a version rather than an address. They
   are added to `v` and `version`.
 - `labels`: more labels to warn on in prose.
-- `rules`: each entry needs a non-empty `id`, `pattern` (a Python regex) and `hint`. `blocking`
+- `rules`: each entry needs a non-empty `id`, `pattern` (a regex in Python's `re`
+  syntax, look-around included) and `hint`. `\w`, `\W`, `\b` and `\B` keep Python's meaning: a
+  word character is a letter, a digit or `_`, never a combining mark or a joiner. A bracket class
+  may not hold `--`, `&&` or `~~` unescaped. A search that exhausts its backtracking budget blocks
+  the line. `blocking`
   defaults to true, and false makes the rule a warning. `prose` defaults to false. A prose rule is
   skipped inside a closed fenced code block, and every other rule applies there too. A rule with a
   core rule's `id` replaces that core rule.

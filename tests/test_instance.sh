@@ -22,6 +22,7 @@ printf '%s\n' "${FROM_HOOK:-unset} ${FROM_EXPORTS:-unset}" > "$FAKE_ENV"
 printf '%s\n' "rules=${PUBLIC_RECORD_RULES:-unset} pr=${PUBLIC_RECORD_PR_SECTIONS:-unset}" \
     "issue=${PUBLIC_RECORD_ISSUE_SECTIONS:-unset} repo=${GH_REPO:-unset} wip=${WIP_LABEL:-unset}" \
     "low=${LOW_LABEL:-unset} token=${GH_TOKEN:-unset}" > "$FAKE_LINT_ENV"
+printf '%s\n' "${HARNESS_BIN:-unset}" > "$FAKE_LINT_ENV.bin"
 printf '%s\n' "$*" >> "$FAKE_ARGS"
 EOF
 cat > "$H/fakebin/queue" <<'EOF'
@@ -101,11 +102,17 @@ LOG="$H/state/logs/allocator.log"
 printf '{"timestamp": %s000, "data": {"fiveHourPercent": 10, "weeklyPercent": 10}}\n' "$(date +%s)" > "$H/usage-cache.json"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
+# Waits until no tick.sh of this scratch home runs: the launcher's detached runners and the forks
+# that become them both carry its path. Gives up after 20 s, so a stuck runner fails its check.
+settle() {
+    local n=0
+    while pgrep -f "$H/bin/tick.sh" >/dev/null && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+}
 launch() {  # run the launcher once and wait for the runner it may start
     rm -f "$FAKE_PROMPT" "$FAKE_ENV" "$FAKE_ARGS" "$FAKE_FLEET_ARGV" "$FAKE_FLEET_STDIN" "$H/state/logs/"tick-*.log; : > "$LOG"
     rm -f "$H/state/locks/heartbeat.stamp"
     "$H/bin/tick.sh"
-    sleep 2
+    settle
 }
 
 # A missing instance prompt starts nothing and says so, once.
@@ -113,7 +120,7 @@ write_env; mv "$I/prompts/tick.md" "$H/tick.md.away"
 launch
 check "a missing tick.md starts nothing" '[ ! -e "$FAKE_PROMPT" ]' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
 check "a missing tick.md is logged" 'grep -q "instance incomplete: $I/prompts/tick.md" "$LOG"' "$(cat "$LOG")"
-"$H/bin/tick.sh"; sleep 1
+"$H/bin/tick.sh"; settle
 check "the incomplete instance is logged at most hourly" '[ "$(grep -c "instance incomplete" "$LOG")" -eq 1 ]' "$(cat "$LOG")"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1; rc=$?
 check "check exits 1 on an incomplete instance and names what is missing" \
@@ -145,6 +152,8 @@ check_with "QUEUE_DEPTH_CMD=\"$H/plain-file --flag\""
 check "check fails when QUEUE_DEPTH_CMD is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable QUEUE_DEPTH_CMD ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "CLAUDE_BIN=no-such-claude"
 check "check fails when CLAUDE_BIN does not resolve" '[ "$rc" -eq 1 ] && grep -q "missing: an executable CLAUDE_BIN (no-such-claude)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
+check_with "HARNESS_BIN=$H/plain-file"
+check "check fails when HARNESS_BIN is not executable" '[ "$rc" -eq 1 ] && grep -q "missing: an executable HARNESS_BIN ($H/plain-file)" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 check_with "GH_REPO="
 check "check fails when GH_REPO is unset and the origin names none" '[ "$rc" -eq 1 ] && grep -q "GH_REPO unset" "$H/check.txt"' "rc=$rc $(cat "$H/check.txt")"
 git -C "$H/target" remote add origin git@github.com:derived-org/derived-repo.git
@@ -207,6 +216,7 @@ GH_TOKEN=env-token launch
 check "the lint's settings and the labels reach the tick, GH_TOKEN does not" \
     '[ "$(cat "$FAKE_LINT_ENV")" = "$(printf "%s\n" "rules=$H/rules.json pr=Summary,Why" "issue=Summary repo=o/r&x|y\\z wip=bot:wip" "low=bot:low token=unset")" ]' \
     "$(cat "$FAKE_LINT_ENV" 2>/dev/null)"
+check "HARNESS_BIN reaches the tick, for the lint" '[ "$(cat "$FAKE_LINT_ENV.bin")" = "$HARNESS_BIN" ]' "$(cat "$FAKE_LINT_ENV.bin" 2>/dev/null)"
 check "the queue count gets the config's GH_TOKEN in its environment, never in its argv" \
     'grep -qx "token=secret-token" "$FAKE_QUEUE_SEEN" && grep -q "^argv=.*queue" "$FAKE_QUEUE_SEEN" && ! grep "^argv=" "$FAKE_QUEUE_SEEN" | grep -q secret-token' \
     "$(cat "$FAKE_QUEUE_SEEN" 2>/dev/null)"
@@ -245,7 +255,7 @@ write_env
 # hooks/hold: exit 0 holds and logs its reason once; exit 1 or a hang holds nothing.
 printf '#!/usr/bin/env bash\necho "service down since noon"\necho second line\nexit 0\n' > "$I/hooks/hold"; chmod +x "$I/hooks/hold"
 launch
-"$H/bin/tick.sh"; sleep 1
+"$H/bin/tick.sh"; settle
 check "a hold hook that exits 0 holds the harness" '[ ! -e "$FAKE_PROMPT" ]' "$(cat "$FAKE_PROMPT" 2>/dev/null)"
 check "the hold reason is logged once" '[ "$(grep -c "held: service down since noon$" "$LOG")" -eq 1 ] && [ "$(wc -l < "$LOG")" -eq 1 ]' "$(cat "$LOG")"
 "$H/bin/tick.sh" check >"$H/check.txt" 2>&1
@@ -255,7 +265,7 @@ launch
 check "a hold hook that exits 1 holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG"' "log=$(cat "$LOG")"
 printf '#!/usr/bin/env bash\necho "stuck"\nsleep 30\nexit 0\n' > "$I/hooks/hold"
 write_env "HOLD_TIMEOUT_S=1"
-start=$(date +%s); launch; sleep 2; took=$(( $(date +%s) - start ))
+start=$(date +%s); launch; took=$(( $(date +%s) - start ))
 check "a hold hook that hangs past HOLD_TIMEOUT_S holds nothing" '[ -s "$FAKE_PROMPT" ] && ! grep -q held "$LOG" && [ "$took" -lt 10 ]' "took=${took}s log=$(cat "$LOG")"
 rm -f "$I/hooks/hold"
 

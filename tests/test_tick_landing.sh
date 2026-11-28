@@ -51,18 +51,33 @@ L="$H/state/locks"; LOG="$H/state/logs/allocator.log"
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 :: $3"; fail=$((fail + 1)); fi; }
 usage() { printf '{"timestamp": %s000, "data": {"fiveHourPercent": %s, "weeklyPercent": %s}}\n' "$(date +%s)" "$1" "$2" > "$H/usage-cache.json"; }
-# -o: the lock is flock's own, so killing it frees the slot.
-hold() { flock -o "$L/slot$1.lock" sleep 60 >/dev/null 2>&1 & holders+=($!); }
-release_all() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; done; holders=(); sleep 0.3; }
+# Polls every 50 ms until the command $@ succeeds, for at most 20 s.
+until_ok() { local n=0; until "$@"; do [ "$n" -lt 400 ] || return 1; sleep 0.05; n=$((n + 1)); done; }
+# -o: the lock is flock's own, so killing it frees the slot. Returns once the slot is held.
+hold() {
+    flock -o "$L/slot$1.lock" sleep 60 >/dev/null 2>&1 & holders+=($!)
+    until_ok held "$1"
+}
+held() { ! flock -n "$L/slot$1.lock" true; }
+# Starts a stand-in tick in the background and returns once its command line carries $1.
+live() {
+    local pid
+    "${@:2}" >/dev/null 2>&1 & pid=$!; holders+=("$pid")
+    until_ok grep -qF -- "$1" "/proc/$pid/cmdline"
+}
+release_all() { for p in "${holders[@]}"; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; holders=(); }
+# The launcher's detached runners and the forks that become them both carry its path.
+no_runner() { ! pgrep -f "$H/bin/tick.sh" >/dev/null; }
+settle() { until_ok no_runner; }
 launch() {  # run the launcher once and wait for any runner it started
     : > "$FAKE_LANES"; : > "$LOG" 2>/dev/null || true
     "$H/bin/tick.sh"
-    sleep 2
+    settle
 }
 
 # Half width on a 3-slot pool is 2. Both allowed slots held, one issue waiting for the slot.
 usage 10 68; echo 5 > "$FAKE_WORK"; echo 1 > "$FAKE_READY"
-hold 1; hold 2; sleep 0.3
+hold 1; hold 2
 launch
 check "a full pool starts one landing tick for an ai:ready issue" \
     'grep -q "spawning 1 landing tick" "$LOG" && grep -q "landing tick: claim only an issue labelled" "$FAKE_LANES"' \
@@ -80,13 +95,12 @@ check "a window that allows no slot starts no landing tick" '[ ! -s "$FAKE_LANES
 
 usage 10 68
 # A process whose command line carries the landing lane stands for a live landing tick.
-"$H/livebin/claude" -p "This tick is the merge slot's landing tick: live" >/dev/null 2>&1 & holders+=($!)
-sleep 0.3
+live "landing tick: live" "$H/livebin/claude" -p "This tick is the merge slot's landing tick: live"
 launch
 check "a live landing tick keeps a second one from starting" '[ ! -s "$FAKE_LANES" ]' "lanes=$(cat "$FAKE_LANES")"
 release_all
 
-usage 10 68; echo 1 > "$FAKE_READY"; hold 1; sleep 0.3
+usage 10 68; echo 1 > "$FAKE_READY"; hold 1
 launch
 check "with a slot free inside the width, the normal tick starts and no landing tick" \
     '! grep -q "landing tick" "$LOG" 2>/dev/null && [ -s "$FAKE_LANES" ] && ! grep -q "landing tick" "$FAKE_LANES"' \
@@ -104,13 +118,12 @@ cp "$H/livebin/claude" "$H/livebin/fleet"
 chmod +x "$H/fakebin/fleet" "$H/livebin/fleet"
 printf '%s\n' "FLEET_DISPATCH=1" "FLEET_BIN=$H/fakebin/fleet" >> "$H/instance/harness.env"
 export FAKE_FLEET_ARGV="$H/fleet-argv.txt"
-usage 10 68; echo 1 > "$FAKE_READY"; hold 1; hold 2; sleep 0.3
+usage 10 68; echo 1 > "$FAKE_READY"; hold 1; hold 2
 launch
 check "through fleet, the landing tick is dispatched with its label" \
     'grep -q "landing tick: claim only an issue labelled" "$FAKE_LANES" && grep -q -- "--label tick=landing$" "$FAKE_FLEET_ARGV"' \
     "lanes=$(cat "$FAKE_LANES") argv=$(cat "$FAKE_FLEET_ARGV" 2>/dev/null)"
-"$H/livebin/fleet" dispatch --device auto --adapter claude --wait --label tick=landing >/dev/null 2>&1 & holders+=($!)
-sleep 0.3
+live "tick=landing" "$H/livebin/fleet" dispatch --device auto --adapter claude --wait --label tick=landing
 launch
 check "a live dispatched landing tick keeps a second one from starting" '[ ! -s "$FAKE_LANES" ]' "lanes=$(cat "$FAKE_LANES")"
 release_all
