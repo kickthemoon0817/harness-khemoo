@@ -282,6 +282,10 @@ pub fn sections(snapshot: &Value, access_token: &str) -> Vec<(String, String)> {
         ("flow".to_owned(), flow_section(snapshot)),
         ("sources".to_owned(), sources_footer(snapshot, &query)),
     ]);
+    // Accounts off, the page and its section list are what they were without them.
+    if !snapshot["accounts"].is_null() {
+        sections.push(("accounts".to_owned(), accounts_panel(snapshot)));
+    }
     sections
 }
 
@@ -326,6 +330,11 @@ pub fn document(
     let leases_present = sections
         .iter()
         .any(|(name, body)| name == "leases" && !body.is_empty());
+    let accounts = if sections.iter().any(|(name, _)| name == "accounts") {
+        slot("accounts")
+    } else {
+        String::new()
+    };
     format!(
         concat!(
             r#"<!doctype html><html lang="en"><head><meta charset="utf-8">"#,
@@ -339,7 +348,7 @@ pub fn document(
             r#"<section class="grid{split}">{ticks}{leases}"#,
             "</section>{fleet_devices}{fleet_sessions}{queue}",
             r#"<section class="grid thirds">{landings}{stalls}{allocator}</section>"#,
-            "{supervisor}{flow}{sources}</main></body></html>"
+            "{supervisor}{accounts}{flow}{sources}</main></body></html>"
         ),
         refresh = refresh_s,
         query = query,
@@ -361,6 +370,7 @@ pub fn document(
         stalls = slot("stalls"),
         allocator = slot("allocator"),
         supervisor = slot("supervisor"),
+        accounts = accounts,
         flow = slot("flow"),
         sources = slot("sources"),
     )
@@ -508,12 +518,19 @@ fn usage_block(usage: &Value) -> String {
     }
     let mut rows = String::new();
     for agent in list(&usage["agents"]) {
-        let name = e(&agent["agent"]);
-        let cooling = if truthy(&agent["cooling"]) {
+        let name = match agent["account"].as_str() {
+            Some(account) => escape(&format!("{}@{account}", s(&agent["agent"]))),
+            None => e(&agent["agent"]),
+        };
+        let mut cooling = if truthy(&agent["cooling"]) {
             format!(" {}", pill("warning", "every entry cooling"))
         } else {
             String::new()
         };
+        if agent["sign_in"]["state"] == "signed_out" {
+            cooling.push(' ');
+            cooling.push_str(&pill("critical", "signed out"));
+        }
         let windows = list(&agent["windows"]);
         if windows.is_empty() {
             write!(
@@ -1830,6 +1847,62 @@ fn supervisor_panel(snapshot: &Value) -> String {
         failures = t(&view["failures"]),
         runs = lines("runs"),
         log = lines("directive_log"),
+    )
+}
+
+/// Each account folder: its sign-in as last checked, when that ends, with a warning under 3 days,
+/// and the ticks its usage allows.
+fn accounts_panel(snapshot: &Value) -> String {
+    let view = &snapshot["accounts"];
+    let mut rows: String = list(&view["accounts"])
+        .iter()
+        .map(|account| {
+            let sign_in = &account["sign_in"];
+            let how = sign_in["method"]
+                .as_str()
+                .map(|method| format!(" ({method})"))
+                .unwrap_or_default();
+            let state = match s(&sign_in["state"]) {
+                "signed_in" => pill("good", &format!("signed in{how}")),
+                "signed_out" => pill("critical", "signed out"),
+                "unknown" => pill("idle", "unknown"),
+                _ => pill("idle", "not checked yet"),
+            };
+            let ends = clock(&sign_in["expires_at"], false);
+            let ends = match account["sign_in_days_left"].as_i64() {
+                Some(days) if days < 0 => pill("critical", &format!("ended {ends}")),
+                Some(days) if days < 3 => pill("warning", &format!("ends {ends}, under 3 days")),
+                Some(_) => format!(r#"<span class="sub">ends {}</span>"#, escape(&ends)),
+                None => r#"<span class="sub">-</span>"#.to_owned(),
+            };
+            let key = match account["account"].as_str() {
+                Some(name) => format!("{}@{name}", s(&account["agent"])),
+                None => s(&account["agent"]).to_owned(),
+            };
+            format!(
+                r#"<tr><td>{}</td><td>{state}</td><td>{ends}</td><td class="num">cap {}</td><td>{}</td></tr>"#,
+                escape(&key),
+                t(&account["cap"]),
+                freshness_pill(account)
+            )
+        })
+        .collect();
+    if rows.is_empty() {
+        r#"<tr><td class="empty">no account folder</td></tr>"#.clone_into(&mut rows);
+    }
+    let error = if view["error"].is_null() {
+        String::new()
+    } else {
+        format!("<p>{}</p>", pill("critical", s(&view["error"])))
+    };
+    format!(
+        concat!(
+            r#"<article class="panel"><h2>Accounts <span class="sub">sign-in as last checked</span></h2>{error}"#,
+            r#"<div class="scroll"><table><colgroup><col style="width:18%"><col style="width:22%"><col style="width:22%">"#,
+            r#"<col style="width:70px"><col></colgroup>{rows}</table></div></article>"#
+        ),
+        error = error,
+        rows = rows,
     )
 }
 

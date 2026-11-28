@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prints the usage reading of this tick's agent and exits 0 while each of its windows is under its
 # stand-down point (`harness usage check`, docs/INSTANCE.md), 1 at or above one, and 2 when no fresh
-# reading exists. The agent is the one HARNESS_TICK names, else the fleet adapter that started the
-# tick, else TICK_AGENT. Ticks run it before starting any build, suite, long run or agent.
+# reading exists. The agent is the one HARNESS_TICK names, agent@account for a tick on an account,
+# else the fleet adapter that started the tick, else TICK_AGENT. Ticks run it before starting any
+# build, suite, long run or agent.
 set -u
 # shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/instance.sh"
@@ -73,4 +74,5 @@ esac
 vars=$(compgen -v USAGE_)
 # shellcheck disable=SC2086,SC2163
 [ -n "$vars" ] && export $vars
+[ -n "${AGENT_ACCOUNTS_DIR:-}" ] && export AGENT_ACCOUNTS_DIR
 exec "$HARNESS_BIN" usage check --agent "$agent"

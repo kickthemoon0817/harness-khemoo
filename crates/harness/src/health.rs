@@ -29,6 +29,7 @@ const RECENT_TICKS: usize = 20;
 const LIVE_TICKS: usize = 16;
 const QUEUE_ISSUES: usize = 15;
 const LIMIT_HITS: usize = 10;
+const MAX_ACCOUNTS: usize = 32;
 const TAIL: u64 = 4096;
 
 #[derive(clap::Args)]
@@ -233,7 +234,7 @@ pub fn assemble(
         .and_then(|machines| machines.iter().find(|machine| machine["kind"] == "local"))
         .cloned()
         .unwrap_or(Value::Null);
-    json!({
+    let mut doc = json!({
         "version": 1,
         "generated_at": iso_of(now),
         "paused": {"paused": snapshot["harness"]["paused"], "reason": snapshot["harness"]["paused_reason"]},
@@ -249,7 +250,7 @@ pub fn assemble(
             "width": snapshot["usage"]["width"],
             "cooling": snapshot["usage"]["cooling"],
             "cooling_models": snapshot["harness"]["cooling_models"],
-            "agents": snapshot["usage"]["agents"],
+            "agents": usage_agents(&snapshot["usage"]["agents"]),
             "error": snapshot["usage"]["error"],
         },
         "ticks": ticks,
@@ -276,7 +277,96 @@ pub fn assemble(
             "disk": disk(&[("state", paths.state.clone()), ("worktrees", setting("WORKTREE_ROOT").map(PathBuf::from).unwrap_or_default())]),
         },
         "supervisor": supervisor::view(setting, paths, now),
-    })
+    });
+    // Left out while accounts are off, so the snapshot is what it was without them.
+    if !snapshot["accounts"].is_null() {
+        doc["accounts"] = accounts(&snapshot["accounts"]);
+    }
+    doc
+}
+
+/// Each agent's usage as the dashboard weighs it. An account's is held to the fields named here, its
+/// folder's paths taken out of its source and its reading's reason, so the supervisor learns why an
+/// account allows nothing but not where its folder is.
+fn usage_agents(agents: &Value) -> Value {
+    let Some(agents) = agents.as_array() else {
+        return agents.clone();
+    };
+    agents
+        .iter()
+        .map(|agent| {
+            if agent["account"].is_null() {
+                return agent.clone();
+            }
+            let source = agent["source"].as_str().map(|source| {
+                source
+                    .split_once(':')
+                    .map_or(source, |(kind, _)| kind)
+                    .to_owned()
+            });
+            json!({
+                "agent": text(&agent["agent"], LABEL_CHARS),
+                "account": text(&agent["account"], LABEL_CHARS),
+                "source": source,
+                "reading": {
+                    "state": text(&agent["reading"]["state"], LABEL_CHARS),
+                    "detail": agent["reading"]["detail"].as_str().map(|detail| clip(&without_paths(detail), 200)),
+                },
+                "sign_in": {
+                    "state": text(&agent["sign_in"]["state"], LABEL_CHARS),
+                    "method": text(&agent["sign_in"]["method"], LABEL_CHARS),
+                    "expires_at": text(&agent["sign_in"]["expires_at"], LABEL_CHARS),
+                    "reason": text(&agent["sign_in"]["reason"], LABEL_CHARS),
+                },
+                "windows": agent["windows"],
+                "cap": agent["cap"].as_u64(),
+                "running": agent["running"].as_u64(),
+                "cooling": agent["cooling"].as_bool(),
+                "age_s": agent["age_s"],
+            })
+        })
+        .collect()
+}
+
+/// `text` with each word that is an absolute path read as `<path>`.
+fn without_paths(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            if word.starts_with('/') {
+                if word.ends_with(':') {
+                    "<path>:"
+                } else {
+                    "<path>"
+                }
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Each account's sign-in and cap, the fields named here and no other.
+fn accounts(view: &Value) -> Value {
+    let listed: Vec<Value> = view["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(MAX_ACCOUNTS)
+        .map(|account| {
+            json!({
+                "agent": text(&account["agent"], LABEL_CHARS),
+                "account": text(&account["account"], LABEL_CHARS),
+                "signed_in": text(&account["sign_in"]["state"], LABEL_CHARS),
+                "method": text(&account["sign_in"]["method"], LABEL_CHARS),
+                "expires_at": text(&account["sign_in"]["expires_at"], LABEL_CHARS),
+                "days_left": account["sign_in_days_left"].as_i64(),
+                "cap": account["cap"].as_u64(),
+                "reading": text(&account["reading"]["state"], LABEL_CHARS),
+            })
+        })
+        .collect();
+    json!({"error": text(&view["error"], 200), "accounts": listed})
 }
 
 /// The newest tick logs, newest first: each one's last exit trailer, how many attempts it holds, and
@@ -557,6 +647,20 @@ fn summary(doc: &Value) -> String {
             doc["supervisor"]["failures"]
         ),
     );
+    if let Some(accounts) = doc["accounts"]["accounts"].as_array() {
+        let words: Vec<String> = accounts
+            .iter()
+            .map(|account| {
+                format!(
+                    "{}@{} {}",
+                    account["agent"].as_str().unwrap_or_default(),
+                    account["account"].as_str().unwrap_or_default(),
+                    account["signed_in"].as_str().unwrap_or("not checked yet")
+                )
+            })
+            .collect();
+        line(&mut out, format!("accounts:   {}", words.join(", ")));
+    }
     out
 }
 
@@ -595,6 +699,64 @@ mod tests {
             "health": {"stalls": null, "allocator": [{"text": "20261128T100000Z slot1 claude:opus hit its usage limit; cooling 1800s"}]},
             "machines": [{"kind": "local", "load1": 0.5, "nproc": 8, "mem_used_mb": 1000.0, "mem_total_mb": 8000.0}]
         })
+    }
+
+    #[test]
+    fn an_accounts_usage_keeps_its_named_fields_and_no_folder_path() {
+        let dir = TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        let mut snapshot = snapshot();
+        snapshot["usage"]["agents"] = json!([
+            {"agent": "claude", "cap": 2, "source": "claude-cache:/home/dev-a/.claude/usage-cache.json"},
+            {"agent": "claude", "account": "work", "cap": 0, "running": 0, "cooling": false,
+             "source": "claude-cache:/home/dev-a/agents/claude/claude-work/usage-cache.json",
+             "reading": {"state": "unreadable", "detail": "/home/dev-a/agents/claude/claude-work/usage-cache.json: No such file"},
+             "sign_in": {"state": "signed_in", "method": "claude.ai", "expires_at": null, "checked_at": 1, "email": "someone@example.com"},
+             "windows": [], "taken_ms": 5, "email": "someone@example.com"}
+        ]);
+        let doc = assemble(&local(snapshot), &paths, &|_| None, 1_800_000_000);
+        let agents = &doc["usage"]["agents"];
+        assert_eq!(
+            agents[0]["source"], "claude-cache:/home/dev-a/.claude/usage-cache.json",
+            "a seat without an account is as it was"
+        );
+        assert_eq!(
+            agents[1],
+            json!({"agent": "claude", "account": "work", "source": "claude-cache",
+                   "reading": {"state": "unreadable", "detail": "<path>: No such file"},
+                   "sign_in": {"state": "signed_in", "method": "claude.ai", "expires_at": null, "reason": null},
+                   "windows": [], "cap": 0, "running": 0, "cooling": false, "age_s": null})
+        );
+    }
+
+    #[test]
+    fn accounts_carry_only_their_named_fields_and_only_while_on() {
+        let dir = TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        let now = supervisor::epoch_of("2026-11-28T12:00:00Z").unwrap();
+        let off = assemble(&local(snapshot()), &paths, &|_| None, now);
+        assert!(off.get("accounts").is_none());
+        let mut on = snapshot();
+        on["accounts"] = json!({"error": null, "accounts": [{
+            "agent": "claude", "account": "work", "cap": 4, "reading": {"state": "fresh"},
+            "source": "claude-cache:/home/dev-a/agents/claude/claude-work/usage-cache.json",
+            "sign_in": {"state": "signed_in", "method": "claude.ai", "expires_at": "2026-12-01T00:00:00Z",
+                        "checked_at": 1, "email": "someone@example.com"},
+            "sign_in_days_left": 2, "email": "someone@example.com"
+        }]});
+        let doc = assemble(&local(on), &paths, &|_| None, now);
+        assert_eq!(
+            doc["accounts"],
+            json!({"error": null, "accounts": [{
+                "agent": "claude", "account": "work", "signed_in": "signed_in", "method": "claude.ai",
+                "expires_at": "2026-12-01T00:00:00Z", "days_left": 2, "cap": 4, "reading": "fresh"
+            }]})
+        );
+        assert!(summary(&doc).contains("accounts:   claude@work signed_in"));
     }
 
     #[test]

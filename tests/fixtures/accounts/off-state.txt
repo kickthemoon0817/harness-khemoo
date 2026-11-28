@@ -1,0 +1,72 @@
+--- claude
+argv: -p --model model-a
+HARNESS_TICK=state=H/state slot=1 agent=claude model=model-a kind=work
+TICK_AGENT=claude
+claude model-a work
+1 claude model-a work
+claude: five_hour=10% weekly=20% stop=88% long_stop=88% ceiling=90%: go on
+--- codex
+argv: exec --model model-x -
+HARNESS_TICK=state=H/state slot=1 agent=codex model=model-x kind=work
+TICK_AGENT=claude
+codex model-x work
+1 codex model-x work
+codex: primary=30% stop=88% long_stop=88% ceiling=90%: go on
+--- fetch
+USAGE_CACHE=H/usage-cache.json
+USAGE_FETCH=H/fakebin/fetch
+USAGE_REFRESH_AFTER=0
+--- check
+harness home:  H
+instance:      H/instance
+config:        H/instance/harness.env
+state:         H/state
+target repo:   H/target
+worktree root: H/worktrees
+repository:    example-org/example-repo
+queue:         H/fakebin/queue
+default agent: claude
+dispatch:      local
+agent claude: H/fakebin/claude -p --model <model> < prompt
+agent codex: H/fakebin/codex exec --model <model> - < prompt
+models:        claude:model-a codex:model-x
+model lane:    off
+hook env.sh: none
+hook hold: none
+hook worktree-busy: none
+hook worktree-remove: none
+hold:          not held
+usage:         claude: cap 2 of 2, 0 running, every entry cooling down, claude-cache:H/usage-cache.json
+usage:           five_hour 10% of 300 min, steps 60 70 80: 2
+usage:           weekly 20% of 10080 min, steps 80 85 88: 2
+usage:         codex: cap 2 of 2, 0 running, codex-sessions:H/home/.codex/sessions
+usage:           primary 30% of 10080 min, steps 80 85 88: 2
+usage:         pool: 2 of 2, room for 2 more
+instance complete
+--- usage
+{"width":2,"pool_cap":2,"room":2,"agents":[{"agent":"claude","source":"claude-cache:H/usage-cache.json","reading":{"state":"fresh"},"taken_ms":N,"windows":[{"name":"five_hour","used_pct":10.0,"window_minutes":300,"resets_at":null,"long":false,"steps":[60,70,80],"cap":2},{"name":"weekly","used_pct":20.0,"window_minutes":10080,"resets_at":null,"long":true,"steps":[80,85,88],"cap":2}],"cap":2,"running":0},{"agent":"codex","source":"codex-sessions:H/home/.codex/sessions","reading":{"state":"fresh"},"taken_ms":N,"windows":[{"name":"primary","used_pct":30.0,"window_minutes":10080,"resets_at":N,"long":true,"steps":[80,85,88],"cap":2}],"cap":2,"running":0}],"cooling":["claude"]}
+claude: cap 2 of 2, 0 running, every entry cooling down, claude-cache:H/usage-cache.json
+  five_hour 10% of 300 min, steps 60 70 80: 2
+  weekly 20% of 10080 min, steps 80 85 88: 2
+codex: cap 2 of 2, 0 running, codex-sessions:H/home/.codex/sessions
+  primary 30% of 10080 min, steps 80 85 88: 2
+pool: 2 of 2, room for 2 more
+--- state
+state/locks/claim.7
+state/locks/claim.guard
+state/locks/slot1.lock
+state/locks/slot2.lock
+state/logs/allocator.log
+state/logs/tick-TS-slot1.log
+state/model-cooldown/claude:model-a
+--- logs
+TS claude=2[five_hour:10%,weekly:20%] codex=2[primary:30%] pool=2 room=2 busy=0 claimable=1 -> spawning 1
+TS slot1 claude:model-a hit its usage limit; cooling 1800s
+[tick.sh] exit=1 duration=Ns agent=claude model=model-a
+[tick.sh] exit=0 duration=Ns agent=codex model=model-x
+--- snapshots
+["fleet","flow","generated_at","generated_epoch","harness","harness_home","health","history_hours","landings","leases","machines","queue","repo","sources","ticks","title","usage"]
+{"agents":[{"agent":"claude","cap":2,"cooling":true,"reading":{"state":"fresh"},"running":0,"source":"claude-cache:H/usage-cache.json","windows":[{"cap":2,"long":false,"name":"five_hour","resets_at":null,"steps":[60,70,80],"used_pct":10.0,"window_minutes":300},{"cap":2,"long":true,"name":"weekly","resets_at":null,"steps":[80,85,88],"used_pct":20.0,"window_minutes":10080}]},{"agent":"codex","cap":2,"cooling":false,"reading":{"state":"fresh"},"running":0,"source":"codex-sessions:H/home/.codex/sessions","windows":[{"cap":2,"long":true,"name":"primary","resets_at":N,"steps":[80,85,88],"used_pct":30.0,"window_minutes":10080}]}],"available":true,"cooling":["claude"],"error":null,"pool_cap":2,"room":2,"width":2}
+["claude:model-a","codex:model-x"]
+["config","generated_at","held","host","paused","queue","recent_ticks","signals","supervisor","ticks","usage","version"]
+{"agents":[{"agent":"claude","cap":2,"cooling":true,"reading":{"state":"fresh"},"running":0,"source":"claude-cache:H/usage-cache.json","windows":[{"cap":2,"long":false,"name":"five_hour","resets_at":null,"steps":[60,70,80],"used_pct":10.0,"window_minutes":300},{"cap":2,"long":true,"name":"weekly","resets_at":null,"steps":[80,85,88],"used_pct":20.0,"window_minutes":10080}]},{"agent":"codex","cap":2,"cooling":false,"reading":{"state":"fresh"},"running":0,"source":"codex-sessions:[redacted]","windows":[{"cap":2,"long":true,"name":"primary","resets_at":N,"steps":[80,85,88],"used_pct":30.0,"window_minutes":10080}]}],"cooling":["claude"],"cooling_models":[{"agent":"claude","entry":"claude:model-a","label":"claude model-a","model":"model-a","remaining_s":N}],"error":null,"pool_cap":2,"width":2}

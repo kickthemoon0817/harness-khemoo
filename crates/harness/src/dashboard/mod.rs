@@ -14,7 +14,7 @@
 
 mod buildlocks;
 mod collector;
-mod command;
+pub(crate) mod command;
 pub(crate) mod env;
 pub(crate) mod files;
 mod fleet;

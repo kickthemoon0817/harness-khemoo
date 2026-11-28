@@ -71,22 +71,25 @@ at most once an hour. `bin/tick.sh check` prints the resolved paths, repository,
 default agent, where ticks run, each agent's command line, models, lane, each hook's state (`present`, `none`, `present but not executable (ignored)`, or for `env.sh`
 `present but not readable (ignored)`), the hold state,
 whether the harness is paused (`state/paused` exists, or no uncommented crontab line runs
-`bin/tick.sh`), and `harness usage`'s report of each agent's windows and the pool's cap. With
+`bin/tick.sh`), `harness usage`'s report of each agent's windows and the pool's cap, and with
+`AGENT_ACCOUNTS_DIR` set each account folder's sign-in (`account:` lines, [Accounts](#accounts)). With
 `FLEET_DISPATCH=1` it also runs `fleet status --json` under `FLEET_CHECK_TIMEOUT_S` (default 60 s)
 and prints each device, reachable with each agent's capacity or unreachable with fleet's error. It
-prints `missing: <item>` for each gap, including usage settings `harness usage` refuses and an agent
-that no reachable device offers (`FLEET_DEVICE`, when it names one), and exits 1, or prints
+prints `missing: <item>` for each gap, including usage settings `harness usage` refuses, an account
+whose folder is missing or refused, and an agent that no reachable device offers (`FLEET_DEVICE`,
+when it names one), and exits 1, or prints
 `instance complete` and exits 0.
 
 ## Agents
 
-`TICK_MODELS` is one priority list across agents, best first. Each entry is `agent:model`, or a bare
-model that `TICK_AGENT` (default `claude`) runs; a model whose name holds a colon needs its agent.
+`TICK_MODELS` is one priority list across agents, best first. Each entry is `agent:model`,
+`agent@account:model` for a tick on one of the agent's [accounts](#accounts), or a bare model that
+`TICK_AGENT` (default `claude`) runs; a model whose name holds a colon needs its agent.
 `LANE_MODEL` takes the same form. A non-empty `$HARNESS_STATE/tick-model` replaces the list. Each
 tick runs on the first entry that is not cooling down and whose agent runs fewer ticks than its
 usage windows allow (below); when an entry's agent prints its usage-limit message within
 `CHAIN_MIN_TICK_S`, the entry cools down for `MODEL_COOLDOWN_S` (stamped
-`$HARNESS_STATE/model-cooldown/<agent>:<model>`) and the tick re-runs at once on the next entry.
+`$HARNESS_STATE/model-cooldown/<entry>`) and the tick re-runs at once on the next entry.
 An agent name is 1 to 32 of `a-z`, `0-9` and `_`.
 
 Three agents run locally, each with the composed prompt on stdin, never in argv:
@@ -116,7 +119,8 @@ The runner starts each tick, a local agent or `fleet dispatch`, as its own child
 pipe, and records it in `$HARNESS_STATE/locks/slot<n>.tick` (mode 0600, written by rename) as
 `pid starttime bootid agent model kind`, where `starttime` is field 22 of `/proc/<pid>/stat`,
 `bootid` is `/proc/sys/kernel/random/boot_id` (a file a crash left behind matches nothing after a
-reboot) and `kind` is `work`, `lane` or `landing`. It removes the file when the tick ends, so a slot records one tick at
+reboot), `agent` is `agent@account` for a tick on an account, and `kind` is `work`, `lane` or
+`landing`. It removes the file when the tick ends, so a slot records one tick at
 most. A tick is live while `/proc/<pid>/stat` gives the same start time, which a reused pid does
 not. Only `stat` is read, never a process's environment or descriptors, which an agent CLI that
 marks itself non-dumpable (the release Codex CLI does) keeps private. `harness ticks [--json]` lists
@@ -133,7 +137,7 @@ device, the session's `tick` file that fleetd writes for the agent it starts and
 symlink. An operator's own agent CLI is recorded nowhere, so it never
 takes a claim or the merge lock. Neither does the supervisor: no slot file records it. The tick
 also carries `HARNESS_TICK="state=<HARNESS_STATE>
-slot=<n> agent=<agent> model=<model> kind=<kind>"`, which tells its own tool shells, and
+slot=<n> agent=<agent> model=<model> kind=<kind>"`, `agent@account` again on an account, which tells its own tool shells, and
 `libexec/usage-ok.sh` among them, which agent they run under; nothing counts or identifies ticks by it.
 The runner starts the agent, or `fleet dispatch`, in a session and process group of its own, so
 `kill -TERM -<pid>` stops the tick and its tools but never the runner, which writes the exit
@@ -143,11 +147,11 @@ ignore, so `kill -INT` and `timeout -s INT` reach every tool it runs.
 
 ## Usage windows
 
-`harness usage [--json]` prints each agent of the model list and the lane with its windows, cap and
-live ticks, and the pool's cap and room; `harness usage pick` names the entry the next tick runs on;
+`harness usage [--json]` prints each agent, and each account, of the model list and the lane with
+its windows, cap and live ticks, and the pool's cap and room; `harness usage pick` names the entry the next tick runs on;
 `harness usage refresh` runs the fetch command (below) of each agent whose reading is old, which the
 launcher does once per firing and a runner once per tick it starts, and nothing else does but
-`check`; `harness usage check --agent <agent>` is the stand-down test
+`check`; `harness usage check --agent <agent>[@<account>]` is the stand-down test
 `libexec/usage-ok.sh` runs for the agent its tick's `HARNESS_TICK` names (else `FLEET_ADAPTER`, set
 by fleetd, else `TICK_AGENT`): exit 0 while every window is under its stand-down point, 1 at or
 past one, 2 without a fresh reading. Both read the keys below from the environment, which
@@ -195,6 +199,141 @@ full. A running tick
 stands down at `USAGE_TICK_STOP_PCT` (default two under the ceiling) in a short window and at
 `USAGE_TICK_STOP_LONG_PCT` (default `USAGE_TICK_STOP_PCT`) in a long one.
 
+## Accounts
+
+> **Check the terms before adding accounts.** One third-party summary says both Anthropic and
+> OpenAI allow several accounts for separate purposes, but not to get around one workload's rate
+> limits. Putting one queue across accounts to get more usage may be exactly that. Read each
+> provider's current terms first. Accounts for separate purposes (work, personal, a client) are the
+> safe use. One source also says Anthropic's list of environment variables does not include
+> `CLAUDE_CONFIG_DIR`: it isolates an account in Claude Code 2.1.332, but could change.
+
+Off unless `AGENT_ACCOUNTS_DIR` is set: the core has no default. While it is unset and no entry
+names an account, nothing here happens. An account is a folder the owner creates and signs in to
+once, by hand, with the agent's own CLI. The harness never creates one, signs in or reads a
+credential: it only picks the folder a tick runs with.
+
+```
+$AGENT_ACCOUNTS_DIR/            for example $HOME/.agents-accounts
+  claude/claude-<name>/         run as CLAUDE_CONFIG_DIR   (sign in: CLAUDE_CONFIG_DIR=<folder> claude auth login)
+  codex/codex-<name>/           run as CODEX_HOME          (sign in: CODEX_HOME=<folder> codex login)
+  gemini/gemini-<name>/         run as GEMINI_CLI_HOME     (sign in: GEMINI_CLI_HOME=<folder> gemini)
+```
+
+A name is 1 to 32 of `a-z`, `0-9` and `-`, not starting with `-`. The root is an absolute path;
+write it with `$HOME`, not `~`, since the dashboard expands only `$HOME` in a path key. An account
+folder, or its agent's folder, that is a symlink is refused, and so is one of them or the root that
+is another user's or that its group or every user can write to: on macOS every user shares the
+`staff` group. The refusal names the fix, `chmod go-w <folder>`. On a host whose umask is 002, as
+many Linux distributions set it, `mkdir` makes group-writable folders, so run that once for the
+root and each folder below it.
+
+An account signs in only through its folder. Its tick, its fetch command and its sign-in check run
+without every agent's credential variables, its own agent's and the others', since a tick may start
+another agent as a sub-agent, and either would otherwise sign in as the default account:
+
+| Agent | Variables unset |
+|---|---|
+| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `AWS_BEARER_TOKEN_BEDROCK` |
+| `codex` | `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENAI_IDENTITY_TOKEN_FILE` |
+| `gemini` | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`, `GOOGLE_CLOUD_ACCESS_TOKEN`, `GEMINI_DEFAULT_AUTH_TYPE` |
+| the harness | `USAGE_CREDENTIALS_FILE`, which may name the default account's credentials file; an account's fetch gets its folder's own instead, when there is one |
+
+The list was read from Claude Code 2.1.332, Codex 0.155.1 and Gemini CLI 0.27.3; a variable a
+later release adds is not on it. The supervisor on an account takes none of them into its cut-down
+environment either. An account signed in with an API key keeps that key in its folder.
+
+**Entries.** `agent@account:model` names an account in `TICK_MODELS`, `LANE_MODEL`,
+`SUPERVISOR_MODEL` and `state/tick-model`, as in
+`TICK_MODELS="claude@work:claude-opus-5-5 claude@home:claude-opus-5-5 codex@work:gpt-5.5"`. An entry
+without `@` runs as it always has, with the CLI's own default folder. An entry with no `:` whose
+text before `@` is `claude`, `codex` or `gemini` and whose text after it is an account name, such as
+`claude@work`, names no model, and `check` refuses it. Any other bare model may hold `@`, as a
+Vertex model id does (`claude-opus-4@20250514`), and runs on `TICK_AGENT` as before. The runner sets the agent's
+variable to the account's folder for that tick only (`harness accounts env`), and records
+`agent@account` in the slot file, `HARNESS_TICK` and the log's trailer, so `libexec/usage-ok.sh`
+checks that account's windows. A folder refused when its tick is about to start is logged and the
+entry passed over. `check` names each account whose folder is missing or refused, and until it is
+fixed the launcher starts nothing. With `FLEET_DISPATCH=1` an entry that names an account is refused:
+each fleet device keeps one account per agent, set in its `fleetd.toml`. A tick runs on one account
+start to finish; a chained tick picks its entry again.
+
+**Counting.** Each account counts as an agent of its own: its reading, its cap, its live ticks, its
+part of the pool (the caps of every agent and account summed, at most `TICK_WIDTH`) and its
+cooldowns (`model-cooldown/<agent>@<account>:<model>`). A usage limit on `claude@work` cools only
+`claude@work`'s entry, and the tick re-runs at once on the next. `USAGE_STEPS_<agent>_<window>`
+applies to each of the agent's accounts.
+
+**Usage.** Each account reads its own windows, and never through its agent's keys: an account's
+source is `USAGE_SOURCE_<agent>_<account>`, else its folder's own default, and its fetch command only
+`USAGE_FETCH_<agent>_<account>`, a `-` of the name written `_` (`claude@client-2` reads
+`USAGE_SOURCE_claude_client_2`). A bare `codex-sessions` there names the folder's own sessions.
+
+| Agent | Source without its own | Fetch command without its own |
+|---|---|---|
+| `claude` | `claude-cache:<folder>/usage-cache.json` | none, so it allows nothing (below) |
+| `codex` | `codex-sessions:<folder>/sessions` | none, and it needs none |
+| `gemini` | `none` while `USAGE_SOURCE_gemini` is `none`; refused while it names a reading, with `an account never reads USAGE_SOURCE_gemini: set USAGE_SOURCE_gemini_<account>`, logged once; unset, none | none |
+
+Two seats of the lists whose sources name one file or directory, one of them on an account, are
+refused: `harness usage` names them (`<seat> and <seat> both read their usage from <path>`), so
+`check` fails and the launcher starts nothing, since the pool would count one account's usage
+twice. The supervisor's account, with `SUPERVISOR=1`, counts among those seats and gets its fetch
+command run with the lists'. Its entry, `SUPERVISOR_MODEL` or else the last of the configured list,
+is taken from the configured list even while a directive narrows the model list;
+while it has no fresh reading, the launcher logs `supervisor not due: <account> has no fresh usage
+reading` once.
+
+A claude account fails closed. Claude's own fetch command (`USAGE_FETCH_claude`, `USAGE_FETCH` or
+the default script) reads the default account's login, and run for an account it would fill that
+account's cache with the default account's usage, letting its ticks run past its real limit. So a
+claude account runs only its own `USAGE_FETCH_claude_<account>`. Without one, its Claude cache is
+read as no reading at all, even a fresh one, and its cap is 0: the launcher logs `<agent>@<name>: no
+usage fetch for this account: set USAGE_FETCH_claude_<account>; none of its ticks start` once, and
+`harness accounts`, `check` and the dashboard show it as the reason. An account that names its own
+`json:` source needs no fetch. A codex account reads its own folder's sessions and needs none; the
+default entry, without `@`, keeps claude's fetch as before.
+
+*Writing a per-account fetch.* It runs as any fetch command does (no input or output, killed after
+60 s), without its agent's credential variables, and with these set:
+
+| Variable | Value |
+|---|---|
+| `CLAUDE_CONFIG_DIR` | the account's folder |
+| `USAGE_CACHE` | the file the account's source reads, by default `<folder>/usage-cache.json` in Claude Code's cache shape (the `claude-cache` row of [Usage windows](#usage-windows)); unset when the source is no file |
+| `USAGE_CREDENTIALS_FILE` | `<folder>/.credentials.json`, only when that file exists; otherwise unset, even if the environment set one for the default account |
+
+It must read the account's own login and no other. On Linux Claude Code keeps a folder's login in
+`<folder>/.credentials.json`. On macOS it keeps it in the Keychain, under the service
+`Claude Code-credentials-<first 8 hex digits of the SHA-256 of the folder's path>`; the default
+folder's is `Claude Code-credentials`. That name was read from the Claude Code 2.1.332 binary and
+is unconfirmed: no account was signed in to check it, and a later release may change it. Verify it
+(`security find-generic-password -s '<service>'` lists the entry without printing its secret) before
+relying on it.
+
+**Sign-in.** `harness accounts [--json]` lists each account folder found under the root: its agent
+and name, whether it is signed in and how, when the sign-in ends where the CLI says, and its cap
+and reading. It asks `claude auth status --json` with `CLAUDE_CONFIG_DIR` set and
+`codex login status` with `CODEX_HOME` set (`AGENT_BIN_<agent>`, 20 s each), and keeps from their
+answers only claude's `loggedIn`, `authMethod` and `loginExpiresAt` and the method word of codex's
+`Logged in using ...` line: never the email, organization or key either prints. Gemini's CLI has no
+command that answers without starting a session, so a gemini account reads `unknown`. Each answer
+is kept, owner-only, in `$HARNESS_STATE/accounts/<agent>@<name>.json` and asked again once it is
+over 5 minutes old: by `harness usage refresh`, which the launcher and the runners run, for the
+accounts of the lists and, with `SUPERVISOR=1`, the supervisor's, and by `harness accounts` for
+every folder; a check dated ahead of this host's clock is asked again, and what the file holds is
+held to the fields a check keeps when it is read back. An answer it cannot read (a CLI that hangs
+past its timeout, or output of another shape) leaves a signed-out account signed out, and makes a
+signed-in one `unknown` with the reason `unreadable answer`, since it was not seen signed in. An account found signed out counts as cap 0, and the
+launcher logs `<agent>@<name> is signed out; none of its ticks start until it signs in again` once
+to `allocator.log`, whichever check found it, and `... is signed in again` when it is; an unknown
+state blocks nothing. `check` prints the list (`account:` lines), `harness health` carries it under
+`accounts` (agent, account, sign-in state, method, end, days left, cap and reading only), and the
+dashboard shows it ([Dashboard sources](#dashboard-sources)). The snapshot holds an account's usage
+to its named fields too, with no path of its folder. `harness accounts env <agent@account>...`
+prints the env(1) arguments each tick on one runs with, one a line (an `--unset=<name>` for each
+variable of the table above, then `VARIABLE=folder`), or names each account refused and exits 1.
+
 ## Supervisor
 
 Off unless `SUPERVISOR=1`. While it is off, the launcher, the runners, `claim.sh`, `usage-ok.sh`
@@ -204,7 +343,7 @@ and the dashboard behave as if none of it existed, and a `state/directive.json` 
 | Key | Default | Meaning |
 |---|---|---|
 | `SUPERVISOR` | empty | `1` turns the supervisor and the directive on |
-| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` it runs on, on this host: `claude` or `codex` |
+| `SUPERVISOR_MODEL` | the last `TICK_MODELS` entry | the `agent:model` or `agent@account:model` it runs on, on this host: `claude` or `codex` |
 | `SUPERVISOR_FLAGS_<agent>` | below | the flags that run the agent with no tools, replacing the defaults; held to an allowlist (below) |
 | `SUPERVISOR_MAX_PARKS_PER_DAY` | 2 | the most issues the supervisor parks for the operator in 24 hours, counted from the directive log's last 64 KiB; a park past it, or one when the log cannot be read, is refused |
 | `SUPERVISOR_BUDGET_MIN` | 10 | minutes before `timeout` ends its tick |
@@ -228,7 +367,7 @@ scripts read them.
 The supervisor's agent runs in an empty temporary directory, its environment cut down to `HOME`,
 `PATH`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, `TERM` and what its CLI signs in with
 (`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `OPENAI_API_KEY`, `CODEX_HOME`, `XDG_CONFIG_HOME`)
-when they are set. GitHub's token never reaches it. Its flags by default, checked against each CLI's
+when they are set; on an account, its agent's variable names the account's folder instead. GitHub's token never reaches it. Its flags by default, checked against each CLI's
 `--help`:
 
 | Agent | Flags | What they guarantee |
@@ -458,7 +597,10 @@ The usage panel weighs each agent's windows as `harness usage` does, from the mo
 `MAX_SLOTS`, `TICK_WIDTH`, `MODEL_COOLDOWN_S` and every `USAGE_*` and `AGENT_*` key, read from
 harness.env as above (expanded as a path key is) and else from the environment. It never runs a
 `USAGE_FETCH` command: refreshing a reading is the launcher's job. It cannot tell whether the
-launcher wants a lane tick, so its pool is shown as at most the cap it gives.
+launcher wants a lane tick, so its pool is shown as at most the cap it gives. With
+`AGENT_ACCOUNTS_DIR` set, the Accounts panel lists each account folder with its sign-in as last
+checked, a warning when the sign-in ends in under 3 days and a critical mark once it has ended, its
+cap and its reading; the page never asks an agent's CLI itself.
 
 The host-health and stall panels appear when `$HARNESS_STATE/host_health.tsv` and
 `$HARNESS_STATE/stalls.log` exist. The instance's own scripts write them. `host_health.tsv` has

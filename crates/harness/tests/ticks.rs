@@ -109,11 +109,29 @@ fn a_recorded_live_process_is_a_tick_with_its_fields() {
             age_s: ticks.first().map_or(0, |tick| tick.age_s),
             slot: 2,
             agent: "codex".to_owned(),
+            account: None,
             model: "model-2".to_owned(),
             kind: Kind::Landing,
         }]
     );
     assert!(ticks[0].age_s < 10);
+}
+
+#[test]
+fn a_tick_on_an_account_is_counted_toward_it() {
+    let dir = scratch("account");
+    let mut procs = Procs(Vec::new());
+    let pid = procs.spawn(&mut sleeper());
+    record(&dir, 1, pid, start_ticks(pid), "claude@work", "work");
+    let ticks = scan(&state_of(&dir)).unwrap();
+    assert_eq!(
+        (
+            ticks[0].agent.as_str(),
+            ticks[0].account.as_deref(),
+            ticks[0].key()
+        ),
+        ("claude", Some("work"), "claude@work".to_owned())
+    );
 }
 
 #[test]
