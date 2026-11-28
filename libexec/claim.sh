@@ -34,9 +34,11 @@ case "$cmd" in
     echo "$issue $pid $now" > "$F"
     # Every claim, for the supervisor's loop signal: an issue claimed by tick after tick. Cut to
     # its newest lines past a MiB.
-    echo "$issue $pid $now" >> "$S/claims.log"
-    if [ "$(stat -c %s "$S/claims.log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
-      tail -n 2000 "$S/claims.log" > "$S/claims.log.new" && mv "$S/claims.log.new" "$S/claims.log"
+    if [ "${HARNESS_SUPERVISOR:-}" = 1 ]; then
+      echo "$issue $pid $now" >> "$S/claims.log"
+      if [ "$(stat -c %s "$S/claims.log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+        tail -n 2000 "$S/claims.log" > "$S/claims.log.new" && mv "$S/claims.log.new" "$S/claims.log"
+      fi
     fi
     echo "ACQUIRED"
     ;;
