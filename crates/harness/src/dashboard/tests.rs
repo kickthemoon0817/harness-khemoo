@@ -3221,8 +3221,7 @@ fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_whi
     config.usage_settings = vec![("TICK_MODELS".to_owned(), "claude:opus codex:gpt".to_owned())];
     let collector = Collector::new(config.clone(), None, pinned());
     let snapshot = collector.snapshot();
-    assert_eq!(snapshot["supervisor"]["enabled"], false);
-    assert_eq!(snapshot["supervisor"]["directive"]["status"], "none");
+    assert!(snapshot.get("supervisor").is_none());
     let off = render::sections(&snapshot, ACCESS_TOKEN);
     assert!(
         off.iter()
@@ -3235,7 +3234,7 @@ fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_whi
     let directive = json!({
         "version": 1, "reason": "one vendor <b>at a time</b>", "applied_at": at(0), "expires_at": at(3600),
         "width": 2, "models": ["codex:gpt"],
-        "stop": [{"pid": 4242, "reason": "loops on #7", "start": 1, "due_at": at(600)}]
+        "stop": [{"pid": 4242, "reason": "loops on #7", "start": 1, "due_at": at(1200)}]
     });
     std::fs::write(state.join("directive.json"), directive.to_string()).ok();
     std::fs::create_dir_all(state.join("supervisor")).ok();

@@ -1751,26 +1751,20 @@ fn stalls_panel(snapshot: &Value) -> String {
     )
 }
 
-/// The supervisor: whether it is on and when it is next due, the directive in force with its
-/// stops, its last runs and the directive log's tail. Left off while the supervisor is off and
-/// has left nothing behind.
+/// The supervisor: when it is next due, the directive in force with its stops, its last runs and
+/// the directive log's tail. Left off while the supervisor is off: the snapshot has no key for it.
 fn supervisor_panel(snapshot: &Value) -> String {
     let view = &snapshot["supervisor"];
     let directive = &view["directive"];
     let status = s(&directive["status"]);
-    let runs = list(&view["runs"]);
-    if !truthy(&view["enabled"]) && (status.is_empty() || status == "none") && runs.is_empty() {
+    if view.is_null() {
         return String::new();
     }
-    let state = if truthy(&view["enabled"]) {
-        format!(
-            "on, next due between {} and {}",
-            e(&view["next_due"]["earliest"]),
-            e(&view["next_due"]["latest"])
-        )
-    } else {
-        "off".to_owned()
-    };
+    let state = format!(
+        "on, next due between {} and {}",
+        e(&view["next_due"]["earliest"]),
+        e(&view["next_due"]["latest"])
+    );
     let level = match status {
         "active" => "good",
         "invalid" => "critical",

@@ -38,17 +38,30 @@ const CLAIMS_TAIL: u64 = 64 * 1024;
 /// The runs log keeps this many lines.
 const RUNS_KEPT: usize = 100;
 const SMALL_FILE: u64 = 4096;
+/// The marks of notes shown and stops sent are kept this long.
+const MARKS_KEPT_S: u64 = 2 * 86_400;
 /// The operators' comments kept for `harness health`.
 const OPERATOR_COMMENTS_KEPT: usize = 10;
 
-/// The keys the supervisor's and the directive's commands read from harness.env when the
-/// environment does not set them: harness.env is sourced, not exported, so a supervisor tick that
-/// runs `harness directive apply` has none of it in its environment.
-const CONFIG_KEYS: [&str; 20] = [
+/// Where things are: the environment's value wins over harness.env's, as the scripts read them.
+const PLACE_KEYS: [&str; 5] = [
     "HARNESS_STATE",
     "GH_REPO",
-    "OPERATOR_LOGINS",
     "WORKTREE_ROOT",
+    "LONG_LABEL",
+    "HOLD_TIMEOUT_S",
+];
+
+/// The rails: what the supervisor and its directive may do. Read from harness.env only, never from
+/// the environment, which a process of this user could set to loosen them.
+const RAIL_KEYS: [&str; 21] = [
+    "OPERATOR_LOGINS",
+    "ISSUE_LABEL",
+    "OPERATOR_LABEL",
+    "FIRST_LABEL",
+    "LOW_LABEL",
+    "LANE_LABEL",
+    "WIP_LABEL",
     "TICK_MODELS",
     "TICK_AGENT",
     "MAX_SLOTS",
@@ -56,8 +69,6 @@ const CONFIG_KEYS: [&str; 20] = [
     "MODEL_COOLDOWN_S",
     "TICK_BUDGET_MIN",
     "LONG_TICK_BUDGET_MIN",
-    "LONG_LABEL",
-    "HOLD_TIMEOUT_S",
     "SUPERVISOR",
     "SUPERVISOR_MODEL",
     "SUPERVISOR_BUDGET_MIN",
@@ -67,29 +78,36 @@ const CONFIG_KEYS: [&str; 20] = [
     "SUPERVISOR_STOP_GRACE_S",
 ];
 
-/// The environment's value of a key, else harness.env's for the keys [`CONFIG_KEYS`] names.
+/// A key as the supervisor's and the directive's commands read it: a rail ([`RAIL_KEYS`]) from
+/// harness.env only; a place ([`PLACE_KEYS`]) from the environment, else harness.env; anything else,
+/// the usage keys among them, from the environment, as `harness usage` reads it. harness.env is
+/// sourced, not exported, so a supervisor tick has none of it in its environment.
 pub fn config_lookup() -> impl Fn(&str) -> Option<String> {
     let file = harness_home()
         .map(|home| {
             crate::dashboard::env::read_keys(
                 &crate::dashboard::env_path(&home, &crate::dashboard::env_nonempty),
-                |key| CONFIG_KEYS.contains(&key),
+                |key| RAIL_KEYS.contains(&key) || PLACE_KEYS.contains(&key),
             )
         })
         .unwrap_or_default();
     move |key: &str| {
+        let from_file = || file.get(key).cloned().filter(|value| !value.is_empty());
+        if RAIL_KEYS.contains(&key) {
+            return from_file();
+        }
         std::env::var(key)
             .ok()
             .filter(|value| !value.is_empty())
-            .or_else(|| file.get(key).cloned().filter(|value| !value.is_empty()))
+            .or_else(|| PLACE_KEYS.contains(&key).then(from_file).flatten())
     }
 }
 
 #[derive(clap::Args)]
 #[command(after_help = "\
-Reads SUPERVISOR_MODEL, SUPERVISOR_BUDGET_MIN, SUPERVISOR_INTERVAL_S, SUPERVISOR_MIN_INTERVAL_S,
-TICK_MODELS, TICK_AGENT, LONG_TICK_BUDGET_MIN and GH_REPO from the environment, else harness.env,
-the usage keys from the environment, and its own state from $HARNESS_STATE/supervisor/.")]
+Reads the SUPERVISOR_* keys, TICK_MODELS, TICK_AGENT, the label keys and OPERATOR_LOGINS from
+harness.env only, GH_REPO and HARNESS_STATE from the environment, else harness.env, the usage keys
+from the environment, and its own state from $HARNESS_STATE/supervisor/.")]
 pub struct Args {
     #[command(subcommand)]
     command: Sub,
@@ -105,6 +123,8 @@ enum Sub {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Apply the last JSON answer of the supervisor's output: its directive and its GitHub actions.
+    Answer { output: PathBuf },
     /// Record the end of a run.
     End {
         #[arg(long)]
@@ -121,6 +141,7 @@ pub fn run(args: &Args) -> ExitCode {
         match &args.command {
             Sub::Due => due_command(&env, &settings, &paths),
             Sub::Begin { reason } => begin(&env, &paths, reason).map(|()| ExitCode::SUCCESS),
+            Sub::Answer { output } => crate::answer::run(&env, &paths, output).map(ExitCode::from),
             Sub::End { exit, duration } => {
                 end(&paths, *exit, *duration, now_s()).map(|()| ExitCode::SUCCESS)
             }
@@ -194,7 +215,7 @@ impl Settings {
             interval_s: number(env, "SUPERVISOR_INTERVAL_S", 1800)?,
             min_interval_s: number(env, "SUPERVISOR_MIN_INTERVAL_S", 600)?,
             max_directive_s: number(env, "SUPERVISOR_MAX_DIRECTIVE_S", 6 * 3600)?,
-            stop_grace_s: number(env, "SUPERVISOR_STOP_GRACE_S", 600)?,
+            stop_grace_s: number(env, "SUPERVISOR_STOP_GRACE_S", 1200)?,
             stall_after_s: number(env, "LONG_TICK_BUDGET_MIN", 240)?.saturating_mul(60),
         };
         if settings.budget_min == 0 {
@@ -348,12 +369,14 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    /// The events that end a directive's pause or its quiet before `wake_at`.
-    pub fn wakes(self) -> bool {
-        matches!(
-            self,
-            Self::Reset | Self::Operator | Self::Unpaused | Self::Expiring
-        )
+    /// The events that end a directive's pause early: only a person's.
+    pub fn ends_pause(self) -> bool {
+        matches!(self, Self::Operator | Self::Unpaused)
+    }
+
+    /// The events that end the quiet before a directive's `wake_at`.
+    pub fn ends_wake(self) -> bool {
+        matches!(self, Self::Reset | Self::Operator | Self::Unpaused)
     }
 
     pub fn name(self) -> &'static str {
@@ -400,11 +423,14 @@ pub struct Inputs {
     pub limits: Vec<u64>,
     /// The earliest window reset known at the last run's start.
     pub next_reset: Option<u64>,
-    pub claimable_now: Option<u64>,
-    pub claimable_at_run: Option<u64>,
+    /// The queue: claimable issues and issues a live tick holds, now and at the last run's start.
+    /// A claim moves an issue from one to the other, so only new, finished or parked work changes it.
+    pub queue_now: Option<u64>,
+    pub queue_at_run: Option<u64>,
     /// Each live tick's age, supervisors left out.
     pub tick_ages: Vec<u64>,
-    pub claims: Vec<Claim>,
+    /// When each looping issue's deciding claim was made ([`loops`]).
+    pub loops: Vec<u64>,
     pub operator: Vec<u64>,
     pub unpaused: Option<u64>,
     /// When the instance's stall log last changed.
@@ -432,7 +458,7 @@ pub fn events(inputs: &Inputs, settings: &Settings, since: u64, now: u64) -> Vec
     if let Some(at) = inputs.next_reset {
         push(EventKind::Reset, at);
     }
-    if let (Some(current), Some(before)) = (inputs.claimable_now, inputs.claimable_at_run)
+    if let (Some(current), Some(before)) = (inputs.queue_now, inputs.queue_at_run)
         && current != before
     {
         push(EventKind::Claimable, now);
@@ -445,8 +471,8 @@ pub fn events(inputs: &Inputs, settings: &Settings, since: u64, now: u64) -> Vec
     if let Some(at) = inputs.stall_log {
         push(EventKind::Stall, at);
     }
-    for at in loops(&inputs.claims, now).into_values() {
-        push(EventKind::Loop, at);
+    for at in &inputs.loops {
+        push(EventKind::Loop, *at);
     }
     for at in &inputs.operator {
         push(EventKind::Operator, *at);
@@ -462,27 +488,122 @@ pub fn events(inputs: &Inputs, settings: &Settings, since: u64, now: u64) -> Vec
 }
 
 /// Each issue claimed by [`LOOP_CLAIMS`] or more distinct ticks within [`LOOP_WINDOW_S`] before
-/// `now`, with the time of the claim that made it so.
-pub fn loops(claims: &[Claim], now: u64) -> BTreeMap<u64, u64> {
+/// `now`, with its first claim of the window and the claim that made the count.
+pub fn loop_candidates(claims: &[Claim], now: u64) -> BTreeMap<u64, (u64, u64)> {
     let mut by_issue: BTreeMap<u64, Vec<&Claim>> = BTreeMap::new();
     for claim in claims {
         if claim.at + LOOP_WINDOW_S >= now && claim.at <= now {
             by_issue.entry(claim.issue).or_default().push(claim);
         }
     }
-    let mut looping = BTreeMap::new();
+    let mut candidates = BTreeMap::new();
     for (issue, mut list) in by_issue {
         list.sort_by_key(|claim| claim.at);
         let mut pids = BTreeSet::new();
-        for claim in list {
+        for claim in &list {
             pids.insert(claim.pid);
             if pids.len() >= LOOP_CLAIMS {
-                looping.insert(issue, claim.at);
+                candidates.insert(issue, (list[0].at, claim.at));
                 break;
             }
         }
     }
-    looping
+    candidates
+}
+
+/// The looping issues, each with its deciding claim's time: candidates ([`loop_candidates`]) that
+/// showed no progress between their first and their deciding claim. `progress` holds, for each
+/// issue whose progress could be read, the times of its label changes (the claim label's left
+/// out), of PRs that name it and of commits that reference it. Three claims with progress between
+/// them are the work, review and landing cycle, not a loop; one whose progress is unknown is none.
+pub fn loops(
+    candidates: &BTreeMap<u64, (u64, u64)>,
+    progress: &BTreeMap<u64, Vec<u64>>,
+) -> BTreeMap<u64, u64> {
+    candidates
+        .iter()
+        .filter(|(issue, (first, last))| {
+            progress
+                .get(issue)
+                .is_some_and(|times| !times.iter().any(|at| at > first && at <= last))
+        })
+        .map(|(issue, (_, last))| (*issue, *last))
+        .collect()
+}
+
+/// A candidate's progress, from GitHub: the issue's timeline since `since`.
+fn fetch_progress(env: Lookup, issue: u64, since: u64) -> Option<Vec<u64>> {
+    const QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $since: DateTime!) { repository(owner: $owner, name: $name) { issue(number: $number) { timelineItems(last: 100, since: $since, itemTypes: [LABELED_EVENT, UNLABELED_EVENT, CROSS_REFERENCED_EVENT, REFERENCED_EVENT, CONNECTED_EVENT]) { nodes { __typename ... on LabeledEvent { createdAt label { name } } ... on UnlabeledEvent { createdAt label { name } } ... on CrossReferencedEvent { createdAt } ... on ReferencedEvent { createdAt } ... on ConnectedEvent { createdAt } } } } } }";
+    let repo = env("GH_REPO")?;
+    let (host, owner, name) = match repo.split('/').collect::<Vec<_>>()[..] {
+        [host, owner, name] => (Some(host.to_owned()), owner.to_owned(), name.to_owned()),
+        [owner, name] => (None, owner.to_owned(), name.to_owned()),
+        _ => return None,
+    };
+    let wip = env("WIP_LABEL").unwrap_or_else(|| "ai:wip".to_owned());
+    let fields = [
+        format!("query={QUERY}"),
+        format!("owner={owner}"),
+        format!("name={name}"),
+        format!("since={}", iso_of(since)),
+    ];
+    let number = format!("number={issue}");
+    let mut args = vec!["api", "graphql"];
+    if let Some(host) = &host {
+        args.extend(["--hostname", host]);
+    }
+    for field in &fields {
+        args.extend(["-f", field]);
+    }
+    args.extend(["-F", &number]);
+    let output = crate::gh::run(&args, crate::gh::Stderr::Discard).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let doc: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let nodes = doc["data"]["repository"]["issue"]["timelineItems"]["nodes"].as_array()?;
+    Some(
+        nodes
+            .iter()
+            .filter(|node| node["label"]["name"].as_str() != Some(wip.as_str()))
+            .filter_map(|node| epoch_of(node["createdAt"].as_str()?))
+            .collect(),
+    )
+}
+
+/// The looping issues now, their progress read from GitHub once per deciding claim and kept in
+/// `loops.json`.
+pub fn loop_signals(env: Lookup, paths: &Paths, now: u64) -> BTreeMap<u64, u64> {
+    const MAX_LOOKS: usize = 5;
+    let candidates = loop_candidates(&read_claims(&paths.state), now);
+    if candidates.is_empty() {
+        return BTreeMap::new();
+    }
+    let cache_path = paths.file("loops.json");
+    let mut cache: BTreeMap<u64, (u64, Option<Vec<u64>>)> =
+        files::read_text_limited(&cache_path, 1 << 16)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+    cache.retain(|issue, _| candidates.contains_key(issue));
+    let mut looked = 0;
+    for (issue, (first, last)) in &candidates {
+        if cache.get(issue).is_some_and(|(through, _)| through == last) || looked >= MAX_LOOKS {
+            continue;
+        }
+        looked += 1;
+        cache.insert(*issue, (*last, fetch_progress(env, *issue, *first)));
+    }
+    if looked > 0
+        && let Ok(text) = serde_json::to_string(&cache)
+    {
+        let _ = files::write_replacing(&cache_path, &text);
+    }
+    let progress: BTreeMap<u64, Vec<u64>> = cache
+        .into_iter()
+        .filter_map(|(issue, (_, times))| Some((issue, times?)))
+        .collect();
+    loops(&candidates, &progress)
 }
 
 /// Whether a supervisor tick starts now, and why.
@@ -503,19 +624,27 @@ pub fn throttled(settings: &Settings, run: &RunState, now: u64) -> Option<String
             now.saturating_sub(start)
         ));
     }
-    if run.failures > 0 {
-        let wait = settings
-            .min_interval_s
-            .saturating_mul(1 << run.failures.min(MAX_BACKOFF_DOUBLINGS));
-        let from = run.last_end.or(run.last_start).unwrap_or(0);
-        if now < from.saturating_add(wait) {
-            return Some(format!(
-                "backing off {wait}s after {} failed runs",
-                run.failures
-            ));
-        }
+    let (wait, until) = backoff(settings, run);
+    if now < until {
+        return Some(format!(
+            "backing off {wait}s after {} failed runs",
+            run.failures
+        ));
     }
     None
+}
+
+/// The backoff after the failed runs in a row, and when it ends: the minimum interval doubled for
+/// each, from the last run's end.
+fn backoff(settings: &Settings, run: &RunState) -> (u64, u64) {
+    if run.failures == 0 {
+        return (0, 0);
+    }
+    let wait = settings
+        .min_interval_s
+        .saturating_mul(1 << run.failures.min(MAX_BACKOFF_DOUBLINGS));
+    let from = run.last_end.or(run.last_start).unwrap_or(0);
+    (wait, from.saturating_add(wait))
 }
 
 /// The decision, given the events since the last start and whether the supervisor's agent has room.
@@ -612,6 +741,32 @@ fn note_unpause(paths: &Paths, now: u64) {
     }
 }
 
+/// The queue as the supervisor weighs it: the launcher's last claimable count, plus the issues
+/// whose claim a live tick holds.
+fn queue_total(paths: &Paths) -> Option<u64> {
+    let claimable = read_number(&paths.file("claimable"))?;
+    let live: BTreeSet<u32> = crate::ticks::scan(&paths.state.to_string_lossy())
+        .unwrap_or_default()
+        .iter()
+        .map(|tick| tick.pid)
+        .collect();
+    let held = std::fs::read_dir(paths.state.join("locks"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("claim."))
+        .filter_map(|entry| files::read_text_limited(&entry.path(), SMALL_FILE).ok())
+        .filter(|text| {
+            text.split_whitespace()
+                .nth(1)
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .is_some_and(|pid| live.contains(&pid))
+        })
+        .count();
+    Some(claimable + u64::try_from(held).unwrap_or(0))
+}
+
+/// The inputs of the events after `since`, but the loops, which [`loop_signals`] reads from GitHub.
 pub fn gather(paths: &Paths, since: u64) -> Inputs {
     let state = &paths.state;
     let tick_ages = crate::ticks::scan(&state.to_string_lossy())
@@ -625,10 +780,10 @@ pub fn gather(paths: &Paths, since: u64) -> Inputs {
         tick_ends: tick_ends(&state.join("logs"), since),
         limits: modified_in(&state.join("model-cooldown")),
         next_reset: read_number(&paths.file("next_reset")),
-        claimable_now: read_number(&paths.file("claimable")),
-        claimable_at_run: read_number(&paths.file("claimable_at_run")),
+        queue_now: queue_total(paths),
+        queue_at_run: read_number(&paths.file("queue_at_run")),
         tick_ages,
-        claims: read_claims(state),
+        loops: Vec::new(),
         operator,
         unpaused: read_number(&paths.file("unpaused")),
         stall_log: modified_s(&state.join("stalls.log")),
@@ -636,27 +791,24 @@ pub fn gather(paths: &Paths, since: u64) -> Inputs {
     }
 }
 
-/// Room for one more tick of the supervisor's agent: its entry is not cooling down and the agent
-/// runs fewer ticks than its usage windows allow.
-fn room(env: Lookup, paths: &Paths, entry: &Entry) -> Result<(), String> {
+/// Whether the supervisor's agent may run one short supervisor tick: its entry is not cooling down
+/// and every window of the agent is under the point where a running tick stands down. It needs no
+/// room under the agent's cap: it runs outside the slots, once, within its budget, and holding it
+/// back while the work ticks fill the cap would leave the harness unsteered when it most needs it.
+pub fn room(env: Lookup, paths: &Paths, entry: &Entry) -> Result<(), String> {
     let settings = usage::Settings::from_env(env)?;
     let cooldown = Duration::from_secs(number(env, "MODEL_COOLDOWN_S", 1800)?);
     if usage::cooling(&paths.state, entry, cooldown) {
         return Err(format!("{entry} is cooling down on its usage limit"));
     }
-    let cap = usage::agent_usage(env, &settings, &entry.agent, false)?.cap;
-    let running = crate::ticks::scan(&paths.state.to_string_lossy())
-        .map_err(|error| format!("cannot count the running ticks: {error}"))?
-        .iter()
-        .filter(|tick| tick.agent == entry.agent)
-        .count();
-    if u32::try_from(running).unwrap_or(u32::MAX) < cap {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} runs {running} ticks, at its cap of {cap}",
+    let agent = usage::agent_usage(env, &settings, &entry.agent, false)?;
+    match usage::verdict(&settings, &agent) {
+        usage::Verdict::Go => Ok(()),
+        usage::Verdict::Stop => Err(format!(
+            "{}'s windows are at their stand-down point",
             entry.agent
-        ))
+        )),
+        usage::Verdict::Unknown => Err(format!("{} has no fresh usage reading", entry.agent)),
     }
 }
 
@@ -691,7 +843,7 @@ fn look_for_operator(env: Lookup, settings: &Settings, paths: &Paths, now: u64) 
         _ => (None, repo.clone()),
     };
     let url = format!(
-        "repos/{path}/issues/comments?since={}&per_page=100",
+        "repos/{path}/issues/comments?since={}&sort=created&direction=desc&per_page=100",
         iso_of(since)
     );
     let mut args = vec!["api"];
@@ -733,7 +885,9 @@ fn due_command(env: Lookup, settings: &Settings, paths: &Paths) -> Result<ExitCo
     let entry = supervisor_entry(env, &models)?;
     look_for_operator(env, settings, paths, now);
     let since = run.last_start.unwrap_or(0);
-    let found = events(&gather(paths, since), settings, since, now);
+    let mut inputs = gather(paths, since);
+    inputs.loops = loop_signals(env, paths, now).into_values().collect();
+    let found = events(&inputs, settings, since, now);
     match decide(settings, &run, &found, &|| room(env, paths, &entry), now) {
         Decision::Due(reasons) => {
             println!("due {}", reasons.join(","));
@@ -770,10 +924,10 @@ fn begin(env: Lookup, paths: &Paths, reason: &str) -> Result<(), String> {
         .take(200)
         .collect();
     write_value(&paths.file("last_reason"), &reason)?;
-    match read_number(&paths.file("claimable")) {
-        Some(count) => write_value(&paths.file("claimable_at_run"), &count.to_string())?,
+    match queue_total(paths) {
+        Some(count) => write_value(&paths.file("queue_at_run"), &count.to_string())?,
         None => {
-            let _ = std::fs::remove_file(paths.file("claimable_at_run"));
+            let _ = std::fs::remove_file(paths.file("queue_at_run"));
         }
     }
     if let Some(at) = next_reset(env, now) {
@@ -806,7 +960,21 @@ pub fn end(paths: &Paths, exit: i32, duration: u64, now: u64) -> Result<(), Stri
     lines.push(&line);
     let keep = &lines[lines.len().saturating_sub(RUNS_KEPT)..];
     files::write_replacing(&runs, &format!("{}\n", keep.join("\n")))
-        .map_err(|error| format!("{}: {error}", runs.display()))
+        .map_err(|error| format!("{}: {error}", runs.display()))?;
+    for dir in ["notes-seen", "stopped"] {
+        prune(&paths.file(dir), now);
+    }
+    Ok(())
+}
+
+/// Removes the marks under `dir` older than [`MARKS_KEPT_S`]: each names a tick, and no directive
+/// outlives that.
+fn prune(dir: &Path, now: u64) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if modified_s(&entry.path()).is_some_and(|at| at.saturating_add(MARKS_KEPT_S) < now) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The supervisor's runs, its next due time and the directive, as `harness health` and the
@@ -823,7 +991,8 @@ pub fn view(env: Lookup, paths: &Paths, now: u64) -> Value {
     let next_due = settings.as_ref().ok().map(|settings| {
         let earliest = run
             .last_start
-            .map_or(now, |start| start.saturating_add(settings.min_interval_s));
+            .map_or(now, |start| start.saturating_add(settings.min_interval_s))
+            .max(backoff(settings, &run).1);
         let latest = run
             .last_start
             .map_or(now, |start| start.saturating_add(settings.interval_s));
@@ -974,10 +1143,10 @@ mod tests {
             tick_ends: vec![(NOW - 10, 1), (NOW - 20, 0), (NOW - 2000, 1)],
             limits: vec![NOW - 5, NOW - 5000],
             next_reset: Some(NOW - 30),
-            claimable_now: Some(4),
-            claimable_at_run: Some(3),
+            queue_now: Some(4),
+            queue_at_run: Some(3),
             tick_ages: vec![14_400 + 100, 14_400 + 5000, 60],
-            claims: Vec::new(),
+            loops: vec![NOW - 2000],
             operator: vec![NOW - 40],
             unpaused: Some(NOW - 50),
             stall_log: Some(NOW - 2000),
@@ -1001,8 +1170,8 @@ mod tests {
             ]
         );
         let quiet = Inputs {
-            claimable_now: Some(3),
-            claimable_at_run: Some(3),
+            queue_now: Some(3),
+            queue_at_run: Some(3),
             next_reset: Some(NOW + 60),
             directive_expires: Some(NOW + 3600),
             ..Inputs::default()
@@ -1024,7 +1193,62 @@ mod tests {
             claim(NOW - 500, 9, 32),
             claim(NOW - 400, 9, 33),
         ];
-        assert_eq!(loops(&claims, NOW), BTreeMap::from([(7, NOW - 1000)]));
+        let candidates = loop_candidates(&claims, NOW);
+        assert_eq!(candidates, BTreeMap::from([(7, (NOW - 3000, NOW - 1000))]));
+        // Three claims with no progress between them loop; a label change, a PR or a commit
+        // between the first and the third is the work, review and landing cycle; an issue whose
+        // progress could not be read is no loop.
+        let none = BTreeMap::from([(7, vec![NOW - 4000, NOW - 500])]);
+        assert_eq!(loops(&candidates, &none), BTreeMap::from([(7, NOW - 1000)]));
+        let progressed = BTreeMap::from([(7, vec![NOW - 2500])]);
+        assert!(loops(&candidates, &progressed).is_empty());
+        assert!(loops(&candidates, &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_known_progress_is_read_once_per_deciding_claim() {
+        let dir = crate::dashboard::testkit::TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        paths.prepare().unwrap();
+        let at = |offset: u64| iso_of(NOW - offset);
+        std::fs::write(
+            dir.path().join("claims.log"),
+            format!("7 11 {}\n7 12 {}\n7 13 {}\n", at(3000), at(2000), at(1000)),
+        )
+        .unwrap();
+        // GitHub is not asked again for a deciding claim already read.
+        std::fs::write(
+            paths.file("loops.json"),
+            serde_json::to_string(&BTreeMap::from([(
+                7,
+                (NOW - 1000, Some(Vec::<u64>::new())),
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        let no_github = |_: &str| None;
+        assert_eq!(
+            loop_signals(&no_github, &paths, NOW),
+            BTreeMap::from([(7, NOW - 1000)])
+        );
+        // A fourth claim leaves the deciding claim as it was, so the cache still answers.
+        std::fs::write(
+            dir.path().join("claims.log"),
+            format!(
+                "7 11 {}\n7 12 {}\n7 13 {}\n7 14 {}\n",
+                at(3000),
+                at(2000),
+                at(1000),
+                at(10)
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            loop_signals(&no_github, &paths, NOW),
+            BTreeMap::from([(7, NOW - 1000)])
+        );
     }
 
     #[test]
@@ -1087,17 +1311,61 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("logs/allocator.log"), "[tick.sh] exit=9\n").unwrap();
         std::fs::write(paths.file("claimable"), "4\n").unwrap();
-        std::fs::write(paths.file("claimable_at_run"), "2\n").unwrap();
+        std::fs::write(paths.file("queue_at_run"), "2\n").unwrap();
+        // A claim whose tick is gone does not count toward the queue.
+        std::fs::create_dir_all(dir.path().join("locks")).unwrap();
+        std::fs::write(
+            dir.path().join("locks/claim.7"),
+            "7 999999 2026-11-28T00:00:00Z\n",
+        )
+        .unwrap();
         std::fs::write(paths.file("paused"), "").unwrap();
         note_unpause(&paths, NOW);
         let inputs = gather(&paths, 0);
         assert_eq!(inputs.tick_ends.len(), 1);
         assert_eq!(inputs.tick_ends[0].1, 2);
-        assert_eq!(
-            (inputs.claimable_now, inputs.claimable_at_run),
-            (Some(4), Some(2))
-        );
+        assert_eq!((inputs.queue_now, inputs.queue_at_run), (Some(4), Some(2)));
         assert_eq!(inputs.unpaused, Some(NOW));
         assert!(!paths.file("paused").exists());
+    }
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+
+    #[test]
+    fn the_supervisor_may_run_under_the_stand_down_point_however_full_the_cap() {
+        let dir = crate::dashboard::testkit::TempDir::new();
+        let paths = Paths {
+            state: dir.path().to_path_buf(),
+        };
+        let reading = dir.path().join("usage.json");
+        let source = format!("json:{}", reading.display());
+        let state = dir.path().display().to_string();
+        let env = |key: &str| match key {
+            "USAGE_SOURCE_claude" => Some(source.clone()),
+            "HARNESS_STATE" | "HOME" => Some(state.clone()),
+            "MAX_SLOTS" => Some("3".to_owned()),
+            _ => None,
+        };
+        let entry = Entry::parse("claude:opus", "claude").unwrap();
+        let write = |used: f64| {
+            let doc = json!({"timestamp": now_s() * 1000, "windows": [{"name": "five_hour", "used_pct": used, "window_minutes": 300}]});
+            std::fs::write(&reading, doc.to_string()).unwrap();
+        };
+        // At 75 % the window's cap is one tick or none; the supervisor still runs, under 88 %.
+        write(75.0);
+        assert_eq!(room(&env, &paths, &entry), Ok(()));
+        write(88.0);
+        assert!(room(&env, &paths, &entry).is_err_and(|why| why.contains("stand-down")));
+        std::fs::remove_file(&reading).unwrap();
+        assert!(
+            room(&env, &paths, &entry).is_err_and(|why| why.contains("no fresh usage reading"))
+        );
+        write(10.0);
+        std::fs::create_dir_all(dir.path().join("model-cooldown")).unwrap();
+        std::fs::write(dir.path().join("model-cooldown/claude:opus"), "").unwrap();
+        assert!(room(&env, &paths, &entry).is_err_and(|why| why.contains("cooling down")));
     }
 }

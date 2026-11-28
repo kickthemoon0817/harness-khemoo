@@ -163,7 +163,7 @@ pub fn assemble(
         .iter()
         .filter(|tick| tick["exit"].as_i64().is_some_and(|exit| exit != 0))
         .count();
-    let loops: Vec<Value> = supervisor::loops(&supervisor::read_claims(&paths.state), now)
+    let loops: Vec<Value> = supervisor::loop_signals(setting, paths, now)
         .into_iter()
         .map(|(issue, at)| json!({"issue": issue, "since": iso_of(at)}))
         .collect();
@@ -370,7 +370,10 @@ fn held(instance: &Path, setting: &dyn Fn(&str) -> Option<String>) -> Value {
         return json!({"held": false, "hook": false});
     }
     let timeout = Duration::from_secs(number(setting, "HOLD_TIMEOUT_S", 5));
+    // The hook is the instance's; the token this process may hold for GitHub is not its to see.
     let Ok(mut child) = Command::new(&hook)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -619,6 +622,13 @@ mod tests {
         std::fs::write(
             paths.file("operator-comments.json"),
             json!([{"issue": 7, "author": "owner-a", "at": now - 60, "line": "Operator: rebase first"}]).to_string(),
+        )
+        .unwrap();
+        // Read from GitHub before: no progress between the first and the third claim.
+        let third = supervisor::epoch_of("2026-11-28T11:00:00Z").unwrap();
+        std::fs::write(
+            paths.file("loops.json"),
+            json!({"7": [third, []]}).to_string(),
         )
         .unwrap();
         let setting = |key: &str| (key == "TICK_BUDGET_MIN").then(|| "120".to_owned());

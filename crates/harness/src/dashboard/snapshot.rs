@@ -276,7 +276,7 @@ impl Collector {
             })
             .collect::<Vec<_>>()
         });
-        json!({
+        let mut snapshot = json!({
             "generated_at": iso(now),
             "generated_epoch": now,
             "title": self.config.title,
@@ -322,8 +322,12 @@ impl Collector {
             "fleet": if self.config.fleet_status_command.is_empty() { Value::Null } else { self.fleet_view(&issue_titles, now) },
             "flow": flow,
             "sources": self.sources_view(now),
-            "supervisor": self.supervisor_view(now),
-        })
+        });
+        // Left out while the supervisor is off, so the snapshot is what it was without one.
+        if self.usage_setting("SUPERVISOR").as_deref() == Some("1") {
+            snapshot["supervisor"] = self.supervisor_view(now);
+        }
+        snapshot
     }
 
     fn fleet_view(&self, issue_titles: &HashMap<i64, (String, String)>, now: f64) -> Value {

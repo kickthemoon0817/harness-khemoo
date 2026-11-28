@@ -1,5 +1,6 @@
 //! The harness's own tools, one module per `harness` subcommand.
 
+mod answer;
 pub mod claimable;
 pub mod dashboard;
 pub mod directive;
