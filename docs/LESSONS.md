@@ -6,8 +6,8 @@ because the reasoning matters more than the patch.
 
 ## Ticks are finite batch runs — scheduling anything is fatal
 
-A tick called a scheduling/wakeup tool to nap while a long job ran, then ended its turn. Under
-`claude -p` the process exits when the turn ends: the wakeup never fired, and the job, what it
+A tick called a scheduling/wakeup tool to nap while a long job ran, then ended its turn. Under a
+non-interactive agent CLI the process exits when the turn ends: the wakeup never fired, and the job, what it
 held, and its issue claim were all orphaned. The log was empty, so it looked like a crash.
 
 **Fix:** the tick prompt states the finite-batch contract explicitly — no wakeups, no ending a

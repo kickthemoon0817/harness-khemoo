@@ -33,7 +33,7 @@ issue it names is closed; keep that line's exact form when you write one. End a 
 comment whose trace block holds `harness tick pid <PID> pausing|withdrawing|releasing`. When the
 first line of this prompt names a lane, it decides which issues you may claim.
 
-You are a FINITE BATCH RUN under `claude -p`: the process terminates the moment your turn ends, and
+You are a FINITE BATCH RUN under a non-interactive agent CLI: the process terminates the moment your turn ends, and
 nothing scheduled survives it. Therefore:
 - NEVER use a scheduling or wakeup tool, and never end your turn to "wait" for a background task, a
   timer or a log marker: wait synchronously inside bounded polling loops in a single command.
@@ -57,10 +57,10 @@ nothing scheduled survives it. Therefore:
   `harness tick pid <PID> checkpoint <n> at <date -u>` and the resume recipe so far, so a tick that
   dies leaves a recipe. The checkpoint must not use the words withdrawing, pausing or releasing after
   `pid <PID>`: the claim check reads those as the end of the claim.
-- USAGE CEILING: the harness never takes the 5-hour or the weekly usage window past
+- USAGE CEILING: the harness never takes any usage window of the agent you run under past
   {{USAGE_CEILING_PCT}} %. Run `$HARNESS_HOME/libexec/usage-ok.sh` before you start any build, suite,
   long-running session or agent, and at least every 15 minutes inside any wait. When it exits non-zero
-  (1: a window is within two points of the ceiling; 2: no fresh reading), start nothing new, tear down,
+  (1: a window is at its stand-down point, under the ceiling; 2: no fresh reading), start nothing new, tear down,
   post the pause with the resume recipe, print the summary and END, as at the budget's end. When it
   prints `OPERATOR: new on #N since ...`, an operator comment landed on your issue after your claim:
   read the issue's comments and follow them before you start anything, whatever your recipe says.

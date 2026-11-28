@@ -15,7 +15,7 @@ or a resource the instance gave it, which its own teardown is responsible for re
 
 ```bash
 crontab -r
-until [ "$(pgrep -cf '^claude -p')" -eq 0 ]; do sleep 20; done
+until [ -z "$(target/release/harness ticks)" ]; do sleep 20; done
 ```
 
 A tick running a long verification can take up to its budget (set in the tick prompt) to
@@ -25,7 +25,8 @@ cron line or a `state/paused` file stops each chain at its next tick boundary.
 ## Reading the state
 
 ```bash
-pgrep -cf '^claude -p'                     # live ticks
+target/release/harness ticks               # live ticks: pid, age, slot, agent, model, kind
+bin/tick.sh check | grep '^usage:'         # each agent's usage windows and the ticks they allow
 tail -5 state/logs/allocator.log           # sizing decisions
 ls -lt state/logs | head                   # recent ticks (0 bytes = still running)
 cat state/locks/claim.* 2>/dev/null        # local claims: issue, PID, since
@@ -36,11 +37,11 @@ gh issue list --label ai:wip               # what is claimed right now
 `allocator.log` is the fastest health check. A line reads:
 
 ```
-20260819T081558Z five=22% week=53% allowed=8 busy=1 claimable=6 -> spawning 6
+20260819T081558Z claude=4[five_hour:62%,weekly:53%] codex=8[primary:20%] allowed=8 busy=1 claimable=6 -> spawning 6
 ```
 
-Usage in both windows, the cap that implies, how many slots are held, how many issues are
-unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
+Each agent's cap and the usage of its windows (`unknown` without a fresh reading), the pool's cap
+they sum to, how many slots are held, how many issues are unclaimed, and what it did. No line means the firing was a no-op — that is the normal case.
 Other lines name a state the launcher noticed, logged once rather than at every firing: `held: <reason>`
 (the instance's `hooks/hold`), `instance incomplete: <item>`, `hooks/env.sh failed`, a model that
 hit its usage limit, or no fresh usage reading. A line with `ERROR queue count failed` means the
@@ -51,7 +52,7 @@ counts one claimable issue so a tick still runs.
 
 Usually not. Check in this order:
 
-1. **`pgrep -cf '^claude -p'` returns 0 and the queue is non-empty.** Look at the newest log:
+1. **`harness ticks` lists none and the queue is non-empty.** Look at the newest log:
    an `exit=1` trailer with a short duration means API or network failure — cron retries by
    itself. No trailer at all means the tick died without finishing; see LESSONS.
 2. **A tick has run for ages.** Check what it holds and whether its process is alive. Long verification runs are expected; compare against your budget.
@@ -102,9 +103,9 @@ liveness-based. Restore infrastructure, confirm `gh auth status`, fire once manu
   chat will be re-litigated by the next tick.
 - **Re-scope deliberately.** Discovery, fixing, and porting want different priorities. Say
   which phase you are in at the top of the runbook.
-- **Watch the weekly window, not just the 5-hour one.** The 5-hour recovers on its own; the
-  weekly is what actually ends a long run. The harness stops each window short of 90 %
-  (`USAGE_CEILING_PCT`); `libexec/usage-ok.sh` prints the reading.
+- **Watch the long windows, not just the short ones.** A 5-hour window recovers on its own; a
+  weekly one is what actually ends a long run. The harness stops each window short of 90 %
+  (`USAGE_CEILING_PCT`); `bin/tick.sh check` prints every agent's reading.
 - **Pausing.** `touch state/paused` (or comment out the `tick.sh` cron line): the launcher
   starts nothing and runners chain nothing. A tick already running finishes its claim, so
   stop one that must not go on by its PID.
