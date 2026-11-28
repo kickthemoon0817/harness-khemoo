@@ -244,14 +244,18 @@ an optional flag: anything else, such as tools named to `--tools`, `--mcp-config
 does not run, which the allocator log says once. `tick.sh check` prints the supervisor's command
 line, or why it cannot run.
 
-The supervisor's comments and parked questions are held to more than the lint: a body with an
-@-mention, a URL (a scheme, `www.`, or `//` starting a word), a markdown link or a link reference's
-definition, an image, HTML or an autolink, an HTML character reference (`&#...;`, `&name;`, which
-GitHub renders as the character, an `@` among them), an email address, or a closing keyword before
-an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
-`owner/repo#N`) is refused. Each would reach past the issue: notify someone, send readers or their
-browsers elsewhere, hide text, or close an issue when a PR merges. A refused action is logged and
-the rest go on; a refused directive refuses every action of its answer.
+The supervisor's comments and parked questions are held to more than the lint. Each body is parsed
+as GitHub parses Markdown, extensions included, and refused if it yields a link, an autolink, an
+image or HTML, however it is written: a link whose reference is defined in a block quote or a list
+item, at any depth, or whose URL is escaped, is found where it is used. The text itself is then
+refused if it holds an @-mention, a URL (a scheme, `www.`, or `//` starting a word), `]:` (a link
+reference's definition), a backslash before `/` or `:`, an HTML character reference (`&#...;`,
+`&name;`, which GitHub renders as the character, an `@` among them), an email address, or a closing
+keyword before an issue reference (`close`, `fix`, `resolve` and their forms, then `#N` or
+`owner/repo#N`). Each would reach past the issue: notify someone, send readers or their browsers
+elsewhere, hide text, or close an issue when a PR merges. Plain `#N` references and code spans
+pass. A refused action is logged and the rest go on; a refused directive refuses every action of
+its answer.
 
 Its prompt is `$HARNESS_HOME/prompts/supervisor-core.md`, a `## This installation` heading and
 `$HARNESS_INSTANCE_DIR/prompts/supervisor.md` when that exists, then `## Health snapshot` and the

@@ -110,13 +110,31 @@ pub fn last_answer(text: &str) -> Option<Result<Answer, String>> {
     })
 }
 
-/// What a body the supervisor posts must not hold: each would reach past the issue it is on. A
-/// mention notifies a person or a team, a link or an image sends readers, or their browsers,
-/// elsewhere, HTML hides what it says, an address is a person's, and a closing keyword closes
-/// whatever it names once its PR merges. GitHub reads a character reference (`&#64;`, `&commat;`)
-/// as the character it names, so none is taken; a link reference's definition, and a `//` that
-/// starts a word, make a link of text that shows none.
-static UNSAFE: LazyLock<[(Regex, &str); 10]> = LazyLock::new(|| {
+/// What GitHub's Markdown would make of `text` that reaches past the issue: a link, an autolink or
+/// an image, which send readers or their browsers elsewhere, or HTML, which hides what it says. The
+/// body is parsed as GitHub parses Markdown, extensions and all, so a link defined by reference at
+/// any depth (in a block quote, in a list item, its URL escaped) is found where it is used.
+fn markup(text: &str) -> Option<&'static str> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM;
+    Parser::new_ext(text, options).find_map(|event| match event {
+        Event::Start(Tag::Link { .. }) => Some("a link"),
+        Event::Start(Tag::Image { .. }) => Some("an image"),
+        Event::Start(Tag::HtmlBlock) | Event::Html(_) | Event::InlineHtml(_) => Some("HTML"),
+        _ => None,
+    })
+}
+
+/// What a body the supervisor posts must not hold besides [`markup`], each looked for in the text
+/// itself, whatever the parser makes of it: a mention notifies a person or a team, a URL, an
+/// address and a link reference's definition lead elsewhere, a character reference (`&#64;`,
+/// `&commat;`) is the character GitHub renders, an escaped `/` or `:` hides a URL from the plain
+/// checks, and a closing keyword closes whatever it names once its PR merges.
+static UNSAFE: LazyLock<[(Regex, &str); 11]> = LazyLock::new(|| {
     let pattern = |text: &str| Regex::new(text).unwrap_or_else(|error| panic!("{text}: {error}"));
     [
         (
@@ -124,7 +142,8 @@ static UNSAFE: LazyLock<[(Regex, &str); 10]> = LazyLock::new(|| {
             "a character reference",
         ),
         (pattern(r"(^|[^A-Za-z0-9_])@[A-Za-z0-9]"), "an @-mention"),
-        (pattern(r"(?m)^\s{0,3}\[[^\]]+\]:"), "a link reference"),
+        (pattern(r"\]:"), "a link reference"),
+        (pattern(r"\\[/:]"), "an escaped URL"),
         (pattern(r"(?i)\b[a-z][a-z0-9+.-]*://|(?i)\bwww\."), "a URL"),
         (pattern(r"(?m)(^|[\s(<:=])//"), "a URL"),
         (pattern(r"!\["), "an image"),
@@ -184,6 +203,9 @@ fn body(field: &str, text: &str, limit: usize) -> Result<String, String> {
     }
     if redact(text) != text {
         return Err(format!("{field}: looks like it holds a secret"));
+    }
+    if let Some(what) = markup(text) {
+        return Err(format!("{field}: holds {what}"));
     }
     if let Some((_, what)) = UNSAFE.iter().find(|(pattern, _)| pattern.is_match(text)) {
         return Err(format!("{field}: holds {what}"));
@@ -665,14 +687,32 @@ mod tests {
             ("thanks &commat;octocat", "a character reference"),
             ("mail a.b&#64;example.org", "a character reference"),
             ("read &#x40;team", "a character reference"),
-            (
-                "see [here][1]\n\n[1]: //example.org/login",
-                "a link reference",
-            ),
-            ("see [docs]\n   [docs]: relative", "a link reference"),
+            ("see [here][1]\n\n[1]: //example.org/login", "a link"),
+            ("see [docs]\n   [docs]: relative", "a link"),
             ("off to //example.org/login", "a URL"),
             ("link(//example.org)", "a URL"),
             ("go to=//example.org", "a URL"),
+            // A reference defined in a block quote, in a list item, nested two deep, its URL escaped:
+            // each renders as a link where it is used.
+            (
+                "click [here][1]\n\n> [1]: https:\\/\\/example.org/login",
+                "a link",
+            ),
+            ("click [here][1]\n\n> [1]: /\\/example.org/login", "a link"),
+            ("click [here][1]\n\n- [1]: /\\/example.org/login", "a link"),
+            (
+                "click [here][1]\n\n> - [1]: /\\/example.org/login",
+                "a link",
+            ),
+            ("click [here]\n\n> [here]: relative/page", "a link"),
+            ("an <https://example.org> autolink", "a link"),
+            ("a <span>tag</span>", "HTML"),
+            ("<div>\nblock\n</div>", "HTML"),
+            ("![alt](pic.png)", "an image"),
+            // The same, with no use to find: the text checks still refuse the definition.
+            ("> - [1]: /\\/example.org/login", "a link reference"),
+            ("a path a\\/b", "an escaped URL"),
+            ("time 10\\:30", "an escaped URL"),
         ] {
             let refused = plan_of(json!({"comment": {"issue": 7, "body": body}}));
             assert!(
@@ -691,6 +731,8 @@ mod tests {
             "a < b and 2 > 1",
             "email the team",
             "A & B; a path a/b//c and [a] list",
+            "Waits on #3: run `cargo test --workspace` and `tests/run.sh`, then see #12.",
+            "- a list item\n- another, waiting on #5\n\n> a quote\n\n    an indented code block",
             "rate 3/4 and 1//2",
         ] {
             assert!(
