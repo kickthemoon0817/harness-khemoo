@@ -108,8 +108,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     }
 
     /// Reads a hello, comparing the version before anything else so that a later peer's
-    /// hello, whose other fields may not decode here, still reports the mismatch.
-    async fn recv_hello(&mut self) -> Result<Hello, ProtoError> {
+    /// hello, whose other fields may not decode here, still reports the mismatch. A relay
+    /// reads the client's hello with this, because it learns the role to grant only from
+    /// the daemon behind it; it then answers with [`Connection::send`].
+    pub async fn recv_hello(&mut self) -> Result<Hello, ProtoError> {
         #[derive(serde::Deserialize)]
         struct Version {
             protocol_version: u32,
