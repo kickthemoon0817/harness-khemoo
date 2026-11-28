@@ -80,19 +80,39 @@ reset; remote_all 301 "$Q1"; claim 401 "$T1"
 out=$(acq 302); rc=$?
 check "a single-slot acquire is not limited" '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot=1 "* ]]' "rc=$rc $out"
 
-# The waiting line and priority are unchanged.
+# The waiting line: a waiter the limit refuses keeps its wait and accrues priority, but reserves
+# nothing and turns no single-slot acquire on its card away until the limit lets it through.
 reset; remote_all 301 "$Q1"; claim 401 "$T1"; echo "$(old 2000) 1 $(old 10)" > "$L/all-wait.303"
 out=$(acq 303 --all --render); rc=$?
-check "a refused whole-card acquire keeps its place in the whole-card line: its first wait time stays and its tick is recorded" \
-  '[ "$rc" -eq 1 ] && read -r first wp last < "$L/all-wait.303" && [ "$first" -le "$(old 1999)" ] && [ "$wp" = "$$" ] && [ "$last" -ge "$(old 5)" ]' "rc=$rc $(cat "$L/all-wait.303")"
+check "a refused whole-card acquire keeps its first wait time and its tick, its wait marked as held back by the limit" \
+  '[ "$rc" -eq 1 ] && read -r first wp last mark < "$L/all-wait.303" && [ "$first" -le "$(old 1999)" ] && [ "$wp" = "$$" ] && [ "$last" -ge "$(old 5)" ] && [ "$mark" = limit=local ]' "rc=$rc $(cat "$L/all-wait.303")"
 out=$("$LEASE" status 2>/dev/null)
-check "its wait counts toward priority as usual" '[[ "$out" == *"wait whole-card issue 303 for 33 min (priority)"* ]]' "$out"
+check "status shows that wait held back by the limit, not as priority" \
+  '[[ "$out" == *"wait whole-card issue 303 for 33 min (held back by the cost-read host limit)"* ]] && [[ "$out" != *"(priority)"* ]]' "$out"
 out=$(acq 307); rc=$?
-check "a single-slot acquire meets that priority as usual: the local card is kept for it, a remote card is not" \
-  '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot=6 "*"remote=b@two"* ]] && [ ! -e "$L/resource.lease" ]' "rc=$rc $out"
-LEASE_HOLDER_PID=$$ "$LEASE" release 307 >/dev/null 2>&1; rm -f "$L/remote-card"
+check "while the limit blocks the waiter, a single-slot acquire on its card is granted" \
+  '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot=1 "* ]] && grep -q "^307 $$ " "$L/resource.lease"' "rc=$rc $out"
 out=$(acq 307); rc=$?
-check "with no remote card it waits behind that priority" '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY priority to whole-card issue 303"* ]]' "rc=$rc $out"
+check "and a holder renewing its slot there keeps it" '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot=1 "* ]]' "rc=$rc $out"
+echo "307 $Q2 $(ago 30) domain=77" > "$L/resource.lease"; "$LEASE" prioritize 303 >/dev/null
+out=$(acq 308); rc=$?
+check "a waiter the operator named, while the limit blocks it, turns no single-slot acquire away either" \
+  '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot=2 "* ]]' "rc=$rc $out"
+"$LEASE" prioritize --clear >/dev/null; LEASE_HOLDER_PID=$$ "$LEASE" release 308 >/dev/null 2>&1
+rm -f "$L/resource.lease.4" "$L/resource.lease.5"
+out=$("$LEASE" status 2>/dev/null)
+check "once the other host's hold ends, the waiter has the priority it accrued" '[[ "$out" == *"wait whole-card issue 303 for 33 min (priority)"* ]]' "$out"
+rm -f "$L/remote-card"
+out=$(acq 309); rc=$?
+check "and single-slot acquires on its card are turned away as for any waiter with priority" \
+  '[ "$rc" -eq 1 ] && [[ "$out" == "BUSY priority to whole-card issue 303"* ]] && [ ! -e "$L/resource.lease.2" ]' "rc=$rc $out"
+out=$(acq 303 --all --render); rc=$?
+check "the waiter then reserves the card, waiting only for the kit on it, with its first wait time kept" \
+  '[ "$rc" -eq 1 ] && [[ "$out" == "RESERVING held=2/3 waiting for [307 $Q2 "* ]] && read -r first _ _ mark < "$L/all-wait.303" && [ "$first" -le "$(old 1999)" ] && [ -z "$mark" ]' "rc=$rc $out / $(cat "$L/all-wait.303")"
+rm -f "$L/resource.lease"
+out=$(acq 303 --all --render); rc=$?
+check "and gets the card once that kit is gone" \
+  '[ "$rc" -eq 0 ] && [[ "$out" == "ACQUIRED slot="*"exclusive=all"* ]] && [ "$(grep -l "^303 $$ " "$L"/resource.lease* | wc -l)" = 3 ] && [ ! -e "$L/all-wait.303" ]' "rc=$rc $out"
 
 # The knob.
 reset; remote_all 301 "$Q1"; claim 401 "$T1"

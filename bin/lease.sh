@@ -85,8 +85,11 @@
 #       stays free for compiles and identity runs. A cost-read acquire that would hold one more host,
 #       beside the hosts already held whole (by any issue, its own included), prints
 #       BUSY cost-read host limit <issue>@<host> ... (exit 1) and waits as a refused whole-card
-#       acquire does: `--all` drops its reservations and records its whole-card wait, which counts
-#       toward priority as usual; `--all-remote` leaves its cost-wait marker. A tick is live while its
+#       acquire does. `--all` drops its reservations and records its whole-card wait, marked
+#       limit=<host>: its first wait time keeps counting, but while the limit still holds it back
+#       from that host it holds no place in the line, so it reserves nothing and turns no
+#       single-slot acquire on its card away; once the other host's read ends it drains the card as
+#       any waiter does, with the priority it accrued. `--all-remote` leaves its cost-wait marker. A tick is live while its
 #       claim (bin/claim.sh) names a live `claude -p` pid (bin/tick-pid.sh); the asking issue's own
 #       claims do not count. With no other tick live the limit does not apply, so one issue may hold
 #       both hosts. A holder renewing the card it already holds is never refused, and a --no-cost hold
@@ -237,6 +240,7 @@ oldest_wait() {
     [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
     [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
     [ $(( now - first )) -ge "$after" ] || continue
+    limit_holds_back "${m##*/"$kind".}" "$wpid" "${wkind:-}" && continue
     if [ -z "$best" ] || [ "$first" -lt "$best_t" ]; then best=${m##*/"$kind".}; best_t=$first; fi
   done
   echo "$best ${best_t:-}"
@@ -258,6 +262,7 @@ operator_first() {
     [ "${wkind:-}" = render ] && [ "$render_busy" = 1 ] && continue
     [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
     [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
+    limit_holds_back "$n" "$wpid" "${wkind:-}" && continue
     echo "$n"; return 0
   done
 }
@@ -565,19 +570,24 @@ live_tick_claims() {
     kill -0 "$cp" 2>/dev/null && holder_is_tick "$cp" && echo "$ci $cp"
   done
 }
-# Prints "<issue>@<host> ..." for the hosts held whole besides host $1 and returns 0 when this
-# issue's cost read on $1 would pass the limit; returns 1 when it may go ahead.
-cost_read_limit_hit() {
-  local target=$1 hi hp hh n=0 who=""
+# Prints "<issue>@<host> ..." for the hosts held whole besides host $3 and returns 0 when issue $1,
+# asking as pid $2, would pass the limit with a cost read on $3; returns 1 when it may go ahead.
+cost_read_blocks() {
+  local asker=$1 asker_pid=$2 target=$3 hi hp hh n=0 who=""
   cost_read_limit_on || return 1
   while read -r hi hp hh; do
     [ -n "$hh" ] && [ "$hh" != "$target" ] || continue
     n=$(( n + 1 )); who+="${who:+ }$hi@$hh"
   done < <(cost_read_holds)
   [ "$n" -ge "$COST_READ_HOSTS_MAX" ] || return 1
-  live_tick_claims | awk -v i="$issue" -v p="$pid" '$1 != i && $2 != p { found = 1 } END { exit !found }' || return 1
+  live_tick_claims | awk -v i="$asker" -v p="$asker_pid" '$1 != i && $2 != p { found = 1 } END { exit !found }' || return 1
   echo "$who"
 }
+cost_read_limit_hit() { cost_read_blocks "$issue" "$pid" "$1"; }
+# A whole-card wait the limit refused (marked limit=<host>) holds no place in the line, so it
+# reserves nothing and turns no single-slot acquire away, while the limit still holds issue $1
+# (pid $2) back from that host; its first wait time keeps counting all the same.
+limit_holds_back() { [[ "$3" == limit=* ]] && cost_read_blocks "$1" "$2" "${3#limit=}" >/dev/null; }
 case "${1:-}" in
   acquire)
     issue="${2:?issue number}"
@@ -740,9 +750,10 @@ case "${1:-}" in
         f=$(slot_file $s)
         [ -s "$f" ] && [ "$(awk '{print $2}' "$f")" = "$pid" ] && [[ "$(cat "$f")" == *" exclusive" ]] && held_whole=1
       done
-      if [ -z "$held_whole" ] && who=$(cost_read_limit_hit "$(local_off && echo "$REMOTE_CARD_HOST" || echo local)"); then
+      target=$(local_off && echo "$REMOTE_CARD_HOST" || echo local)
+      if [ -z "$held_whole" ] && who=$(cost_read_limit_hit "$target"); then
         drop_whole_card
-        note_wait "$issue"
+        note_wait "$issue" all-wait "limit=$target"
         echo "BUSY cost-read host limit $who"; exit 1
       fi
       mine=0; primary=""; others=""; takes=""
@@ -1001,12 +1012,13 @@ case "${1:-}" in
     now=$(date -u +%s); card_first=$(priority_issue); line_first=$(slot_first_issue)
     for m in "$LOCKS"/all-wait.* "$LOCKS"/slot-wait.*; do
       [ -s "$m" ] || continue
-      read -r first wpid last < "$m"
+      read -r first wpid last wkind < "$m"
       [[ "$first" =~ ^[0-9]+$ ]] && [[ "$last" =~ ^[0-9]+$ ]] && kill -0 "$wpid" 2>/dev/null || continue
       [ $(( now - last )) -le "$ALL_WAIT_FRESH_S" ] || continue
       kind=${m##*/}; n=${kind#*.}; kind=${kind%%.*}
       tag=""
       [ "$kind" = all-wait ] && [ "$n" = "$card_first" ] && tag=" (priority)"
+      [ "$kind" = all-wait ] && limit_holds_back "$n" "$wpid" "${wkind:-}" && tag=" (held back by the cost-read host limit)"
       [ "$kind" = slot-wait ] && [ "$n" = "$line_first" ] && tag=" (first in line)"
       label=single-slot; [ "$kind" = all-wait ] && label=whole-card
       echo "wait $label issue $n for $(( (now - first) / 60 )) min$tag"
