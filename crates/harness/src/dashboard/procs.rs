@@ -125,7 +125,7 @@ impl ProcessScanner {
                     TickCandidate {
                         process,
                         slot: Some(i64::from(tick.slot)),
-                        agent: tick.agent,
+                        agent: tick.key(),
                         model: tick.model,
                         kind: tick.kind.as_str().to_owned(),
                         log,

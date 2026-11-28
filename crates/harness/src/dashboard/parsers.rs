@@ -42,8 +42,9 @@ static WAIT: LazyLock<Regex> = LazyLock::new(|| {
 static STALL: LazyLock<Regex> = LazyLock::new(|| regex(r"^(\S+) STALL (\S+) (\S+) ?(.*)$"));
 static ALLOCATOR: LazyLock<Regex> = LazyLock::new(|| regex(r"^([0-9]{8}T[0-9]{6}Z) (.*)$"));
 static ALLOCATOR_FIELD: LazyLock<Regex> = LazyLock::new(|| regex(r"([a-z_]+)=([^\s%]+)%?"));
-static USAGE_PART: LazyLock<Regex> =
-    LazyLock::new(|| regex(r"(?:^|\s)([a-z0-9_]{1,32})=([0-9]{1,9})\[([^\]\s]*)\]"));
+static USAGE_PART: LazyLock<Regex> = LazyLock::new(|| {
+    regex(r"(?:^|\s)([a-z0-9_]{1,32}(?:@[a-z0-9][a-z0-9-]{0,31})?)=([0-9]{1,9})\[([^\]\s]*)\]")
+});
 static ALLOCATOR_SLOT: LazyLock<Regex> = LazyLock::new(|| regex(r"^(slot[0-9]+) "));
 static SPAWNING: LazyLock<Regex> = LazyLock::new(|| regex(r"-> spawning ([0-9]+)"));
 static MODEL: LazyLock<Regex> =
@@ -701,6 +702,16 @@ mod tests {
         assert_eq!(lines[1].fields["spawning"], "1");
         assert_eq!(lines[4].fields["ready"], "1");
         assert_eq!(lines[5].fields["claimable"], "2");
+        let accounts = parse_allocator(
+            "20261128T100000Z claude@work=4[five_hour:10%] claude@client-2=0[unknown] pool=4 room=4 busy=0 claimable=3 -> spawning 3\n",
+            10,
+        );
+        let agents: Vec<(&str, i64)> = accounts[0]
+            .usage
+            .iter()
+            .map(|part| (part.agent.as_str(), part.cap))
+            .collect();
+        assert_eq!(agents, [("claude@work", 4), ("claude@client-2", 0)]);
         let glued = allocator_fields("pct=1%b=2 Xc=3 d=4");
         assert_eq!(
             glued.keys().map(String::as_str).collect::<Vec<_>>(),

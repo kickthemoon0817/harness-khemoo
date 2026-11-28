@@ -327,7 +327,34 @@ impl Collector {
         if self.usage_setting("SUPERVISOR").as_deref() == Some("1") {
             snapshot["supervisor"] = self.supervisor_view(now);
         }
+        // Left out, as the supervisor is, while accounts are off.
+        if self.usage_setting("AGENT_ACCOUNTS_DIR").is_some() {
+            snapshot["accounts"] = self.accounts_view(now);
+        }
         snapshot
+    }
+
+    /// Each account folder with its last sign-in check and its usage, never checked again here:
+    /// asking an agent's CLI is the launcher's and `harness accounts`'s to do.
+    fn accounts_view(&self, now: f64) -> Value {
+        let lookup = |key: &str| self.usage_setting(key);
+        match crate::accounts::usages(&lookup) {
+            Ok(usages) => {
+                let mut list = to_value(&usages);
+                for usage in list.as_array_mut().into_iter().flatten() {
+                    #[allow(clippy::cast_precision_loss)]
+                    let taken = usage["taken_ms"].as_u64().map(|ms| ms as f64 / 1000.0);
+                    usage["age_s"] = json!(age(taken, now));
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let days = usage["sign_in"]["expires_at"]
+                        .as_str()
+                        .and_then(|at| crate::accounts::days_left(at, now.max(0.0) as u64));
+                    usage["sign_in_days_left"] = json!(days);
+                }
+                json!({"error": null, "accounts": list})
+            }
+            Err(error) => json!({"error": self.describe(&error), "accounts": []}),
+        }
     }
 
     fn fleet_view(&self, issue_titles: &HashMap<i64, (String, String)>, now: f64) -> Value {
@@ -721,7 +748,10 @@ impl Collector {
                 #[allow(clippy::cast_precision_loss)]
                 let taken = agent["taken_ms"].as_u64().map(|ms| ms as f64 / 1000.0);
                 agent["age_s"] = json!(age(taken, now));
-                let name = agent["agent"].as_str().unwrap_or_default().to_owned();
+                let mut name = agent["agent"].as_str().unwrap_or_default().to_owned();
+                if let Some(account) = agent["account"].as_str() {
+                    name = format!("{name}@{account}");
+                }
                 agent["cooling"] = json!(pool.cooling.contains(&name));
             }
         }

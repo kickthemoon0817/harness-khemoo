@@ -3285,3 +3285,98 @@ fn the_supervisor_panel_shows_the_directive_its_runs_and_log_and_is_left_out_whi
     assert!(panel.contains("exit=0 duration=40s reason=first"));
     assert!(panel.contains("apply: one vendor at a time"));
 }
+
+#[test]
+fn accounts_show_their_sign_in_and_count_on_their_own() {
+    let harness = FixtureHarness::new();
+    let root = harness.home.join("agent-accounts");
+    for name in ["work", "home"] {
+        let dir = root.join("claude").join(format!("claude-{name}"));
+        std::fs::create_dir_all(&dir).ok();
+        write_usage_cache(&dir.join("usage-cache.json"), 10, 20);
+    }
+    std::fs::create_dir_all(harness.state.join("accounts")).ok();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ends = crate::supervisor::iso_of(PINNED_EPOCH as u64 + 2 * 86_400);
+    std::fs::write(
+        harness.state.join("accounts/claude@work.json"),
+        json!({"state": "signed_in", "method": "claude.ai", "expires_at": ends, "checked_at": now})
+            .to_string(),
+    )
+    .ok();
+    std::fs::write(
+        harness.state.join("accounts/claude@home.json"),
+        json!({"state": "signed_out", "method": null, "expires_at": null, "checked_at": now})
+            .to_string(),
+    )
+    .ok();
+    std::fs::remove_file(harness.state.join("tick-model")).ok();
+    let mut config = harness.config();
+    config.usage_settings = vec![
+        (
+            "TICK_MODELS".to_owned(),
+            "claude@work:claude-opus-5-5 claude@home:claude-opus-5-5".to_owned(),
+        ),
+        ("MAX_SLOTS".to_owned(), "4".to_owned()),
+        ("AGENT_ACCOUNTS_DIR".to_owned(), root.display().to_string()),
+    ];
+    let snapshot = harness.collector_with(config, pinned()).snapshot();
+    let caps: Vec<(Value, Value, Value)> = snapshot["usage"]["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|agent| {
+            (
+                agent["account"].clone(),
+                agent["cap"].clone(),
+                agent["sign_in"]["state"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        caps,
+        [
+            (json!("work"), json!(4), json!("signed_in")),
+            (json!("home"), json!(0), json!("signed_out")),
+        ]
+    );
+    assert_eq!(snapshot["usage"]["pool_cap"], 4);
+    let listed: Vec<(Value, Value)> = snapshot["accounts"]["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|account| {
+            (
+                account["account"].clone(),
+                account["sign_in_days_left"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [(json!("home"), json!(null)), (json!("work"), json!(2))]
+    );
+    let rendered = page(&snapshot);
+    for text in [
+        "claude@work five_hour",
+        "Accounts",
+        "signed in (claude.ai)",
+        "under 3 days",
+        "signed out",
+    ] {
+        assert!(rendered.contains(text), "{text}");
+    }
+}
+
+#[test]
+fn accounts_off_leave_the_snapshot_and_the_page_as_they_were() {
+    let harness = FixtureHarness::new();
+    let snapshot = harness.collector().snapshot();
+    assert!(snapshot.get("accounts").is_none());
+    let rendered = page(&snapshot);
+    assert!(!rendered.contains("data-section=\"accounts\""));
+    assert!(!rendered.contains("<h2>Accounts"));
+}
